@@ -35,6 +35,7 @@ const RUNS_SUBDIR = '.claude/dag/runs'
 const USAGE = 'Usage: /dag [list | run <definition.json|.yaml> | status <run_id> | cancel <run_id> | retry <run_id> [node_id...] | enforce [strict|guide|off]]; /dag alone opens the DAG pane.'
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'guide', 'off']
 const REPORT_LIMIT = 4_000_000
+const HOLD_LIMIT_MS = 3_600_000
 const PANE_ID = 'dag'
 const PREFS_KEY = 'collapse-prefs'
 
@@ -55,6 +56,7 @@ let t: Strings = stringsFor('en')
 let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
 let planningLoaded = false
+let interactive = true
 let extraAllowed: ReadonlySet<string> = new Set()
 const reportDirsMade = new Set<string>()
 const activity = new Map<string, Activity>()
@@ -407,6 +409,22 @@ async function pollTranscripts($: EngineInterface): Promise<void> {
   }
 }
 
+async function holdUntilSettled($: EngineInterface): Promise<void> {
+  const deadline = (await $.clock.now()) + HOLD_LIMIT_MS
+  while (hasActiveRun()) {
+    if ((await $.clock.now()) >= deadline) {
+      $.ui.log(`stopped holding the session open after ${HOLD_LIMIT_MS / 60_000} minutes; a DAG run is still active`)
+      return
+    }
+    try {
+      await $.process.run(['sleep', '1'])
+    } catch (error) {
+      $.ui.log(`could not keep the session open for the active DAG run: ${message(error)}`)
+      return
+    }
+  }
+}
+
 function hasActiveRun(): boolean {
   return [...runs.values()].some(r => r.sessionId === sessionId && r.status === 'running')
 }
@@ -513,6 +531,7 @@ export function register(on: On, options: PluginOptions) {
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
 
   on('session.start', async ($, e, next) => {
+    interactive = e.isInteractive
     sessionId = await $.session.id()
     await $.tool.register({ name: 'dag', description: TOOL_DESCRIPTION, inputSchema: INPUT_SCHEMA })
     try {
@@ -612,6 +631,7 @@ export function register(on: On, options: PluginOptions) {
         })
       })
     }
+    if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($)
     return next(e)
   })
 

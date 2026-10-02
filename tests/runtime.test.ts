@@ -48,6 +48,7 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   const ran: string[][] = []
   on('process.run', ($: any, e: any) => {
     ran.push(e.argv)
+    if (e.argv[0] === 'sleep') return { deny: 'sleep is not available in tests' }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('fs.list', () => ({
@@ -68,7 +69,11 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   })
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('command.register', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
+  const logs: string[] = []
+  on('ui.log', ($: any, e: any) => {
+    logs.push(e.text)
+    return { value: undefined }
+  })
   const contexts: unknown[] = []
   on('prompt.submit', ($: any, e: any) => {
     submitted.push(e.text)
@@ -87,7 +92,7 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   on('turn.complete', () => ({ text: '' }))
   on('skill.prompt', ($: any, e: any) => ({ text: e.text }))
   on('classic.SessionStart', () => ({}))
-  return { clock, files, spawns, submitted, contexts, stopped, store, opened, ran, delivered }
+  return { clock, files, spawns, submitted, contexts, stopped, store, opened, ran, delivered, logs }
 }
 
 const PANE = {
@@ -390,6 +395,31 @@ test('start audits the node prompt contract and asks for a verification node', a
   expect(loose.value.warnings[3]).toContain('no verification node')
   const strictOk = await callDag($, { action: 'start', definition: COMPLIANT })
   expect(strictOk.value.warnings).toEqual([])
+})
+
+test('a non-interactive session tries to hold its turn open while a run is active', async ($, on) => {
+  const h = harness(on)
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' } as any)
+  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' } as any)
+  await callDag($, { action: 'start', definition: CHAIN })
+  await $.turn.complete({ turnId: 'main', answer: 'started', durationMs: 1, isAborted: false, reason: 'answer', usage: null } as any)
+  expect(h.ran.filter(argv => argv[0] === 'sleep').length).toBe(1)
+  expect(h.logs.some(line => line.startsWith('could not keep the session open for the active DAG run'))).toBe(true)
+})
+
+test('a non-interactive session with no active run ends its turn at once', async ($, on) => {
+  const h = harness(on)
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' } as any)
+  await $.turn.complete({ turnId: 'main', answer: 'nothing', durationMs: 1, isAborted: false, reason: 'answer', usage: null } as any)
+  expect(h.ran.some(argv => argv[0] === 'sleep')).toBe(false)
+})
+
+test('an interactive session ends its turn at once while a run is active', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await callDag($, { action: 'start', definition: CHAIN })
+  await $.turn.complete({ turnId: 'main', answer: 'started', durationMs: 1, isAborted: false, reason: 'answer', usage: null } as any)
+  expect(h.ran.some(argv => argv[0] === 'sleep')).toBe(false)
 })
 
 test('/dag run also reads a YAML definition', async ($, on) => {
