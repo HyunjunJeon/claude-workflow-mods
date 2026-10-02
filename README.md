@@ -34,7 +34,7 @@ claude --plugin-dir /path/to/claude-workflow-mods
 
 ## 강제
 
-기본값인 `strict`에서는 세 가지가 함께 동작합니다.
+기본값인 `strict`에서는 네 가지가 함께 동작합니다.
 
 1. **도구 게이트**: 메인 대화에서 모델이 호출하는 도구 중 다음을 제외한 모든 도구를 거부합니다. 거부할 때는 "이 작업을 DAG 노드로 옮겨 `start`나 `amend`하라"는 안내를 돌려줍니다.
    - 허용: dag 도구, Read, LSP, WebFetch/WebSearch, AskUserQuestion, 계획 모드, 작업 조회·중단(TaskList/TaskGet/TaskStop), 읽기 전용 Bash
@@ -44,7 +44,18 @@ claude --plugin-dir /path/to/claude-workflow-mods
 2. **프로토콜 주입**: 사용자 프롬프트마다 "계획을 DAG로 짜서 실행하고, 의존 관계를 정확히 적고, 정착 요약을 확인하라"는 짧은 지침을 붙입니다.
 3. **도구 설명**: dag 도구 설명에 같은 원칙을 넣습니다.
 
-`guide`는 2·3만 적용하고, `off`는 아무것도 하지 않습니다. 다른 도구를 메인에서 계속 쓰려면 `main_allowed_tools` 설정에 이름을 추가합니다.
+4. **계획 스킬 게이트**: 세션의 첫 `start`/`amend`는 `dag-workflow:dag-planning` 스킬을 불러오기 전까지 `planning_skill_required`로 거부됩니다([계획 스킬](#계획-스킬)). `/clear`하면 다시 불러와야 합니다. 사용자가 직접 실행하는 `/dag run`은 게이트하지 않습니다.
+
+`guide`는 2·3만 적용하고 스킬을 안 불렀으면 경고만 남기며, `off`는 아무것도 하지 않습니다. 다른 도구를 메인에서 계속 쓰려면 `main_allowed_tools` 설정에 이름을 추가합니다.
+
+## 계획 스킬
+
+omo mass-ulw의 스킬 구조를 따른 `skills/dag-planning/`이 플러그인에 들어 있습니다(`/dag-workflow:dag-planning`).
+
+- `SKILL.md`: 언제 쓰나, 정의 형태(노드 필드, dependsOn으로 결과가 흐르는 방식), 목표 우선, 실행·복구(retry/amend/send/cancel)·감독 방법, 메인 대화가 할 수 있는 일
+- `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응
+
+mod는 이 스킬을 강제와 연결합니다. 프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/check/test/review/audit가 있고 다른 노드에 의존)가 없으면 경고합니다. 경고는 실행을 막지 않습니다.
 
 ## 결과 전달
 
@@ -96,7 +107,7 @@ YAML은 DAG 정의에 필요한 부분집합만 지원합니다(매핑, 시퀀�
 
 | 액션 | 동작 |
 | --- | --- |
-| `start {definition}` | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict` |
+| `start {definition}` | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict`. 결과에 계약 점검 `warnings` 포함 |
 | `snapshot {run_id}` / `list` | 상태 조회(노드 답변 발췌 포함) |
 | `wait {run_id}` | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다 |
 | `cancel {run_id, reason}` | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단 |
