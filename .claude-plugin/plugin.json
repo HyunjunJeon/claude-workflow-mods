@@ -1,0 +1,51 @@
+{
+  "name": "dag-workflow",
+  "version": "0.1.0",
+  "description": "Dependency-ordered DAG workflows of Claude Code subagents, with a live DAG pane",
+  "author": { "name": "jhj" },
+  "userConfig": {
+    "enforcement": {
+      "type": "string",
+      "title": "DAG enforcement",
+      "description": "strict: the main conversation may only plan, read and orchestrate, and all work runs in DAG nodes; guide: only instruct; off: no enforcement",
+      "options": ["strict", "guide", "off"],
+      "default": "strict"
+    },
+    "main_allowed_tools": {
+      "type": "string",
+      "title": "Extra main-conversation tools",
+      "description": "Tool names the main conversation may still call under strict enforcement, besides the read-only and orchestration tools",
+      "multiple": true,
+      "default": []
+    },
+    "language": {
+      "type": "string",
+      "title": "DAG pane language",
+      "description": "Language of the DAG pane: en or ko",
+      "options": ["en", "ko"],
+      "default": "en"
+    },
+    "max_concurrent": {
+      "type": "number",
+      "title": "Parallel nodes per run",
+      "description": "How many nodes of one DAG run may run at the same time",
+      "default": 8,
+      "min": 1,
+      "max": 32
+    },
+    "node_messages": {
+      "type": "string",
+      "title": "Node hand-back messages",
+      "description": "compact: the main session gets a short progress note instead of each finished node's full report (kept in the run snapshot); full: keep Claude Code's default hand-back",
+      "options": ["compact", "full"],
+      "default": "compact"
+    },
+    "retention_days": {
+      "type": "number",
+      "title": "Checkpoint retention (days)",
+      "description": "Settled runs from other sessions older than this are pruned at startup; 0 keeps everything",
+      "default": 14,
+      "min": 0
+    }
+  }
+}

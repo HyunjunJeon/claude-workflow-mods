@@ -1,0 +1,4 @@
+{
+  "description": "dag-workflow hooks module",
+  "modules": ["./register.ts"]
+}
