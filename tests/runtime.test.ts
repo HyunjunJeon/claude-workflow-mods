@@ -85,6 +85,8 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
     return { result: 'stopped' }
   })
   on('turn.complete', () => ({ text: '' }))
+  on('skill.prompt', ($: any, e: any) => ({ text: e.text }))
+  on('classic.SessionStart', () => ({}))
   return { clock, files, spawns, submitted, contexts, stopped, store, opened, ran, delivered }
 }
 
@@ -96,6 +98,11 @@ const PANE = {
   viewport: { columns: 140, rows: 40 },
   props: { title: 'DAG', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
+
+async function boot($: any, withPlanningSkill = true) {
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  if (withPlanningSkill) await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' })
+}
 
 async function callDag($: any, input: Record<string, unknown>) {
   const reply = await $.tool.call({ tool: TOOL, ...input })
@@ -117,7 +124,7 @@ function nodeStates(snapshot: { nodes: { id: string; state: string }[] }) {
 
 test('a fan-in DAG runs in waves, checkpoints every change and announces when it settles', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
 
   const started = await callDag($, { action: 'start', definition: FAN_IN })
   const runId = started.value.run_id
@@ -148,7 +155,7 @@ test('a fan-in DAG runs in waves, checkpoints every change and announces when it
 
 test('a failed node skips its dependents, settles as failed, and retry runs it again', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: CHAIN })).value.run_id
 
   await finishAgent($, h, 'agent-1', 'could not\nDAG_NODE_STATUS: failed: missing input')
@@ -167,7 +174,7 @@ test('a failed node skips its dependents, settles as failed, and retry runs it a
 
 test('start is idempotent per key and refuses a different definition under the same key', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const first = await callDag($, { action: 'start', definition: CHAIN })
   const again = await callDag($, { action: 'start', definition: CHAIN })
   expect(again.value).toMatchObject({ reused: true, run_id: first.value.run_id })
@@ -182,7 +189,7 @@ test('start is idempotent per key and refuses a different definition under the s
 
 test('cancel stops running node agents and the run settles as cancelled', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: FAN_IN })).value.run_id
 
   const cancelled = (await callDag($, { action: 'cancel', run_id: runId, reason: 'plan changed' })).value
@@ -203,7 +210,7 @@ test('send steers a running node and refuses a finished one', async ($, on) => {
     sent.push({ to: e.to, text: e.text })
     return { isDelivered: true }
   })
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: CHAIN })).value.run_id
 
   const ok = await callDag($, { action: 'send', run_id: runId, node_id: 'a', message: 'Skip the vendored dir' })
@@ -216,7 +223,7 @@ test('send steers a running node and refuses a finished one', async ($, on) => {
 
 test('/dag run starts a definition file and /dag status prints its nodes', async ($, on) => {
   const h = harness(on, { '/work/flows/fan.json': JSON.stringify(FAN_IN) })
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
 
   const out = await $.command.run({ command: 'dag', args: 'run flows/fan.json', ...COMMAND_CONTEXT })
   expect(out.text).toContain('Fan in')
@@ -231,7 +238,7 @@ test('/dag run starts a definition file and /dag status prints its nodes', async
 
 test('a node hand-back reaches the main session as a short note and still decides the node outcome', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: CHAIN })).value.run_id
 
   await $.tool.call({ tool: 'SubagentHandback', agentId: 'agent-1', message: 'a very long report body\n## Output\ninput.csv was missing\nDAG_NODE_STATUS: failed: input missing' } as any)
@@ -258,7 +265,7 @@ test('a node whose report only reached its transcript still gets its outcome fro
       { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'h', tool: 'SubagentHandback', input: { message: 'tried\nDAG_NODE_STATUS: failed: disk full' }, result: { success: true } }] },
     ],
   }))
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: CHAIN })).value.run_id
   await finishAgent($, h, 'agent-1', '')
   const snap = (await callDag($, { action: 'snapshot', run_id: runId })).value
@@ -268,7 +275,7 @@ test('a node whose report only reached its transcript still gets its outcome fro
 
 test('strict enforcement refuses work tools in the main conversation and lets nodes and the plugin through', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
 
   const edit = await $.tool.call({ tool: 'Edit', file_path: '/work/a.ts', old_string: 'a', new_string: 'b' } as any)
   expect(edit.deny).toContain('dag-workflow refused Edit in the main conversation')
@@ -297,7 +304,7 @@ test('strict enforcement refuses work tools in the main conversation and lets no
 
 test('every main-session prompt carries the DAG protocol unless enforcement is off', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   await $.prompt.submit({ text: 'add a login page' } as any)
   expect(JSON.stringify(h.contexts[0])).toContain('DAG orchestration is mandatory')
   await $.command.run({ command: 'dag', args: 'enforce off', ...COMMAND_CONTEXT })
@@ -307,7 +314,7 @@ test('every main-session prompt carries the DAG protocol unless enforcement is o
 
 test('a dependent node receives its dependencies\' outputs and the settle summary carries every output', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: { ...FAN_IN, goal: 'Ship the merged file' } })).value.run_id
   expect(h.spawns[0]?.prompt).toContain('Overall goal of the workflow: Ship the merged file')
 
@@ -331,10 +338,64 @@ test('a dependent node receives its dependencies\' outputs and the settle summar
   expect(summary).toContain(`full report: ${RUNS}/${runId}/c.md`)
 })
 
+const COMPLIANT = {
+  key: 'compliant',
+  nodes: [
+    { id: 'make', prompt: 'TASK: Create x.txt. DELIVERABLE: x.txt. SCOPE: write x.txt only. VERIFY: cat x.txt. STOP WHEN: x.txt exists.' },
+    { id: 'verify', dependsOn: ['make'], prompt: 'TASK: Check x.txt. DELIVERABLE: a PASS/FAIL line. SCOPE: read only. VERIFY: cat x.txt. STOP WHEN: the line is reported.' },
+  ],
+}
+
+test('strict mode refuses the first plan until the dag-planning skill is loaded, and /clear resets it', async ($, on) => {
+  const h = harness(on)
+  await boot($, false)
+  const refused = await callDag($, { action: 'start', definition: CHAIN })
+  expect(refused.isError).toBe(true)
+  expect(refused.value.error.code).toBe('planning_skill_required')
+  expect(refused.value.error.message).toContain('dag-workflow:dag-planning')
+  expect((await callDag($, { action: 'amend', run_id: 'dag_x', definition: CHAIN })).value.error.code).toBe('planning_skill_required')
+  expect((await callDag($, { action: 'list' })).isError).toBe(undefined)
+  expect(h.spawns.length).toBe(0)
+
+  await $.tool.call({ tool: 'Skill', skill: 'dag-workflow:dag-planning' } as any)
+  const started = await callDag($, { action: 'start', definition: CHAIN })
+  expect(started.isError).toBe(undefined)
+  expect(h.spawns.length).toBe(1)
+
+  await $.classic.SessionStart({ source: 'clear' } as any)
+  expect((await callDag($, { action: 'start', definition: FAN_IN })).value.error.code).toBe('planning_skill_required')
+  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' } as any)
+  expect((await callDag($, { action: 'start', definition: FAN_IN })).isError).toBe(undefined)
+})
+
+test('guide mode and the user\'s /dag run start without the skill; guide reminds through a warning', async ($, on) => {
+  const h = harness(on, { '/work/flow.json': JSON.stringify(COMPLIANT) })
+  await boot($, false)
+  const ran = await $.command.run({ command: 'dag', args: 'run flow.json', ...COMMAND_CONTEXT })
+  expect(ran.text).toContain('compliant')
+  expect(h.spawns.length).toBe(1)
+
+  await $.command.run({ command: 'dag', args: 'enforce guide', ...COMMAND_CONTEXT })
+  const started = await callDag($, { action: 'start', definition: { ...COMPLIANT, key: 'guided' } })
+  expect(started.isError).toBe(undefined)
+  expect(started.value.warnings).toEqual(['the dag-workflow:dag-planning skill is not loaded in this session - load it and follow its node prompt contract.'])
+})
+
+test('start audits the node prompt contract and asks for a verification node', async ($, on) => {
+  harness(on)
+  await boot($)
+  const loose = await callDag($, { action: 'start', definition: FAN_IN })
+  expect(loose.value.warnings.length).toBe(4)
+  expect(loose.value.warnings[0]).toContain('node "a": the prompt lacks TASK: and STOP WHEN')
+  expect(loose.value.warnings[3]).toContain('no verification node')
+  const strictOk = await callDag($, { action: 'start', definition: COMPLIANT })
+  expect(strictOk.value.warnings).toEqual([])
+})
+
 test('/dag run also reads a YAML definition', async ($, on) => {
   const yaml = 'key: yaml-flow\nnodes:\n  - id: one\n    prompt: First\n  - id: two\n    dependsOn: [one]\n    prompt: |\n      Second\n'
   const h = harness(on, { '/work/flow.yaml': yaml, '/work/bad.yml': 'key: x\nnodes: {a: 1}\n' })
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const out = await $.command.run({ command: 'dag', args: 'run flow.yaml', ...COMMAND_CONTEXT })
   expect(out.text).toContain('yaml-flow')
   expect(h.spawns.length).toBe(1)
@@ -345,7 +406,7 @@ test('/dag run also reads a YAML definition', async ($, on) => {
 
 test('the DAG pane opens with a run, draws its layers, and remembers folded nodes', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: FAN_IN })).value.run_id
   expect(h.opened[0]).toMatchObject({ id: 'dag', title: 'DAG' })
   expect(h.opened[0]?.focus).toBe(undefined)
@@ -370,7 +431,7 @@ test('the DAG pane opens with a run, draws its layers, and remembers folded node
 
 test('/dag alone opens the pane with focus for the user', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const out = await $.command.run({ command: 'dag', args: '', ...COMMAND_CONTEXT })
   expect(out.text).toBe(undefined)
   expect(h.opened[0]).toMatchObject({ id: 'dag', focus: true, closeOnEscape: true })
@@ -381,7 +442,7 @@ test('/dag alone opens the pane with focus for the user', async ($, on) => {
 
 test('amend through the tool re-runs only the changed node and its dependents', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: CHAIN })).value.run_id
   await finishAgent($, h, 'agent-1', 'A done')
   await finishAgent($, h, 'agent-2', 'B done')
@@ -401,7 +462,7 @@ test('a streaming node agent shows live activity in the pane', async ($, on) => 
     yield { kind: 'text', index: 0, text: 'drafting a.txt' }
     return { turnId: e.turnId, index: e.index, answer: 'drafting a.txt', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   await callDag($, { action: 'start', definition: FAN_IN })
   const stream = ($.turn.step as any)({ turnId: 't', index: 0, model: 'claude-test', messageCount: 1, agentId: 'agent-1' })
   let step = await stream.next()
@@ -421,7 +482,7 @@ test('a node without stream events shows activity read from its transcript', asy
       { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'x', tool: 'Bash', input: {} }] },
     ],
   }))
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const runId = (await callDag($, { action: 'start', definition: CHAIN })).value.run_id
   await h.clock.advance(2_000)
   await callDag($, { action: 'snapshot', run_id: runId })
@@ -433,7 +494,7 @@ test('a node without stream events shows activity read from its transcript', asy
 
 test('the tasks view shows other subagents of the session', async ($, on) => {
   harness(on, {}, 1_000, [{ id: 'other-1', description: 'Explore the auth module', type: 'Explore', status: 'running' }])
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   const ui = await $.ui.mount(PANE as any)
   await ui.press({ key: 'view-mode' })
   expect(await ui.find({ type: 'Text', text: 'Tasks (1)' })).toBeDefined()
@@ -450,7 +511,7 @@ test('startup prunes expired checkpoints of other sessions', async ($, on) => {
     nodes: [{ id: 'a', label: 'a', state: 'completed', attempt: 1, fingerprint: 'f' }],
   }
   const h = harness(on, { [`${RUNS}/dag_ancient.json`]: JSON.stringify(old) }, 30 * day)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
   expect(h.ran.some(argv => argv[0] === 'rm' && String(argv[2]).endsWith('dag_ancient.json'))).toBe(true)
   const listed = await callDag($, { action: 'list' })
   expect(listed.value.runs).toEqual([])
@@ -474,7 +535,7 @@ test('a restarted session re-queues running nodes whose agents are gone', async 
     ],
   }
   const h = harness(on, { [`${RUNS}/dag_old.json`]: JSON.stringify(stale) })
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await boot($)
 
   expect(h.spawns.length).toBe(1)
   expect(h.spawns[0]?.prompt).toContain('attempt 2')

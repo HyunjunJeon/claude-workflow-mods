@@ -2,7 +2,8 @@ import type { EngineInterface, On, PluginOptions } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
-import { denyMessage, mainLoopVerdict, protocolFor, type Enforcement } from './engine/policy.ts'
+import { lintDefinition } from './engine/lint.ts'
+import { denyMessage, isPlanningSkill, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
 import {
   amendRun,
   cancelRun,
@@ -53,6 +54,7 @@ let retentionDays = 14
 let t: Strings = stringsFor('en')
 let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
+let planningLoaded = false
 let extraAllowed: ReadonlySet<string> = new Set()
 const reportDirsMade = new Set<string>()
 const activity = new Map<string, Activity>()
@@ -223,11 +225,16 @@ async function startDefinition($: EngineInterface, input: unknown): Promise<Tool
   view = { ...view, runIndex: 0 }
   const started = (await tick($, runId)) ?? created
   await openPane($, false)
+  const warnings = [
+    ...lintDefinition(parsed.value),
+    ...(planningLoaded || enforcement === 'off' ? [] : [`the ${PLANNING_SKILL} skill is not loaded in this session - load it and follow its node prompt contract.`]),
+  ]
   return ok({
     reused: false,
     run_id: runId,
     snapshot: snapshotOf(started, 0),
-    note: 'The run continues in the background. You will receive a message when it settles; do not poll.',
+    warnings,
+    note: 'The run continues in the background. You will receive a message when it settles; do not poll. Treat every warning as a defect in the definition.',
   })
 }
 
@@ -287,7 +294,11 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
     runs.set(run.runId, amended.value.run)
-    return ok({ rerun: amended.value.rerun, snapshot: snapshotOf((await tick($, run.runId)) ?? amended.value.run, 0) })
+    return ok({
+      rerun: amended.value.rerun,
+      snapshot: snapshotOf((await tick($, run.runId)) ?? amended.value.run, 0),
+      warnings: lintDefinition(parsed.value),
+    })
   }
   if (input.action === 'send') {
     const node = run.nodes.find(n => n.id === input.node_id)
@@ -535,6 +546,7 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
+    if (e.source === 'clear') planningLoaded = false
     const previous = sessionId
     sessionId = await $.session.id()
     if (previous && previous !== sessionId) {
@@ -562,6 +574,11 @@ export function register(on: On, options: PluginOptions) {
     return step.value
   })
 
+  on('skill.prompt', async ($, e, next) => {
+    if (isPlanningSkill(e.skill)) planningLoaded = true
+    return next(e)
+  })
+
   on('prompt.submit', async ($, e, next) => {
     if (enforcement === 'off') return next(e)
     return next({ ...e, context: [...(e.context ?? []), protocolFor(enforcement)] })
@@ -570,6 +587,7 @@ export function register(on: On, options: PluginOptions) {
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
     if (!agentId) {
+      if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) planningLoaded = true
       if (enforcement !== 'strict' || next.origin.plugin !== 'engine') return next(e)
       const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
       if (verdict.allowed) return next(e)
@@ -597,7 +615,11 @@ export function register(on: On, options: PluginOptions) {
     return next(e)
   })
 
-  on('tool.call', { tool: 'mcp__dag-workflow__dag' }, async ($, e) => serialized(() => handleTool($, e))).catch(async ($, e, next) => {
+  on('tool.call', { tool: 'mcp__dag-workflow__dag' }, async ($, e) => {
+    const opensPlan = e.action === 'start' || e.action === 'amend'
+    if (!e.agentId && opensPlan && enforcement === 'strict' && !planningLoaded) return err(planningRequired())
+    return serialized(() => handleTool($, e))
+  }).catch(async ($, e, next) => {
     return err({ code: `hook_${next.error.kind}`, message: `The dag tool failed: ${next.error.message}` })
   })
 

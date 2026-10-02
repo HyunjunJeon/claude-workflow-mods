@@ -1,6 +1,20 @@
+import type { EngineError } from './types.ts'
+
 export type Enforcement = 'strict' | 'guide' | 'off'
 
 export const DAG_TOOL = 'mcp__dag-workflow__dag'
+export const PLANNING_SKILL = 'dag-workflow:dag-planning'
+
+export function isPlanningSkill(name: unknown): boolean {
+  return typeof name === 'string' && /(^|:)dag-planning$/.test(name.trim().replace(/^\//, ''))
+}
+
+export function planningRequired(): EngineError {
+  return {
+    code: 'planning_skill_required',
+    message: `Load the planning doctrine before the first DAG of this session: call the Skill tool with skill "${PLANNING_SKILL}", read the reference file it names in full, write the run plan, then call start again.`,
+  }
+}
 
 export const MAIN_LOOP_TOOLS: ReadonlySet<string> = new Set([
   DAG_TOOL,
@@ -156,7 +170,7 @@ export function denyMessage(tool: string, reason: string): string {
   return [
     `dag-workflow refused ${tool} in the main conversation: ${reason}.`,
     'DAG orchestration is mandatory here: this conversation only plans, reads (Read, LSP, read-only Bash, web), asks and orchestrates.',
-    `Put this work into a DAG node instead: call ${DAG_TOOL} with action "start" (a new plan; a one-step task is a one-node DAG) or "amend" (add or change nodes of the current run).`,
+    `Put this work into a DAG node instead: plan it with the ${PLANNING_SKILL} skill, then call ${DAG_TOOL} with action "start" (a new plan; a one-step task is a one-node DAG) or "amend" (add or change nodes of the current run).`,
     'Nodes run as subagents with every tool, receive the outputs of the nodes they depend on, and report back when the run settles.',
   ].join('\n')
 }
@@ -167,6 +181,9 @@ export function protocolFor(level: Enforcement): string {
     : 'Prefer doing all work inside DAG nodes; this main conversation should plan, orchestrate and verify.'
   return [
     '[dag-workflow] DAG orchestration is mandatory for this task.',
+    level === 'strict'
+      ? `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it; start is refused until you do.`
+      : `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it.`,
     `- Plan the task as a DAG and run it with ${DAG_TOOL} (action "start"); a one-step task is a one-node DAG. Do not keep plans in TodoWrite or TaskCreate.`,
     `- ${rule}`,
     '- Model the real dependencies: a node lists in dependsOn every node whose result it needs; independent nodes run in parallel; keep their write scopes disjoint.',

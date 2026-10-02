@@ -1,6 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { extractOutput } from '../hooks/engine/node-prompt.ts'
-import { mainLoopVerdict, protocolFor, readOnlyBashProblem } from '../hooks/engine/policy.ts'
+import { parseDefinition } from '../hooks/engine/definition.ts'
+import { isVerificationNode, lintDefinition } from '../hooks/engine/lint.ts'
+import { isPlanningSkill, mainLoopVerdict, protocolFor, readOnlyBashProblem } from '../hooks/engine/policy.ts'
 
 const NONE = new Set<string>()
 
@@ -49,7 +51,34 @@ test('the main conversation keeps read and orchestration tools only', async () =
   expect(mainLoopVerdict('mcp__github__create_issue', {}, new Set(['mcp__github__create_issue']))).toEqual({ allowed: true })
 })
 
+test('the planning skill is recognised by its plugin-qualified and bare names only', async () => {
+  expect(isPlanningSkill('dag-workflow:dag-planning')).toBe(true)
+  expect(isPlanningSkill('/dag-workflow:dag-planning')).toBe(true)
+  expect(isPlanningSkill('dag-planning')).toBe(true)
+  expect(isPlanningSkill('mass-ulw')).toBe(false)
+  expect(isPlanningSkill('dag-planning-extra')).toBe(false)
+  expect(isPlanningSkill(undefined)).toBe(false)
+})
+
+test('the lint flags contract gaps per node and a missing verification node only for multi-node graphs', async () => {
+  const def = (nodes: unknown[]) => {
+    const r = parseDefinition({ key: 'k', nodes })
+    if (!r.ok) throw new Error(r.error.message)
+    return r.value
+  }
+  const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
+  expect(lintDefinition(def([{ id: 'one', prompt: full }]))).toEqual([])
+  expect(lintDefinition(def([{ id: 'one', prompt: 'TASK: only a task' }]))).toEqual([
+    'node "one": the prompt lacks STOP WHEN - follow the node prompt contract (TASK, DELIVERABLE, SCOPE, VERIFY, STOP WHEN).',
+  ])
+  const noVerify = def([{ id: 'a', prompt: full }, { id: 'b', prompt: full, dependsOn: ['a'] }])
+  expect(lintDefinition(noVerify)).toEqual(['the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.'])
+  expect(lintDefinition(def([{ id: 'a', prompt: full }, { id: 'final', label: 'Run tests', prompt: full, dependsOn: ['a'] }]))).toEqual([])
+  expect(isVerificationNode({ id: 'verify', prompt: full, dependsOn: [] })).toBe(false)
+})
+
 test('the injected protocol states the rule for each enforcement level', async () => {
+  expect(protocolFor('strict')).toContain('load the dag-workflow:dag-planning skill with the Skill tool and follow it; start is refused until you do')
   expect(protocolFor('strict')).toContain('are refused here and belong inside DAG nodes')
   expect(protocolFor('guide')).toContain('Prefer doing all work inside DAG nodes')
   expect(protocolFor('strict')).toContain('mcp__dag-workflow__dag')
