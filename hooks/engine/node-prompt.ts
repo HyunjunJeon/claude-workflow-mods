@@ -7,7 +7,7 @@ export const UPSTREAM_OUTPUT_CHARS = 4_000
 const OUTPUT_HEADING = /^#{1,4}\s*Output\s*:?\s*$/im
 
 const CATEGORY_MODELS: Readonly<Record<string, string>> = {
-  quick: 'haiku',
+  quick: 'sonnet',
   'unspecified-low': 'sonnet',
   'unspecified-high': 'opus',
   'deep-low': 'sonnet',
@@ -23,9 +23,9 @@ export const CATEGORIES = Object.keys(CATEGORY_MODELS)
 
 export type UpstreamResult = { id: string; label: string; output: string; reportPath?: string }
 
-export function spawnTarget(node: NodeDef): { subagentType: string; model?: string } {
+export function spawnTarget(node: NodeDef): { subagentType: string; model: 'sonnet' | 'opus' } {
   const model = node.category ? CATEGORY_MODELS[node.category] : undefined
-  return { subagentType: node.agent ?? 'general-purpose', ...(model ? { model } : {}) }
+  return { subagentType: node.agent ?? 'general-purpose', model: model === 'opus' ? 'opus' : 'sonnet' }
 }
 
 export function truncate(text: string, limit: number): string {
@@ -66,8 +66,11 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
     `You are executing node "${def.id}" of the DAG workflow "${run.name}" (run ${run.runId}, attempt ${node.attempt + 1}).`,
     ...(run.definition.goal ? [`Overall goal of the workflow: ${run.definition.goal}`] : []),
     'Do only this node\'s task. Other nodes run in parallel or later; never do their work, and keep your writes inside this task\'s scope.',
+    'The project directory .claude/dag/ holds this workflow\'s own checkpoints and node reports. It is not part of your task: never edit it, and never count it as a change or as pre-existing project content.',
     '',
     ...skills,
+    ...(def.writes ? [`Declared write scopes (project-relative): ${def.writes.length ? def.writes.join(', ') : '(read-only)'}.`, ''] : []),
+    ...(def.verify ? [`Completion is gated by these plugin-run checks: ${JSON.stringify(def.verify)}.`, 'Your success claim does not bypass a failing check.', ''] : []),
     ...upstreamBlock(upstream),
     '<task>',
     task,

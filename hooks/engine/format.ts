@@ -69,7 +69,7 @@ export function nodeMessage(run: Run, nodeId: string, output = ''): string {
 export function settleMessage(run: Run, toolName: string): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {
-    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}`
+    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}`
     if (!n.output || budget <= 0) return head
     const excerpt = truncate(n.output, Math.min(SETTLE_OUTPUT_CHARS, budget))
     budget -= excerpt.length

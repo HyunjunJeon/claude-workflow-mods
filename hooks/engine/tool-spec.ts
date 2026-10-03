@@ -6,9 +6,11 @@ export const TOOL_DESCRIPTION = [
   'a "name", an optional "goal" (the overall objective, shown to every node) and "nodes".',
   'Each node has an "id", a self-contained "prompt" saying what to do and what to produce, optional "dependsOn" (node ids that must complete first),',
   `optional "category" for model routing (${CATEGORIES.join(', ')}), optional "agent" (a subagent type such as Explore), "label", "task_summary" and "load_skills".`,
+  'Workers use Sonnet or Opus. When Jev is enabled, a confident classification may override the proposed category; snapshot routing records the effective category and source, while model records the started worker.',
+  'Every node needs verify: one or more {kind:"file",path:"relative/path",contains?} or {kind:"command",argv:["executable","arg"]} checks. The plugin runs these before completion; missing checks refuse start/amend. Declare writes as project-relative paths for session conflict visibility.',
   'Every node automatically receives the outputs of the nodes in its dependsOn, so list as dependencies exactly the nodes whose results it needs.',
   'Ready nodes run in parallel waves; a failed node skips its dependents. Each node\'s full report is saved and its output reaches its dependents and the final summary.',
-  'Actions: start {definition}; list; snapshot {run_id}; wait {run_id} (returns the current snapshot, it cannot block);',
+  'Actions: start {definition}; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (returns the current snapshot, it cannot block);',
   'cancel {run_id, reason}; retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and their skipped dependents; completed nodes are reused);',
   'amend {run_id, definition} (re-runs only changed nodes and their dependents; also adds nodes); send {run_id, node_id, message} (steer a running node); attach {run_id} (adopt a run from another session).',
   'start returns at once. Do not poll: you receive a summary with every node\'s output when the run settles. Treat node completion claims as false until you verify them.',
@@ -26,6 +28,22 @@ const NODE_SCHEMA = {
     task_summary: { type: 'string' },
     description: { type: 'string' },
     load_skills: { type: 'array', items: { type: 'string' } },
+    writes: { type: 'array', items: { type: 'string' }, description: 'Project-relative write scopes; [] for read-only work' },
+    verify: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 16,
+      items: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['file', 'command'] },
+          path: { type: 'string' },
+          contains: { type: 'string' },
+          argv: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['kind'],
+      },
+    },
   },
   required: ['id', 'prompt'],
 }
@@ -33,7 +51,7 @@ const NODE_SCHEMA = {
 export const INPUT_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['start', 'list', 'snapshot', 'wait', 'cancel', 'retry', 'amend', 'send', 'attach'] },
+    action: { type: 'string', enum: ['start', 'list', 'context', 'decisions', 'sessions', 'snapshot', 'wait', 'cancel', 'retry', 'amend', 'send', 'attach'] },
     definition: {
       type: 'object',
       properties: {

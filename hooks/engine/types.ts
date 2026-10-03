@@ -11,6 +11,20 @@ export type NodeState =
 
 export type RunStatus = 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
+export type VerificationCheck =
+  | { kind: 'file'; path: string; contains?: string }
+  | { kind: 'command'; argv: string[] }
+
+export type VerificationEvidence = {
+  check: VerificationCheck
+  passed: boolean
+  checkedAt: number
+  exitCode?: number
+  detail: string
+}
+
+export type RecoveryKind = 'transient' | 'implementation' | 'missing-input' | 'clarification' | 'permanent'
+
 export type NodeDef = {
   id: string
   prompt: string
@@ -21,6 +35,8 @@ export type NodeDef = {
   task_summary?: string
   description?: string
   load_skills?: string[]
+  verify?: VerificationCheck[]
+  writes?: string[]
 }
 
 export type Definition = {
@@ -45,6 +61,24 @@ export type NodeRun = {
   answer?: string
   output?: string
   reportPath?: string
+  routing?: {
+    readonly source: 'jev' | 'definition'
+    readonly category: string
+    readonly confidence?: number
+  }
+  verification?: {
+    status: 'passed' | 'failed' | 'missing'
+    evidence: VerificationEvidence[]
+    reportPath?: string
+    error?: string
+  }
+  recovery?: {
+    used: number
+    kind: RecoveryKind
+    reason: string
+    model?: 'sonnet' | 'opus'
+    history: { at: number; kind: RecoveryKind; reason: string; attempt: number }[]
+  }
 }
 
 export type Run = {
@@ -61,6 +95,12 @@ export type Run = {
   nodes: NodeRun[]
   cancelReason?: string
   settledNotified?: boolean
+  handoff?: {
+    from: string
+    to: string
+    requestedAt: number
+    offeredAt?: number
+  }
 }
 
 export type EngineError = { code: string; message: string }

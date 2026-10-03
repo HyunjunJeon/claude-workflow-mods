@@ -4,6 +4,26 @@
   "description": "Dependency-ordered DAG workflows of Claude Code subagents, with a live DAG pane",
   "author": { "name": "jhj" },
   "userConfig": {
+    "auto_recovery": {
+      "type": "boolean",
+      "title": "Automatic node recovery",
+      "description": "Use confident Jev failure classification to retry within the original scope, at most two extra attempts per node; implementation fixes may use Opus",
+      "default": true
+    },
+    "jev_enabled": {
+      "type": "boolean",
+      "title": "Jev automatic decisions",
+      "description": "With TYPESAFE_API_KEY, classify DAG workers and resolve uncertain tool permissions; missing or uncertain decisions retain the existing flow",
+      "default": true
+    },
+    "jev_confidence": {
+      "type": "number",
+      "title": "Jev minimum confidence",
+      "description": "Minimum confidence for automatic category assignment or tool permission decisions",
+      "default": 0.9,
+      "min": 0,
+      "max": 1
+    },
     "enforcement": {
       "type": "string",
       "title": "DAG enforcement",

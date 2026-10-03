@@ -4,7 +4,8 @@ import { expiredRuns } from '../hooks/engine/retention.ts'
 import { createRun, markFinished, markRunning } from '../hooks/engine/run.ts'
 import { chunkArrived, finalReport, fromTranscript, isStalled, stepStarted, toolStarted, STALL_COARSE_MS, STALL_TOKEN_MS, STALL_WAIT_MS } from '../hooks/ui/activity.ts'
 import { stringsFor } from '../hooks/ui/i18n.ts'
-import { activityLine, buildPane, buildTasks, type Line } from '../hooks/ui/view-model.ts'
+import { width } from '../hooks/ui/text.ts'
+import { activityLine, buildPane, buildTasks, compactActivity, type Line } from '../hooks/ui/view-model.ts'
 
 const text = (line: Line) => line.map(s => s.text).join('')
 const EN = stringsFor('en')
@@ -55,12 +56,26 @@ test('the final report comes from the last hand-back, else the last assistant te
 })
 
 test('activity lines describe each phase and mark a stall', async () => {
-  expect(text(activityLine(stepStarted(0), 12_000, EN))).toBe('⏳ waiting for model 12s')
+  expect(text(activityLine(stepStarted(0), 12_000, EN))).toBe('… waiting for model 12s')
   expect(text(activityLine(toolStarted('Bash', 0), 65_000, EN))).toBe('▶ Bash running 1m 05s')
   const talking = chunkArrived(stepStarted(0), { kind: 'text', text: 'almost done' }, 1_000)!
   expect(text(activityLine(talking, 2_000, EN))).toBe('✎ now · …almost done')
   expect(text(activityLine(talking, 1_000 + STALL_TOKEN_MS + 1, EN))).toContain('⚠ possibly stalled')
   expect(text(activityLine(toolStarted('Bash', 0), 5_000, KO))).toBe('▶ Bash 실행 중 5s')
+  expect(text(activityLine(toolStarted('SubagentHandback', 0), 1_000, EN))).toBe('▶ hand-back running 1s')
+  expect(compactActivity(toolStarted('SubagentHandback', 0), 1_000, KO).head).toBe('▶ 결과 보고 1s')
+})
+
+test('graph boxes show activity with single-cell glyphs', async () => {
+  const thinking = chunkArrived(stepStarted(0), { kind: 'thinking' }, 1_000)!
+  const heads = [
+    compactActivity(stepStarted(0), 12_000, EN).head,
+    compactActivity(thinking, 5_000, EN).head,
+    compactActivity(toolStarted('Bash', 0), 65_000, EN).head,
+    compactActivity(stepStarted(0), STALL_WAIT_MS + 1, EN).head,
+  ]
+  expect(heads).toEqual(['… 12s', '✻ 4s', '▶ Bash 1m 05s', '⚠ … 1m 30s'])
+  for (const head of heads) expect(width(head)).toBe(head.length)
 })
 
 function fanIn(runId: string, sessionId: string, now: number) {
@@ -75,8 +90,10 @@ test('a running node card shows its live activity and the pane can speak Korean'
   const en = buildPane([run], { runIndex: 0, details: false, prefs: {} }, 3_000, { activity, t: EN })
   expect(en.cards[0]!.lines.map(text)).toContain('✎ now · …writing a.txt')
   const ko = buildPane([run], { runIndex: 0, details: false, prefs: {} }, 3_000, { activity, t: KO })
-  expect(text(ko.header)).toContain('실행 중')
-  expect(text(ko.header)).toContain('0/2 완료')
+  expect(ko.header.map(text).join('\n')).toContain('실행 중')
+  expect(ko.header.map(text).join('\n')).toContain('0/2 완료')
+  expect(en.graph!.nodes[0]).toMatchObject({ activity: '✎ now', tail: 'writing a.txt', color: 'cyan' })
+  expect(ko.graph!.nodes[0]).toMatchObject({ activity: '✎ 방금' })
   expect(text(ko.cards[1]!.header)).toContain('대기')
 })
 

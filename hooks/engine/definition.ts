@@ -1,6 +1,7 @@
 import { findCycle } from './graph.ts'
 import { hash, stableStringify } from './hash.ts'
 import { fail, type Definition, type NodeDef, type Result } from './types.ts'
+import { parseChecks, projectPath } from './verification.ts'
 
 const NODE_ID = /^[A-Za-z0-9_.-]{1,64}$/
 const OPTIONAL_TEXT = ['category', 'agent', 'label', 'task_summary', 'description'] as const
@@ -31,7 +32,19 @@ function parseNode(raw: unknown, index: number): Result<NodeDef> {
     if (typeof value !== 'string') return fail('invalid_node', `Node "${id}": ${field} must be a string.`)
     if (value.trim() !== '') node[field] = value.trim()
   }
+  if (node.agent === 'fork') {
+    return fail('invalid_node', `Node "${id}": fork inherits its parent model and cannot enforce the Sonnet worker minimum; use a non-fork agent type.`)
+  }
   if (load_skills !== undefined && load_skills.length > 0) node.load_skills = load_skills
+  if (raw.verify !== undefined) {
+    const parsed = parseChecks(raw.verify)
+    if (!parsed.ok) return parsed
+    node.verify = parsed.value
+  }
+  if (raw.writes !== undefined) {
+    if (!isStringArray(raw.writes) || !raw.writes.every(projectPath)) return fail('invalid_node', `Node "${id}": writes must be project-relative paths outside .claude.`)
+    node.writes = [...new Set(raw.writes)]
+  }
   return { ok: true, value: node }
 }
 
@@ -79,5 +92,7 @@ export function nodeFingerprint(node: NodeDef): string {
     category: node.category ?? null,
     agent: node.agent ?? null,
     dependsOn: [...node.dependsOn].sort(),
+    verify: node.verify ?? null,
+    writes: node.writes ?? null,
   }))
 }

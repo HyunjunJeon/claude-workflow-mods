@@ -105,6 +105,7 @@ export function markRunning(input: Run, id: string, agentId: string, now: number
   delete node.answer
   delete node.output
   delete node.reportPath
+  delete node.verification
   return advance(run, now)
 }
 
@@ -290,6 +291,10 @@ export type NodeSnapshot = {
   attempt: number
   task_id?: string
   category?: string
+  routing?: NodeRun['routing']
+  model?: string
+  verification?: NodeRun['verification']
+  recovery?: NodeRun['recovery']
   depends_on: string[]
   started_at?: number
   finished_at?: number
@@ -328,6 +333,10 @@ export function snapshotOf(run: Run, answerChars = 2_000): RunSnapshot {
       attempt: n.attempt,
       ...(n.agentId ? { task_id: n.agentId } : {}),
       ...(defs.get(n.id)?.category ? { category: defs.get(n.id)?.category } : {}),
+      ...(n.routing ? { routing: n.routing } : {}),
+      ...(n.model ? { model: n.model } : {}),
+      ...(n.verification ? { verification: n.verification } : {}),
+      ...(n.recovery ? { recovery: n.recovery } : {}),
       depends_on: defs.get(n.id)?.dependsOn ?? [],
       ...(n.startedAt !== undefined ? { started_at: n.startedAt } : {}),
       ...(n.finishedAt !== undefined ? { finished_at: n.finishedAt } : {}),

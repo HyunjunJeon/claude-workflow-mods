@@ -2,56 +2,71 @@ import { layers } from '../engine/graph.ts'
 import { STATUS_PREFIX } from '../engine/node-prompt.ts'
 import type { NodeRun, NodeState, Run, RunStatus } from '../engine/types.ts'
 import { isStalled, type Activity } from './activity.ts'
+import type { GraphModel, GraphNode, ViewKind } from './graph-model.ts'
+import { ACCENT, formatDuration, type Line, type Segment } from './text.ts'
 import { DEFAULT_STRINGS, type Strings } from './i18n.ts'
 
-export type Segment = { text: string; color?: string; bold?: true; dim?: true }
-export type Line = Segment[]
-export type Card = { id: string; expanded: boolean; header: Line; lines: Line[] }
-export type PaneModel = { header: Line; layers: Line[]; cards: Card[]; empty?: string }
+export type { Line, Segment } from './text.ts'
+export { formatDuration } from './text.ts'
+export type Card = { id: string; expanded: boolean; selected: boolean; header: Line; lines: Line[] }
+export type RunRow = { index: number; selected: boolean; line: Line }
+export type RunSelector = { heading: Line; rows: RunRow[]; completed: Line | null }
+export type PaneModel = {
+  header: Line[]
+  runs: RunSelector | null
+  graph: GraphModel | null
+  dependencies: Line[]
+  cards: Card[]
+  errors: Line[]
+  empty?: string
+}
 
 export type CollapsePrefs = Record<string, Record<string, boolean>>
 export type ViewMode = 'dag' | 'tasks'
-export type ViewState = { runIndex: number; details: boolean; prefs: CollapsePrefs; mode?: ViewMode }
-export type ViewContext = { activity?: ReadonlyMap<string, Activity>; t?: Strings }
+export type ViewState = {
+  runIndex: number
+  details: boolean
+  prefs: CollapsePrefs
+  mode?: ViewMode
+  selected?: string
+  showCompleted?: boolean
+  graphView?: ViewKind
+  unfold?: boolean
+}
+export type ViewContext = { activity?: ReadonlyMap<string, Activity>; t?: Strings; taskCount?: number }
 
 export type AgentSummary = { id: string; description: string; type: string; status: string }
 
 const ICON: Record<NodeState, string> = {
   pending: '○',
-  blocked: '○',
-  scheduled: '◌',
+  blocked: '◌',
+  scheduled: '◷',
   running: '●',
-  paused: '‖',
+  paused: 'Ⅱ',
   completed: '✓',
-  failed: '✗',
-  cancelled: '■',
-  skipped: '⊘',
+  failed: '×',
+  cancelled: '−',
+  skipped: '·',
 }
 
 const COLOR: Partial<Record<NodeState | RunStatus, string>> = {
-  running: 'yellow',
-  scheduled: 'cyan',
-  paused: 'magenta',
+  running: ACCENT,
+  scheduled: ACCENT,
+  blocked: 'yellow',
+  paused: 'yellow',
   completed: 'green',
   failed: 'red',
-  cancelled: 'red',
 }
 
-const STALLED_COLOR = 'magenta'
-const DIM_STATES: ReadonlySet<NodeState> = new Set(['pending', 'blocked', 'skipped'])
+const STALLED_COLOR = 'yellow'
+const DIM_STATES: ReadonlySet<NodeState> = new Set(['pending', 'skipped'])
+const SETTLED_NODES: ReadonlySet<NodeState> = new Set(['completed', 'failed', 'cancelled', 'skipped'])
+const SELECTOR_LIMIT = 5
 
 function styled(text: string, state: NodeState | RunStatus): Segment {
   const color = COLOR[state]
   if (color) return { text, color }
   return DIM_STATES.has(state as NodeState) ? { text, dim: true } : { text }
-}
-
-export function formatDuration(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000))
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
 }
 
 export function visibleRuns(all: Run[], sessionId: string): Run[] {
@@ -69,6 +84,21 @@ export function clampRunIndex(index: number, count: number): number {
   return ((index % count) + count) % count
 }
 
+function edgesOf(run: Run): { from: string; to: string }[] {
+  return run.definition.nodes.flatMap(n => n.dependsOn.map(dep => ({ from: dep, to: n.id })))
+}
+
+export function nodeOrder(run: Run): string[] {
+  return layers(run.nodes.map(n => n.id), edgesOf(run)).flat()
+}
+
+export function stepSelection(order: string[], current: string | undefined, step: 1 | -1): string | undefined {
+  if (order.length === 0) return undefined
+  const at = current === undefined ? -1 : order.indexOf(current)
+  if (at === -1) return step === 1 ? order[0] : order[order.length - 1]
+  return order[(at + step + order.length) % order.length]
+}
+
 function lastAnswerLine(answer: string | undefined): string | undefined {
   const lines = (answer ?? '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith(STATUS_PREFIX))
   return lines.at(-1)
@@ -79,6 +109,10 @@ function elapsed(node: NodeRun, now: number): string | undefined {
   return formatDuration((node.finishedAt ?? now) - node.startedAt)
 }
 
+function toolName(activity: Activity, t: Strings): string {
+  return activity.tool === 'SubagentHandback' ? t.handback : activity.tool ?? 'tool'
+}
+
 export function activityLine(activity: Activity, now: number, t: Strings): Line {
   const since = formatDuration(now - activity.since)
   const quiet = formatDuration(now - activity.lastAt)
@@ -86,10 +120,26 @@ export function activityLine(activity: Activity, now: number, t: Strings): Line 
     activity.phase === 'waiting' ? t.waitingModel(since)
       : activity.phase === 'thinking' ? `${t.thinking(since)} · ${quiet}`
         : activity.phase === 'responding' ? t.responding(activity.text ?? '')
-          : activity.phase === 'tool-input' ? t.writingTool(activity.tool ?? 'tool')
-            : t.runningTool(activity.tool ?? 'tool', since)
+          : activity.phase === 'tool-input' ? t.writingTool(toolName(activity, t))
+            : t.runningTool(toolName(activity, t), since)
   if (isStalled(activity, now)) return [{ text: `${t.stalled} · `, color: STALLED_COLOR }, { text, color: STALLED_COLOR }]
   return [{ text, dim: true }]
+}
+
+export function compactActivity(activity: Activity, now: number, t: Strings): { head: string; tail: string } {
+  const since = formatDuration(now - activity.since)
+  const gap = now - activity.lastAt
+  const ago = gap < 2_000 ? t.now : formatDuration(gap)
+  const head =
+    activity.phase === 'waiting' ? `… ${since}`
+      : activity.phase === 'thinking' ? `✻ ${ago}`
+        : activity.phase === 'responding' ? `✎ ${ago}`
+          : activity.phase === 'tool-input' ? `⚙ ${toolName(activity, t)}`
+            : `▶ ${toolName(activity, t)} ${since}`
+  return {
+    head: isStalled(activity, now) ? `⚠ ${head}` : head,
+    tail: activity.phase === 'responding' ? activity.text ?? '' : '',
+  }
 }
 
 function progressLine(node: NodeRun, activity: Activity | undefined, now: number, t: Strings): Line {
@@ -101,21 +151,54 @@ function progressLine(node: NodeRun, activity: Activity | undefined, now: number
   return [{ text: firstOutputLine ?? lastAnswerLine(node.answer) ?? t.state[node.state], dim: true }]
 }
 
-function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Required<ViewContext>): Card {
+type Ctx = { activity: ReadonlyMap<string, Activity>; t: Strings }
+
+function liveActivity(node: NodeRun, ctx: Ctx): Activity | undefined {
+  return node.agentId && node.state === 'running' ? ctx.activity.get(node.agentId) : undefined
+}
+
+function nodeColor(node: NodeRun, activity: Activity | undefined, now: number): string {
+  if (activity !== undefined && isStalled(activity, now)) return STALLED_COLOR
+  return COLOR[node.state] ?? ''
+}
+
+function graphNode(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Ctx): GraphNode {
+  const activity = liveActivity(node, ctx)
+  const live = activity ? compactActivity(activity, now, ctx.t) : { head: '', tail: '' }
+  return {
+    id: node.id,
+    label: node.label,
+    icon: ICON[node.state],
+    state: ctx.t.state[node.state],
+    color: nodeColor(node, activity, now),
+    activity: live.head,
+    tail: live.tail,
+    incoming: run.definition.nodes.find(n => n.id === node.id)?.dependsOn ?? [],
+    selected: view.selected === node.id,
+    expanded: isExpanded(run, node, view.prefs),
+    startedAt: node.startedAt ?? null,
+    finishedAt: node.finishedAt ?? null,
+  }
+}
+
+function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Ctx): Card {
   const { t } = ctx
   const def = run.definition.nodes.find(n => n.id === node.id)
   const deps = def?.dependsOn ?? []
-  const activity = node.agentId && node.state === 'running' ? ctx.activity.get(node.agentId) : undefined
-  const stalled = activity !== undefined && isStalled(activity, now)
+  const activity = liveActivity(node, ctx)
+  const color = nodeColor(node, activity, now)
+  const selected = view.selected === node.id
+  const paint = (text: string): Segment => (color ? { text, color } : DIM_STATES.has(node.state) ? { text, dim: true } : { text })
   const header: Line = [
-    stalled ? { text: `${ICON[node.state]} `, color: STALLED_COLOR } : styled(`${ICON[node.state]} `, node.state),
+    ...(selected ? [{ text: '> ', color: ACCENT, bold: true as const }] : []),
+    paint(`${ICON[node.state]} `),
     { text: node.id, bold: true },
     ...(node.label !== node.id ? [{ text: ` ${node.label}` }] : []),
-    styled(`  ${t.state[node.state]}`, node.state),
+    paint(`  ${t.state[node.state]}`),
     ...(deps.length ? [{ text: `  ← ${deps.join(', ')}`, dim: true as const }] : []),
   ]
   const expanded = isExpanded(run, node, view.prefs)
-  if (!expanded) return { id: node.id, expanded, header, lines: [] }
+  if (!expanded) return { id: node.id, expanded, selected, header, lines: [] }
 
   const who = [
     node.agentId ? `agent ${node.agentId.slice(0, 10)}` : t.notStarted,
@@ -135,38 +218,87 @@ function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Req
     const shown = node.output || node.answer
     if (shown) lines.push([{ text: shown.slice(0, 600) }])
   }
-  return { id: node.id, expanded, header, lines }
+  return { id: node.id, expanded, selected, header, lines }
+}
+
+function isActive(run: Run): boolean {
+  return run.status === 'running' || run.nodes.some(n => n.state === 'running')
+}
+
+function runSelector(runs: Run[], index: number, view: ViewState, t: Strings): RunSelector | null {
+  if (runs.length < 2) return null
+  const all = runs.map((_, i) => i)
+  const active = all.filter(i => isActive(runs[i] as Run))
+  const settled = all.filter(i => !isActive(runs[i] as Run))
+  const showCompleted = view.showCompleted === true || !active.includes(index)
+  const listed = [...active, ...(showCompleted ? settled : [])]
+  const at = Math.max(0, listed.indexOf(index))
+  const start = listed.length <= SELECTOR_LIMIT ? 0 : Math.min(Math.max(0, at - SELECTOR_LIMIT + 1), listed.length - SELECTOR_LIMIT)
+  const rows = listed.slice(start, start + SELECTOR_LIMIT).map(i => {
+    const run = runs[i] as Run
+    const selected = i === index
+    const done = run.nodes.filter(n => n.state === 'completed').length
+    const running = run.nodes.filter(n => n.state === 'running').length
+    const waiting = run.nodes.filter(n => !SETTLED_NODES.has(n.state) && n.state !== 'running').length
+    const text = `${selected ? '>' : ' '} ${run.name}  ${t.runSummary(done, run.nodes.length, running, waiting)}`
+    return { index: i, selected, line: [selected ? { text, color: ACCENT, bold: true as const } : { text }] }
+  })
+  return {
+    heading: [{ text: t.activeRuns(active.length), color: ACCENT }],
+    rows,
+    completed: settled.length ? [{ text: `${t.completedRuns(settled.length)} ${showCompleted ? '[-]' : '[+]'}` }] : null,
+  }
 }
 
 export function buildPane(runs: Run[], view: ViewState, now: number, context: ViewContext = {}): PaneModel {
-  const ctx: Required<ViewContext> = { activity: context.activity ?? new Map(), t: context.t ?? DEFAULT_STRINGS }
+  const ctx: Ctx = { activity: context.activity ?? new Map(), t: context.t ?? DEFAULT_STRINGS }
   const { t } = ctx
-  if (runs.length === 0) return { header: [{ text: 'DAG', bold: true }], layers: [], cards: [], empty: t.empty }
+  const top: Line = [{ text: `DAG  ${t.tasksSwitch(context.taskCount ?? 0)}`, color: ACCENT, bold: true }]
+  if (runs.length === 0) return { header: [top], runs: null, graph: null, dependencies: [], cards: [], errors: [], empty: t.empty }
   const index = clampRunIndex(view.runIndex, runs.length)
   const run = runs[index] as Run
   const done = run.nodes.filter(n => n.state === 'completed').length
-  const header: Line = [
-    { text: run.name, bold: true },
-    styled(`  ${t.state[run.status]}`, run.status),
-    { text: `  ${t.done(done, run.nodes.length)}`, dim: true },
-    { text: `  ${t.runOf(index + 1, runs.length, run.runId)}`, dim: true },
+  const failed = run.nodes.filter(n => n.state === 'failed').length
+  const header: Line[] = [
+    top,
+    [{ text: run.name, bold: true }, { text: `  ${t.runOf(index + 1, runs.length, run.runId)}`, dim: true }],
+    [
+      styled(t.state[run.status], run.status),
+      { text: ` · ${t.done(done, run.nodes.length)}` },
+      ...(failed ? [{ text: ` · ${t.failedCount(failed)}`, color: 'red' }] : []),
+    ],
   ]
+  const edges = edgesOf(run)
   const byId = new Map(run.nodes.map(n => [n.id, n]))
-  const edges = run.definition.nodes.flatMap(n => n.dependsOn.map(dep => ({ from: dep, to: n.id })))
-  const rows = layers(run.nodes.map(n => n.id), edges)
-  const layerLines: Line[] = rows.map((row, i) => [
-    { text: `${i + 1} `, dim: true },
-    ...row.flatMap((id, j) => {
-      const node = byId.get(id) as NodeRun
-      return [...(j > 0 ? [{ text: '  ' }] : []), styled(`${ICON[node.state]} ${id}`, node.state)]
-    }),
-  ])
-  const cards = rows.flat().map(id => cardFor(run, byId.get(id) as NodeRun, view, now, ctx))
-  return { header, layers: layerLines, cards }
+  return {
+    header,
+    runs: runSelector(runs, index, view, t),
+    graph: {
+      nodes: run.nodes.map(node => graphNode(run, node, view, now, ctx)),
+      edges,
+      view: view.graphView ?? 'auto',
+      unfold: view.unfold === true,
+      now,
+      labels: {
+        startNode: t.startNode,
+        sameFrontier: t.sameFrontier,
+        more: t.more,
+        graph: t.viewGraph,
+        lanes: t.viewLanes,
+        timeline: t.viewTimeline,
+        auto: t.viewAuto,
+        notStarted: t.timelineEmpty,
+        critical: t.critical,
+      },
+    } satisfies GraphModel,
+    dependencies: edges.length ? edges.map(e => [{ text: `  ${e.from} → ${e.to}` }]) : [[{ text: `  ${t.none}`, dim: true }]],
+    cards: nodeOrder(run).map(id => cardFor(run, byId.get(id) as NodeRun, view, now, ctx)),
+    errors: run.nodes.filter(n => n.error).map(n => [{ text: `× ${n.id}: ${n.error}`, color: 'red' }]),
+  }
 }
 
-const TASK_ICON: Record<string, string> = { running: '●', completed: '✓', failed: '✗', killed: '■' }
-const TASK_COLOR: Record<string, string> = { running: 'yellow', completed: 'green', failed: 'red', killed: 'red' }
+const TASK_ICON: Record<string, string> = { running: '●', completed: '✓', failed: '×', killed: '−' }
+const TASK_COLOR: Record<string, string> = { running: ACCENT, completed: 'green', failed: 'red' }
 
 export function buildTasks(agents: AgentSummary[], dagAgents: ReadonlySet<string>, now: number, context: ViewContext = {}): { header: Line; rows: Line[][] } {
   const t = context.t ?? DEFAULT_STRINGS
@@ -187,4 +319,8 @@ export function buildTasks(agents: AgentSummary[], dagAgents: ReadonlySet<string
     return live ? [title, [{ text: '    ' }, ...activityLine(live, now, t)]] : [title]
   })
   return { header, rows }
+}
+
+export function countTasks(agents: AgentSummary[], dagAgents: ReadonlySet<string>): number {
+  return agents.filter(a => !dagAgents.has(a.id)).length
 }

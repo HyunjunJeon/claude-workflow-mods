@@ -3,8 +3,33 @@ import type { NodeState, RunStatus } from '../engine/types.ts'
 export type Language = 'en' | 'ko'
 
 export type Strings = {
-  prevRun: string
-  nextRun: string
+  nextNode: string
+  prevNode: string
+  completedToggle: string
+  keysHint: string
+  tasksSwitch: (count: number) => string
+  dagSwitch: (count: number) => string
+  failedCount: (count: number) => string
+  activeRuns: (count: number) => string
+  completedRuns: (count: number) => string
+  runSummary: (done: number, total: number, running: number, waiting: number) => string
+  startNode: string
+  sameFrontier: string
+  dependencies: string
+  nodeDetails: string
+  none: string
+  now: string
+  more: string
+  viewGraph: string
+  viewLanes: string
+  viewTimeline: string
+  viewAuto: string
+  timelineEmpty: string
+  critical: string
+  viewSwitch: string
+  handback: string
+  fold: string
+  unfold: string
   details: string
   compact: string
   tasksView: string
@@ -31,8 +56,33 @@ export type Strings = {
 }
 
 const EN: Strings = {
-  prevRun: 'prev run',
-  nextRun: 'next run',
+  nextNode: 'next',
+  prevNode: 'prev',
+  completedToggle: 'completed runs',
+  keysHint: 'Click the graph for Tab/Shift-Tab select · Space/Enter fold · ←→ runs',
+  tasksSwitch: count => `t Tasks (${count})`,
+  dagSwitch: count => `t DAG (${count})`,
+  failedCount: count => `${count} failed`,
+  activeRuns: count => `Active runs (${count})`,
+  completedRuns: count => `Completed runs (${count})`,
+  runSummary: (done, total, running, waiting) => `${done}/${total} done · ${running} running · ${waiting} waiting`,
+  startNode: 'Start node',
+  sameFrontier: 'Same frontier',
+  dependencies: 'Dependencies',
+  nodeDetails: 'Node details',
+  none: 'none',
+  now: 'now',
+  more: '+{n} more',
+  viewGraph: 'Graph',
+  viewLanes: 'Lanes',
+  viewTimeline: 'Timeline',
+  viewAuto: 'auto',
+  timelineEmpty: 'No node has started yet.',
+  critical: 'critical path',
+  viewSwitch: 'view',
+  handback: 'hand-back',
+  fold: 'fold wide layers',
+  unfold: 'unfold wide layers',
   details: 'details',
   compact: 'compact',
   tasksView: 'tasks',
@@ -60,8 +110,8 @@ const EN: Strings = {
     cancelled: 'cancelled',
     skipped: 'skipped',
   },
-  waitingModel: elapsed => `⏳ waiting for model ${elapsed}`,
-  thinking: elapsed => `💭 thinking ${elapsed}`,
+  waitingModel: elapsed => `… waiting for model ${elapsed}`,
+  thinking: elapsed => `✻ thinking ${elapsed}`,
   responding: text => `✎ now · …${text}`,
   writingTool: tool => `⚙ ${tool} now`,
   runningTool: (tool, elapsed) => `▶ ${tool} running ${elapsed}`,
@@ -69,8 +119,33 @@ const EN: Strings = {
 }
 
 const KO: Strings = {
-  prevRun: '이전 실행',
-  nextRun: '다음 실행',
+  nextNode: '다음',
+  prevNode: '이전',
+  completedToggle: '끝난 실행',
+  keysHint: '그래프를 클릭하면 Tab/Shift-Tab 선택 · Space/Enter 접기 · ←→ 실행 전환',
+  tasksSwitch: count => `t 작업 (${count})`,
+  dagSwitch: count => `t DAG (${count})`,
+  failedCount: count => `실패 ${count}`,
+  activeRuns: count => `진행 중인 실행 (${count})`,
+  completedRuns: count => `끝난 실행 (${count})`,
+  runSummary: (done, total, running, waiting) => `${done}/${total} 완료 · 실행 중 ${running} · 대기 ${waiting}`,
+  startNode: '시작 노드',
+  sameFrontier: '같은 층',
+  dependencies: '의존 관계',
+  nodeDetails: '노드 상세',
+  none: '없음',
+  now: '방금',
+  more: '+{n}개 더',
+  viewGraph: '그래프',
+  viewLanes: '레인',
+  viewTimeline: '타임라인',
+  viewAuto: '자동',
+  timelineEmpty: '아직 시작한 노드가 없습니다.',
+  critical: '임계 경로',
+  viewSwitch: '보기',
+  handback: '결과 보고',
+  fold: '넓은 층 접기',
+  unfold: '넓은 층 펼치기',
   details: '상세',
   compact: '간단히',
   tasksView: '작업',
@@ -98,8 +173,8 @@ const KO: Strings = {
     cancelled: '취소',
     skipped: '건너뜀',
   },
-  waitingModel: elapsed => `⏳ 모델 응답 대기 ${elapsed}`,
-  thinking: elapsed => `💭 생각 중 ${elapsed}`,
+  waitingModel: elapsed => `… 모델 응답 대기 ${elapsed}`,
+  thinking: elapsed => `✻ 생각 중 ${elapsed}`,
   responding: text => `✎ 응답 중 · …${text}`,
   writingTool: tool => `⚙ ${tool} 인자 작성 중`,
   runningTool: (tool, elapsed) => `▶ ${tool} 실행 중 ${elapsed}`,

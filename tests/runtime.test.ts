@@ -1,23 +1,24 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test, type Mounted } from 'claude-code/testing'
 
 const TOOL = 'mcp__dag-workflow__dag'
 const RUNS = '/work/.claude/dag/runs'
+const VERIFY = [{ kind: 'command', argv: ['test', '-d', '/work'] }]
 
 const FAN_IN = {
   key: 'fan-in',
   name: 'Fan in',
   nodes: [
-    { id: 'a', prompt: 'Write a.txt' },
-    { id: 'b', prompt: 'Write b.txt', category: 'quick' },
-    { id: 'c', prompt: 'Merge a.txt and b.txt', dependsOn: ['a', 'b'] },
+    { id: 'a', prompt: 'Write a.txt', verify: VERIFY },
+    { id: 'b', prompt: 'Write b.txt', category: 'quick', verify: VERIFY },
+    { id: 'c', prompt: 'Merge a.txt and b.txt', dependsOn: ['a', 'b'], verify: VERIFY },
   ],
 }
 
 const CHAIN = {
   key: 'chain',
   nodes: [
-    { id: 'a', prompt: 'Step A' },
-    { id: 'b', prompt: 'Step B', dependsOn: ['a'] },
+    { id: 'a', prompt: 'Step A', verify: VERIFY },
+    { id: 'b', prompt: 'Step B', dependsOn: ['a'], verify: VERIFY },
   ],
 }
 
@@ -34,7 +35,9 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   const store = new Map<string, unknown>()
   const opened: Record<string, unknown>[] = []
   on('session.start', () => ({ cwd: '/work' }))
+  on('env.get', () => ({ value: undefined }))
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
   on('store.set', ($: any, e: any) => {
     store.set(e.key, e.value)
     return { value: undefined }
@@ -51,11 +54,12 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
     if (e.argv[0] === 'sleep') return { deny: 'sleep is not available in tests' }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
-  on('fs.list', () => ({
-    value: [...files.keys()]
-      .filter(path => path.startsWith(RUNS + '/'))
-      .map(path => ({ name: path.slice(RUNS.length + 1), kind: 'file', size: 1, mtimeMs: 0, isLink: false })),
-  }))
+  on('fs.list', ($: any, e: any) => {
+    const dir = String(e.path).replace(/\/$/, '')
+    const names = new Set<string>()
+    for (const path of files.keys()) if (path.startsWith(dir + '/')) names.add(path.slice(dir.length + 1).split('/')[0] as string)
+    return { value: [...names].map(name => ({ name, kind: files.has(`${dir}/${name}`) ? 'file' : 'directory', size: 1, mtimeMs: 0, isLink: false })) }
+  })
   on('fs.write', ($: any, e: any) => {
     files.set(e.path, e.text)
     return { value: undefined }
@@ -135,7 +139,8 @@ test('a fan-in DAG runs in waves, checkpoints every change and announces when it
   const runId = started.value.run_id
   expect(started.value.reused).toBe(false)
   expect(h.spawns.map(s => s.description)).toEqual(['Fan in: a', 'Fan in: b'])
-  expect(h.spawns[1]).toMatchObject({ subagent_type: 'general-purpose', model: 'haiku', run_in_background: true })
+  expect(h.spawns[0]).toMatchObject({ subagent_type: 'general-purpose', model: 'sonnet', run_in_background: true })
+  expect(h.spawns[1]).toMatchObject({ subagent_type: 'general-purpose', model: 'sonnet', run_in_background: true })
   expect(h.spawns[0]?.prompt).toContain('Write a.txt')
   expect(checkpoint(h, runId).nodes.map((n: { state: string }) => n.state)).toEqual(['running', 'running', 'pending'])
 
@@ -147,6 +152,7 @@ test('a fan-in DAG runs in waves, checkpoints every change and announces when it
   const afterB = (await callDag($, { action: 'snapshot', run_id: runId })).value
   expect(nodeStates(afterB)).toEqual({ a: 'completed', b: 'completed', c: 'running' })
   expect(h.spawns[2]?.prompt).toContain('Merge a.txt and b.txt')
+  expect(h.spawns[2]?.model).toBe('sonnet')
   expect(h.submitted.length).toBe(0)
 
   await finishAgent($, h, 'agent-3', 'merged\nDAG_NODE_STATUS: completed')
@@ -310,10 +316,10 @@ test('strict enforcement refuses work tools in the main conversation and lets no
 test('every main-session prompt carries the DAG protocol unless enforcement is off', async ($, on) => {
   const h = harness(on)
   await boot($)
-  await $.prompt.submit({ text: 'add a login page' } as any)
+  await $.prompt.submit({ text: 'add a login page', wait: false, origin: { kind: 'composer' } })
   expect(JSON.stringify(h.contexts[0])).toContain('DAG orchestration is mandatory')
   await $.command.run({ command: 'dag', args: 'enforce off', ...COMMAND_CONTEXT })
-  await $.prompt.submit({ text: 'and a logout page' } as any)
+  await $.prompt.submit({ text: 'and a logout page', wait: false, origin: { kind: 'composer' } })
   expect(JSON.stringify(h.contexts[1] ?? null)).not.toContain('DAG orchestration is mandatory')
 })
 
@@ -346,8 +352,8 @@ test('a dependent node receives its dependencies\' outputs and the settle summar
 const COMPLIANT = {
   key: 'compliant',
   nodes: [
-    { id: 'make', prompt: 'TASK: Create x.txt. DELIVERABLE: x.txt. SCOPE: write x.txt only. VERIFY: cat x.txt. STOP WHEN: x.txt exists.' },
-    { id: 'verify', dependsOn: ['make'], prompt: 'TASK: Check x.txt. DELIVERABLE: a PASS/FAIL line. SCOPE: read only. VERIFY: cat x.txt. STOP WHEN: the line is reported.' },
+    { id: 'make', verify: VERIFY, prompt: 'TASK: Create x.txt. DELIVERABLE: x.txt. SCOPE: write x.txt only. VERIFY: cat x.txt. STOP WHEN: x.txt exists.' },
+    { id: 'verify', verify: VERIFY, dependsOn: ['make'], prompt: 'TASK: Check x.txt. DELIVERABLE: a PASS/FAIL line. SCOPE: read only. VERIFY: cat x.txt. STOP WHEN: the line is reported.' },
   ],
 }
 
@@ -423,7 +429,7 @@ test('an interactive session ends its turn at once while a run is active', async
 })
 
 test('/dag run also reads a YAML definition', async ($, on) => {
-  const yaml = 'key: yaml-flow\nnodes:\n  - id: one\n    prompt: First\n  - id: two\n    dependsOn: [one]\n    prompt: |\n      Second\n'
+  const yaml = 'key: yaml-flow\nnodes:\n  - id: one\n    prompt: First\n    verify:\n      - kind: command\n        argv: [test, -d, /work]\n  - id: two\n    dependsOn: [one]\n    prompt: |\n      Second\n    verify:\n      - kind: command\n        argv: [test, -d, /work]\n'
   const h = harness(on, { '/work/flow.yaml': yaml, '/work/bad.yml': 'key: x\nnodes: {a: 1}\n' })
   await boot($)
   const out = await $.command.run({ command: 'dag', args: 'run flow.yaml', ...COMMAND_CONTEXT })
@@ -432,6 +438,37 @@ test('/dag run also reads a YAML definition', async ($, on) => {
   expect(h.spawns[0]?.prompt).toContain('First')
   const bad = await $.command.run({ command: 'dag', args: 'run bad.yml', ...COMMAND_CONTEXT })
   expect(bad.text).toContain('YAML line 2: flow mappings')
+})
+
+test('the checkpoint directory ignores itself in git and node prompts say to leave it alone', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  expect(h.files.get('/work/.claude/dag/.gitignore')).toBe('# dag-workflow run checkpoints and node reports\n*\n')
+  await callDag($, { action: 'start', definition: CHAIN })
+  expect(h.spawns[0]?.prompt).toContain('The project directory .claude/dag/ holds this workflow\'s own checkpoints and node reports.')
+})
+
+test('an existing .gitignore in the checkpoint directory is kept as it is', async ($, on) => {
+  const h = harness(on, { '/work/.claude/dag/.gitignore': 'runs/\n' })
+  await boot($)
+  expect(h.files.get('/work/.claude/dag/.gitignore')).toBe('runs/\n')
+})
+
+test('pane choices are stored per project and other projects keep theirs', async ($, on) => {
+  const h = harness(on)
+  h.store.set('collapse-prefs:/other', { dag_x: { a: true } })
+  h.store.set('pane-view:/other', 'lanes')
+  h.store.set('pane-view:/work', 'timeline')
+  await boot($)
+  const runId = (await callDag($, { action: 'start', definition: FAN_IN })).value.run_id
+  const ui = (await $.ui.mount(PANE as any)) as Mounted<'terminal', 'Pane'>
+  await ui.resize({ columns: 60, rows: 40, in: 'graph' })
+  expect(await ui.find({ type: 'Button', key: 'view-timeline', in: 'graph' })).toMatchObject({ props: { label: '▸ Timeline' } })
+  await ui.press({ key: 'node-c' })
+  expect(h.store.get('collapse-prefs:/work')).toEqual({ [runId]: { c: true } })
+  expect(h.store.get('collapse-prefs:/other')).toEqual({ dag_x: { a: true } })
+  expect(h.store.get('pane-view:/other')).toBe('lanes')
+  await ui.unmount()
 })
 
 test('the DAG pane opens with a run, draws its layers, and remembers folded nodes', async ($, on) => {
@@ -444,18 +481,98 @@ test('the DAG pane opens with a run, draws its layers, and remembers folded node
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
     expect(await ui.find({ type: 'Text', text: 'Fan in' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '● a' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '○ c' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  a → c' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'waiting for dependencies' })).toBeUndefined()
     await ui.unmount()
   }
 
-  const ui = await $.ui.mount(PANE as any)
+  const ui = (await $.ui.mount(PANE as any)) as Mounted<'terminal', 'Pane'>
+  await ui.resize({ columns: 60, rows: 40, in: 'graph' })
+  expect(await ui.find({ type: 'Text', text: /^  \[-\] a/, in: 'graph' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^← a, b/, in: 'graph' })).toBeDefined()
   await ui.press({ key: 'node-c' })
   expect(await ui.find({ type: 'Text', text: 'waiting for dependencies' })).toBeDefined()
-  expect(h.store.get('collapse-prefs')).toEqual({ [runId]: { c: true } })
+  expect(await ui.find({ type: 'Text', text: /^  \[-\] c/, in: 'graph' })).toBeDefined()
+  expect(h.store.get('collapse-prefs:/work')).toEqual({ [runId]: { c: true } })
   await ui.press({ key: 'details' })
   expect(await ui.find({ key: 'details' })).toMatchObject({ props: { label: 'compact' } })
+  await ui.unmount()
+})
+
+test('the context inspector sends a bounded view model rather than raw request history', async ($, on) => {
+  const text = 'USER_CONTEXT_' + 'x'.repeat(19_000)
+  const h = harness(on, {
+    '/work/.claude/dag/context/session-1.json': JSON.stringify({
+      schemaVersion: 1, projectRoot: '/work', sessionId: 'session-1', updatedAt: 1_000,
+      requests: Array.from({ length: 6 }, (_, at) => ({ at, text })), notes: [],
+    }),
+  })
+  await boot($)
+  await $.command.run({ command: 'dag', args: 'inspect context', ...COMMAND_CONTEXT })
+  const ui = await $.ui.mount(PANE)
+  const client = await ui.find({ type: 'Client', key: 'inspector' })
+  expect(client).toBeDefined()
+  const encoded = JSON.stringify(client)
+  expect(encoded.length).toBeLessThan(20_000)
+  expect(encoded.includes(text)).toBe(false)
+  expect(h.files.has('/work/.claude/dag/context/session-1.json')).toBe(true)
+  await ui.unmount()
+})
+
+test('v cycles the graph views and remembers the choice', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await callDag($, { action: 'start', definition: FAN_IN })
+  const ui = (await $.ui.mount(PANE as any)) as Mounted<'terminal', 'Pane'>
+  await ui.resize({ columns: 60, rows: 40, in: 'graph' })
+  expect(await ui.find({ type: 'Button', key: 'view-auto', in: 'graph' })).toMatchObject({ props: { label: '(auto)' } })
+  await ui.press({ key: 'view-switch' })
+  expect(h.store.get('pane-view:/work')).toBe('graph')
+  expect(await ui.find({ type: 'Button', key: 'view-auto', in: 'graph' })).toMatchObject({ props: { label: 'auto' } })
+  await ui.press({ key: 'view-switch' })
+  expect(h.store.get('pane-view:/work')).toBe('lanes')
+  expect(await ui.find({ type: 'Button', key: 'view-lanes', in: 'graph' })).toMatchObject({ props: { label: '▸ Lanes' } })
+  await ui.key({ key: 'v', in: 'graph' })
+  expect(h.store.get('pane-view:/work')).toBe('timeline')
+  expect(await ui.find({ type: 'Button', key: 'view-timeline', in: 'graph' })).toMatchObject({ props: { label: '▸ Timeline' } })
+  await ui.unmount()
+})
+
+test('the view tabs are buttons and /dag view sets the view too', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await callDag($, { action: 'start', definition: FAN_IN })
+  const ui = (await $.ui.mount(PANE as any)) as Mounted<'terminal', 'Pane'>
+  await ui.resize({ columns: 60, rows: 40, in: 'graph' })
+  expect(await ui.find({ type: 'Button', key: 'view-auto', in: 'graph' })).toMatchObject({ props: { label: '(auto)' } })
+  await ui.press({ key: 'view-lanes' })
+  expect(h.store.get('pane-view:/work')).toBe('lanes')
+  expect(await ui.find({ type: 'Button', key: 'view-lanes', in: 'graph' })).toMatchObject({ props: { label: '▸ Lanes' } })
+  await ui.press({ key: 'view-auto' })
+  expect(h.store.get('pane-view:/work')).toBe('auto')
+  const set = await $.command.run({ command: 'dag', args: 'view timeline', ...COMMAND_CONTEXT })
+  expect(set.text).toBe('DAG view: timeline')
+  expect(h.store.get('pane-view:/work')).toBe('timeline')
+  expect((await $.command.run({ command: 'dag', args: 'view', ...COMMAND_CONTEXT })).text).toBe('DAG view: timeline')
+  expect((await $.command.run({ command: 'dag', args: 'view sideways', ...COMMAND_CONTEXT })).text).toBe('Unknown view "sideways". Use auto, graph, lanes or timeline.')
+  await ui.unmount()
+})
+
+test('keys pressed in the graph select a node and fold it', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = (await callDag($, { action: 'start', definition: FAN_IN })).value.run_id
+  const ui = (await $.ui.mount(PANE as any)) as Mounted<'terminal', 'Pane'>
+  await ui.resize({ columns: 60, rows: 40, in: 'graph' })
+  await ui.key({ key: 'tab', in: 'graph' })
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] a/, in: 'graph' })).toBeDefined()
+  await ui.key({ key: 'tab', shift: true, in: 'graph' })
+  expect(await ui.find({ type: 'Text', text: /^> \[\+\] c/, in: 'graph' })).toBeDefined()
+  await ui.key({ key: ' ', in: 'graph' })
+  expect(h.store.get('collapse-prefs:/work')).toEqual({ [runId]: { c: true } })
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] c/, in: 'graph' })).toBeDefined()
+  await ui.press({ key: 'select-next' })
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] a/, in: 'graph' })).toBeDefined()
   await ui.unmount()
 })
 
