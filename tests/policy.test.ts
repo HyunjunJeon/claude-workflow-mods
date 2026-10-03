@@ -131,6 +131,23 @@ test('the lint reserves quick for mechanical checks rather than a final audit', 
   ).toEqual([])
 })
 
+test('the lint warns about verify paths and writes the host refuses for subagents', async () => {
+  const def = (nodes: unknown[]) => {
+    const r = parseDefinition({ key: 'k', nodes })
+    if (!r.ok) throw new Error(r.error.message)
+    return r.value
+  }
+  const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
+  const blocked = lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'REPORT.md' }] }]))
+  expect(blocked).toHaveLength(1)
+  expect(blocked[0]).toContain('node "one"')
+  expect(blocked[0]).toContain('"REPORT.md"')
+  expect(lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'notes/docs-audit.md' }] }]))).toEqual([])
+  const written = lintDefinition(def([{ id: 'one', prompt: full, writes: ['out/summary-final.md'] }]))
+  expect(written).toHaveLength(1)
+  expect(written[0]).toContain('"out/summary-final.md"')
+})
+
 test('the injected protocol states the rule for each enforcement level', async () => {
   expect(protocolFor('strict')).toContain('load the dag-workflow:dag-planning skill with the Skill tool and follow it; start is refused until you do')
   expect(protocolFor('strict')).toContain('are refused here and belong inside DAG nodes')

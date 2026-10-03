@@ -2,6 +2,13 @@ import type { Definition, NodeDef } from './types.ts'
 
 const VERIFICATION_WORDS = /verif|validat|check|test|review|audit/i
 
+// Claude Code 2.1.288 refuses subagent Write calls to Markdown files with these basenames.
+export const HOST_BLOCKED_REPORT_NAME = /^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i
+
+export function isBlockedReportPath(path: string): boolean {
+  return HOST_BLOCKED_REPORT_NAME.test(path.split(/[\\/]/).pop() ?? '')
+}
+
 export function isVerificationNode(node: NodeDef): boolean {
   if (node.dependsOn.length === 0) return false
   return [node.id, node.label, node.task_summary, node.description].some(text => text !== undefined && VERIFICATION_WORDS.test(text))
@@ -16,6 +23,17 @@ export function lintDefinition(definition: Definition): string[] {
     ]
     if (missing.length > 0) {
       warnings.push(`node "${node.id}": the prompt lacks ${missing.join(' and ')} - follow the node prompt contract (TASK, DELIVERABLE, SCOPE, VERIFY, STOP WHEN).`)
+    }
+  }
+  for (const node of definition.nodes) {
+    const paths = [
+      ...(node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : [])),
+      ...(node.writes ?? []),
+    ]
+    for (const path of paths) {
+      if (isBlockedReportPath(path)) {
+        warnings.push(`node "${node.id}": "${path}" is named like a report, and Claude Code 2.1.288 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${node.id}-notes.md or return the text in ## Output.`)
+      }
     }
   }
   if (definition.nodes.length >= 2 && !definition.nodes.some(isVerificationNode)) {

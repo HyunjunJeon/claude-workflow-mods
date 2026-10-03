@@ -322,6 +322,16 @@ test('strict enforcement refuses work tools in the main conversation and lets no
   expect(bad.text).toContain('Unknown enforcement level')
 })
 
+test('a node agent cannot Write report-named Markdown the host refuses for subagents', async ($, on) => {
+  harness(on)
+  await boot($)
+  await callDag($, { action: 'start', definition: CHAIN })
+  const blocked = await $.tool.call({ tool: 'Write', agentId: 'agent-1', file_path: '/work/out/report.md', content: 'x' } as any)
+  expect(blocked.deny).toContain('a-notes.md')
+  const allowed = await $.tool.call({ tool: 'Write', agentId: 'agent-1', file_path: '/work/out/result.md', content: 'x' } as any)
+  expect(allowed.deny).toBe(undefined)
+})
+
 test('a failing strict gate hook denies gated main-loop calls with the gate-failed message', async ($, on) => {
   const h = harness(on)
   await boot($)

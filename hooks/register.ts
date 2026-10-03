@@ -2,7 +2,7 @@ import type { EngineInterface, On, PluginOptions } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
-import { lintDefinition } from './engine/lint.ts'
+import { isBlockedReportPath, lintDefinition } from './engine/lint.ts'
 import { parseChoices, permissionRequest, recoveryRequest, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSummary, emptyContext, parseContext, recordRequest, removeNote } from './engine/context.ts'
@@ -1496,6 +1496,10 @@ export function register(on: On, options: PluginOptions) {
         if (verdict.allowed) return await next(e)
         $.ui.log(`refused ${e.tool} in the main conversation; work runs in DAG nodes`)
         return { deny: denyMessage(e.tool, verdict.reason) }
+      }
+      const target = (e as { file_path?: unknown }).file_path
+      if (owner && e.tool === 'Write' && typeof target === 'string' && isBlockedReportPath(target)) {
+        return { deny: `Claude Code refuses subagent writes to report-named Markdown files (REPORT*, SUMMARY*, FINDINGS*, ANALYSIS*). Write ${owner.nodeId}-notes.md instead, or return the text in ## Output.` }
       }
       activity.set(agentId, toolStarted(e.tool, Date.now()))
       try {

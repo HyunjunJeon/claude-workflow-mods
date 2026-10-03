@@ -102,6 +102,7 @@ Every node in `start` and `amend` must carry `verify`: 1-16 checks, each `{"kind
 
 - Choose checks that FAIL when the deliverable is wrong: the test command that covers the change, a file plus the heading or value its consumers parse. `true`, `echo ok` or an existence check on a file that already existed proves nothing.
 - A passed check proves only the declared check. Semantic correctness beyond it still needs the verification wave below.
+- Never name a node deliverable REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md: Claude Code 2.1.288 refuses subagent Write calls to those names, so use a name like `<node-id>-notes.md` or return the text in `## Output`.
 - `verify` and `writes` are in the fingerprint, so changing them through `amend` re-runs that node and its dependents.
 - An old definition or checkpoint without `verify` is unverified, not verified. Amend it with real checks; do not report its nodes as done.
 
