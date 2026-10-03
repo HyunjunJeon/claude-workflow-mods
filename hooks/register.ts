@@ -82,6 +82,8 @@ let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
 let planningLoaded = false
 let interactive = true
+// Only the terminal and desktop surfaces draw the pane and band; elsewhere progress goes out as text.
+let paneSurface = true
 // A /dag run|retry typed during a main model turn is persisted pending and started when that turn ends.
 let mainTurnBusy = false
 let deferStarts = false
@@ -693,7 +695,13 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
     failureToasts.set(runId, (failureToasts.get(runId) ?? new Set()).add(node.id))
   }
   $.ui.log(`${run.name} › ${node.id}: ${outcome.state}${outcome.error ? ` (${outcome.error})` : ''}`)
-  await tick($, runId)
+  const after = await tick($, runId)
+  if (!paneSurface && after && !isSettled(after)) {
+    // No pane to watch: say that a node finished; the settle summary still goes through announce.
+    $.prompt.submit({ text: nodeMessage(after, node.id) }).catch(error => {
+      $.ui.log(`could not announce ${runId}/${node.id}: ${message(error)}`)
+    })
+  }
 }
 
 async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Promise<Run> {
@@ -1107,6 +1115,7 @@ function setPaneWaitReason($: EngineInterface, reason: string | undefined): void
 }
 
 async function openPane($: EngineInterface, byUser: boolean): Promise<void> {
+  if (!paneSurface) return
   if (!byUser && paneClosedByUser) return
   if (byUser) paneClosedByUser = false
   try {
@@ -1486,6 +1495,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('session.start', async ($, e, next) => {
     interactive = e.isInteractive
+    paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
     if (jevEnabled) {
       try {

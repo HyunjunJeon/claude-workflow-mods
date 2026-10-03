@@ -191,6 +191,23 @@ test('a fan-in DAG runs in waves, checkpoints every change and announces when it
   expect(checkpoint(h, runId)).toMatchObject({ status: 'completed', settledNotified: true })
 })
 
+test('a surface without the DAG pane gets text progress instead of ui.open', async ($, on) => {
+  const h = harness(on)
+  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' })
+
+  const started = await callDag($, { action: 'start', definition: FAN_IN })
+  expect(h.opened.length).toBe(0)
+  await finishAgent($, h, 'agent-1', 'wrote a.txt\nDAG_NODE_STATUS: completed')
+  expect(h.submitted.length).toBe(1)
+  expect(h.submitted[0]).toContain('Node "a"')
+  await finishAgent($, h, 'agent-2', 'wrote b.txt')
+  await finishAgent($, h, 'agent-3', 'merged\nDAG_NODE_STATUS: completed')
+  await callDag($, { action: 'wait', run_id: started.value.run_id })
+  expect(h.opened.length).toBe(0)
+  expect(h.submitted.at(-1)).toContain('settled: completed')
+})
+
 test('a failed node skips its dependents, settles as failed, and retry runs it again', async ($, on) => {
   const h = harness(on)
   await boot($)
