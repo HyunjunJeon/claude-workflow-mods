@@ -134,6 +134,44 @@ test('a node failing verification raises exactly one attention toast', { options
   expect(h.toasts[0]).toMatchObject({ text: expect.stringContaining('failed verification'), timeoutMs: 12_000 })
 })
 
+test('a single failing node settles the run with one toast, not two', { options: { auto_recovery: false } }, async ($, on) => {
+  const h = harness(on)
+  h.control.exitCode = 1
+  await boot($)
+  const runId = await start($, { key: 'single', nodes: [{ id: 'a', prompt: 'Produce artifact', verify: CHECK }] })
+  await finish($, h)
+  expect(checkpoint(h, runId).nodes.map(node => node.state)).toEqual(['failed'])
+  expect(h.toasts).toHaveLength(1)
+  expect(h.toasts[0]?.text).toContain('failed verification')
+})
+
+test('a settle with a failure that had no toast of its own still toasts', { options: { auto_recovery: false } }, async ($, on) => {
+  const h = harness(on)
+  h.control.exitCode = 1
+  await boot($)
+  h.store.set(`dag-session:${hash('/work')}:target`, { schemaVersion: 1, sessionId: 'target', projectRoot: '/work', updatedAt: 1_000, status: 'active', runIds: [], writes: [] })
+  const nodes = ['a', 'b', 'c'].map(id => ({ id, prompt: `Node ${id}`, verify: CHECK }))
+  const runId = await start($, { key: 'trio', nodes })
+  await command($, `handoff ${runId} target`)
+  await finish($, h)
+  expect(h.toasts).toHaveLength(1)
+  // Node b stands in for a failure the target never saw toasted (e.g. recorded before a restart); c is left to run.
+  const saved = checkpoint(h, runId)
+  h.files.set(`${ROOT}/runs/${runId}.json`, JSON.stringify({
+    ...saved, handoff: { ...saved.handoff, offeredAt: 1_000 },
+    nodes: saved.nodes.map(node => node.id === 'b' ? { ...node, state: 'failed', error: 'Lost across a restart' } : node.id === 'c' ? { ...node, state: 'pending', agentId: undefined } : node),
+  }))
+  h.control.sessionId = 'target'
+  await boot($)
+  await command($, `accept ${runId}`)
+  expect(checkpoint(h, runId).nodes.map(node => node.state)).toEqual(['failed', 'failed', 'running'])
+  await finish($, h, 'agent-4')
+  expect(checkpoint(h, runId).nodes.map(node => node.state)).toEqual(['failed', 'failed', 'failed'])
+  expect(h.toasts.map(toast => toast.text)).toEqual([
+    'DAG trio: node a failed verification', 'DAG trio: node c failed verification', 'DAG trio settled with 3 failed node(s)',
+  ])
+})
+
 const PANE = {
   plugin: 'dag-workflow', component: 'Pane', requestId: 'dag', surface: 'terminal', viewport: { columns: 140, rows: 40 },
   props: { title: 'DAG', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },

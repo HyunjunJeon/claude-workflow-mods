@@ -119,6 +119,8 @@ let selectedDecisionId: string | undefined
 let language: 'en' | 'ko' = 'en'
 let pinnedStatus: string | undefined
 const settleToasts = new Set<string>()
+// Node ids that already raised their own failure toast, per run; the settle toast skips them.
+const failureToasts = new Map<string, Set<string>>()
 const ATTENTION_TOAST_MS = 12_000
 let lastPaneAgentId: string | undefined
 
@@ -580,11 +582,15 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
     await refreshSessions($)
     if (run.handoff?.offeredAt !== undefined && current.handoff?.offeredAt === undefined) await notifyHandoff($, run)
     if (!run.handoff && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
-    if (!isSettled(run)) settleToasts.delete(runId)
-    else if (!settleToasts.has(runId)) {
+    if (!isSettled(run)) {
+      if (settleToasts.delete(runId)) failureToasts.delete(runId)
+    } else if (!settleToasts.has(runId)) {
       settleToasts.add(runId)
-      const failed = run.nodes.filter(node => node.state === 'failed').length
-      if (failed > 0 && !run.cancelReason) $.ui.toast(t.toastSettledFailed(run.name, failed), { timeoutMs: ATTENTION_TOAST_MS })
+      const failed = run.nodes.filter(node => node.state === 'failed')
+      const toasted = failureToasts.get(runId)
+      if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
+        $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
+      }
     }
     await announce($, run)
     return run
@@ -683,6 +689,7 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   runs.set(runId, outcome.state === 'failed' ? await attemptRecovery($, finished, node.id) : finished)
   if (runs.get(runId)?.nodes.find(current => current.id === node.id)?.state === 'failed') {
     $.ui.toast(verification && verification.status !== 'passed' ? t.toastVerificationFailed(run.name, node.id) : t.toastNodeFailed(run.name, node.id), { timeoutMs: ATTENTION_TOAST_MS })
+    failureToasts.set(runId, (failureToasts.get(runId) ?? new Set()).add(node.id))
   }
   $.ui.log(`${run.name} › ${node.id}: ${outcome.state}${outcome.error ? ` (${outcome.error})` : ''}`)
   await tick($, runId)
