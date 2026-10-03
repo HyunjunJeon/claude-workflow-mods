@@ -176,6 +176,9 @@ test('decisions expose persisted outcomes and rules without credentials', async 
   const h = harness(on)
   await boot($)
   await start($, definition())
+  const routeLog = h.logs.findIndex(log => log.includes('dag-workflow: Jev route'))
+  expect(routeLog).toBeGreaterThanOrEqual(0)
+  expect(h.logOptions[routeLog]).toEqual({ to: 'debug' })
   const result = await dag($, { action: 'decisions' })
   const log: { records: DecisionRecord[] } = JSON.parse(h.files.get(`${ROOT}/decisions/source.json`) ?? 'null')
   expect(result.decisions).toEqual(log.records)
@@ -186,6 +189,16 @@ test('decisions expose persisted outcomes and rules without credentials', async 
     expect(record.ruleset.length).toBeGreaterThan(0)
   }
   expect(JSON.stringify(result).includes(KEY)).toBe(false)
+})
+
+test('refused main-loop tools remain visible in the transcript', async ($, on) => {
+  const h = harness(on)
+  on('tool.check', () => ({ decision: 'allow' }))
+  await boot($)
+  await $.tool.call({ tool: 'Write', file_path: '/work/file.txt', content: 'x' })
+  const refusalLog = h.logs.findIndex(log => log.startsWith('refused Write'))
+  expect(refusalLog).toBeGreaterThanOrEqual(0)
+  expect(h.logOptions[refusalLog]).not.toEqual({ to: 'debug' })
 })
 
 test('sessions refresh same-project records and manual handoff drains then explicitly accepts', async ($, on) => {

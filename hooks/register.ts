@@ -57,6 +57,10 @@ const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
 const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
 const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
 
+function debug($: EngineInterface, text: string): void {
+  $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
+}
+
 type ToolInput = Readonly<Record<string, unknown>>
 type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
@@ -82,6 +86,7 @@ let gitignoreChecked = false
 let contextOnDisk = false
 let jevPermissionScope: 'all' | 'dag' = 'all'
 const activity = new Map<string, Activity>()
+const agentEventSources = new Set<string>()
 const handbacks = new Map<string, string>()
 const transcriptErrors = new Set<string>()
 const toolContexts = new Map<string, JevContext>()
@@ -119,9 +124,19 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function seenAgent($: EngineInterface, agentId: string, source: string): void {
+  const owner = nodeOfAgent(agentId)
+  if (!owner) return
+  const key = `${agentId}:${source}`
+  if (agentEventSources.has(key)) return
+  agentEventSources.add(key)
+  debug($, `agent ${agentId} (${owner.run.runId}/${owner.nodeId}) seen via ${source}`)
+}
+
 async function evaluateJev($: EngineInterface, request: JevRequest): Promise<JevEvaluation> {
   if (!jevEnabled || !jevApiKey) return { choices: new Map(), outcome: jevEnabled ? 'missing-key' : 'disabled', latencyMs: 0 }
   const startedAt = await $.clock.now()
+  debug($, `Jev request started (${Object.keys(request.questions).length} question(s))`)
   let timeout: ReturnType<EngineInterface['clock']['after']> | undefined
   const deadline = new Promise<undefined>(resolve => {
     timeout = $.clock.after(JEV_TIMEOUT_MS, () => resolve(undefined))
@@ -147,6 +162,7 @@ async function evaluateJev($: EngineInterface, request: JevRequest): Promise<Jev
     return { choices: new Map(), outcome: 'transport-error', latencyMs: (await $.clock.now()) - startedAt }
   } finally {
     timeout?.cancel()
+    debug($, `Jev request finished in ${(await $.clock.now()) - startedAt} ms`)
   }
 }
 
@@ -209,7 +225,7 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
     }))
     if (choice && choice.confidence >= jevConfidence) {
-      $.ui.log(`Jev route ${run.runId}/${node.id}: ${choice.choice} (${choice.confidence})`)
+      debug($, `Jev route ${run.runId}/${node.id}: ${choice.choice} (${choice.confidence})`)
       return { ...node, routing: { source: 'jev' as const, category: choice.choice, confidence: choice.confidence } }
     }
     return { ...node, routing: { source: 'definition' as const, category } }
@@ -289,7 +305,7 @@ async function refreshExternalRuns($: EngineInterface): Promise<void> {
       if (loaded.schemaVersion === 1 && loaded.sessionId !== sessionId && typeof loaded.runId === 'string'
         && (!current || loaded.updatedAt > current.updatedAt)) runs.set(loaded.runId, loaded)
     } catch (error) {
-      $.ui.log(`could not refresh ${entry.name}: ${message(error)}`)
+      debug($, `could not refresh ${entry.name}: ${message(error)}`)
     }
   }
 }
@@ -321,7 +337,7 @@ async function loadRuns($: EngineInterface): Promise<void> {
       const run = JSON.parse(await $.fs.read(`${runsDir}/${entry.name}`)) as Run
       if (run.schemaVersion === 1 && typeof run.runId === 'string') runs.set(run.runId, run)
     } catch (error) {
-      $.ui.log(`skipped unreadable checkpoint ${entry.name}: ${message(error)}`)
+      debug($, `skipped unreadable checkpoint ${entry.name}: ${message(error)}`)
     }
   }
 }
@@ -330,9 +346,9 @@ async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string):
   try {
     const removed = await $.process.run(['rm', flag, path])
     if (removed.exitCode === 0) return true
-    $.ui.log(`could not prune ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
+    debug($, `could not prune ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
   } catch (error) {
-    $.ui.log(`could not prune ${path}: ${message(error)}`)
+    debug($, `could not prune ${path}: ${message(error)}`)
   }
   return false
 }
@@ -341,7 +357,7 @@ async function listIfPresent($: EngineInterface, dir: string): Promise<Awaited<R
   try {
     return (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
   } catch (error) {
-    $.ui.log(`could not list ${dir} for retention: ${message(error)}`)
+    debug($, `could not list ${dir} for retention: ${message(error)}`)
     return []
   }
 }
@@ -361,7 +377,7 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
       if (record?.projectRoot === projectRoot && key === `${prefix}${record.sessionId}`) sessionRecords.push(record)
     }
   } catch (error) {
-    $.ui.log(`could not read session records for retention: ${message(error)}`)
+    debug($, `could not read session records for retention: ${message(error)}`)
   }
   // A directory beside any <name>.json, even an unreadable one, belongs to that checkpoint and is never an orphan.
   const runEntries = await listIfPresent($, runsDir)
@@ -375,14 +391,14 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
   })
   for (const run of plan.runs) {
     if (!SAFE_RUN_DIR.test(run.runId)) {
-      $.ui.log(`skipped pruning checkpoint with unsafe id ${JSON.stringify(run.runId)}`)
+      debug($, `skipped pruning checkpoint with unsafe id ${JSON.stringify(run.runId)}`)
       continue
     }
     if (await removePath($, '-f', `${runsDir}/${run.runId}.json`)) runs.delete(run.runId)
   }
   for (const name of plan.runDirs) {
     if (SAFE_RUN_DIR.test(name)) await removePath($, '-rf', `${runsDir}/${name}`)
-    else $.ui.log(`skipped pruning run directory with unsafe name ${JSON.stringify(name)}`)
+    else debug($, `skipped pruning run directory with unsafe name ${JSON.stringify(name)}`)
   }
   for (const [dir, names] of [[contextDir, plan.contextFiles], [decisionsDir, plan.decisionFiles]] as const) {
     for (const name of names) {
@@ -393,7 +409,7 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
     try {
       await $.store.delete(`${prefix}${id}`)
     } catch (error) {
-      $.ui.log(`could not prune session record ${id}: ${message(error)}`)
+      debug($, `could not prune session record ${id}: ${message(error)}`)
     }
   }
 }
@@ -1019,6 +1035,7 @@ async function pollTranscripts($: EngineInterface): Promise<void> {
       const current = activity.get(node.agentId)
       if (current && !current.coarse) continue
       const rows = await $.session.messages({ agentId: node.agentId })
+      seenAgent($, node.agentId, 'transcript poll')
       if (!Array.isArray(rows)) {
         if (!transcriptErrors.has(node.agentId)) $.ui.log(`cannot read the transcript of node ${node.id}: ${rows.deny}`)
         transcriptErrors.add(node.agentId)
@@ -1427,6 +1444,7 @@ export function register(on: On, options: PluginOptions) {
   on('turn.step', async function* ($, e, next) {
     const agentId = e.agentId
     if (!agentId) return yield* next(e)
+    seenAgent($, agentId, 'turn.step')
     activity.set(agentId, stepStarted(Date.now()))
     const stream = next(e)
     let step = await stream.next()
@@ -1472,12 +1490,13 @@ export function register(on: On, options: PluginOptions) {
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
     })])
     if (!applied) return decided
-    $.ui.log(`Jev permission ${e.tool}: ${choice.choice} (${choice.confidence})`)
+    debug($, `Jev permission ${e.tool}: ${choice.choice} (${choice.confidence})`)
     return { decision: choice.choice, reason: `Jev ${choice.choice} (${choice.confidence})` }
   })
 
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
+    if (agentId) seenAgent($, agentId, 'tool.call')
     const owner = agentId ? nodeOfAgent(agentId) : undefined
     const def = owner?.run.definition.nodes.find(node => node.id === owner.nodeId)
     const node = owner?.run.nodes.find(current => current.id === owner.nodeId)
@@ -1526,6 +1545,7 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
@@ -1564,6 +1584,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('tool.call', { tool: /^SubagentHandback$/ }, async ($, e, next) => {
     const agentId = e.agentId
+    if (agentId) seenAgent($, agentId, 'tool.call')
     if (!agentId || !agentRuns.has(agentId)) return next(e)
     const sent = (e as { message?: unknown }).message
     handbacks.set(agentId, typeof sent === 'string' ? sent : '')
