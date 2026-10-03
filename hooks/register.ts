@@ -1,4 +1,4 @@
-import type { EngineInterface, On, PluginOptions } from 'claude-code'
+import type { EngineInterface, On, PluginOptions, RenderInput } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
@@ -62,7 +62,7 @@ function debug($: EngineInterface, text: string): void {
 }
 
 type ToolInput = Readonly<Record<string, unknown>>
-type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
+type RenderEvent = RenderInput<'Pane'>
 type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
 
 const runs = new Map<string, Run>()
@@ -110,6 +110,7 @@ let language: 'en' | 'ko' = 'en'
 let pinnedStatus: string | undefined
 const settleToasts = new Set<string>()
 const ATTENTION_TOAST_MS = 12_000
+let lastPaneAgentId: string | undefined
 
 type JevEvaluation = {
   choices: ReadonlyMap<string, JevChoice>
@@ -1159,6 +1160,14 @@ async function handlePaneKey($: EngineInterface, key: string, shift: boolean): P
 }
 
 async function drawPane($: EngineInterface, e: RenderEvent) {
+  const agentId = e.props.view?.agentId
+  if (agentId !== lastPaneAgentId) {
+    lastPaneAgentId = agentId
+    const owner = agentId ? nodeOfAgent(agentId) : undefined
+    if (owner && shownRuns().some(run => run.runId === owner.run.runId)) {
+      view = { ...view, runIndex: shownRuns().findIndex(run => run.runId === owner.run.runId), selected: owner.nodeId }
+    }
+  }
   const elements = $.ui.resolve(e)
   const { Box, Text, Button } = elements
   const Client = (elements as Partial<Pick<Extract<typeof elements, { Client: unknown }>, 'Client'>>).Client

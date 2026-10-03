@@ -550,6 +550,23 @@ test('the DAG pane opens with a run, draws its layers, and remembers folded node
   await ui.unmount()
 })
 
+test('the DAG pane follows the viewed node transcript without overriding manual selection', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await callDag($, { action: 'start', definition: FAN_IN })
+  const ui = (await $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, view: { agentId: 'agent-1' } },
+  } as any)) as Mounted<'terminal', 'Pane'>
+  await ui.resize({ columns: 60, rows: 40, in: 'graph' })
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] a/, in: 'graph' })).toBeDefined()
+
+  await ui.press({ key: 'select-next' })
+  await ui.redraw({ ...PANE.props, view: { agentId: 'agent-1' } } as any)
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] b/, in: 'graph' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('the context inspector sends a bounded view model rather than raw request history', async ($, on) => {
   const text = 'USER_CONTEXT_' + 'x'.repeat(19_000)
   const h = harness(on, {
