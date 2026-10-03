@@ -376,7 +376,17 @@ async function stopAgent($: EngineInterface, agentId: string): Promise<string | 
   }
 }
 
-async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
+type CompletionClaim = {
+  readonly run: Run
+  readonly node: NodeRun
+  readonly report: string | undefined
+}
+type CompletionResult = {
+  readonly outcome: ReturnType<typeof parseOutcome>
+  readonly verification?: NodeRun['verification']
+}
+
+function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
   const runId = agentRuns.get(end.agentId)
   if (!runId) return
   agentRuns.delete(end.agentId)
@@ -385,17 +395,45 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   const run = runs.get(runId)
   const node = run && nodeForAgent(run, end.agentId)
   if (!run || !node) return
-  const answer = end.answer || report || (end.isAborted ? '' : await recoverReport($, end.agentId))
-  const parsed = parseOutcome({ reason: end.reason, isAborted: end.isAborted, answer })
-  const reportPath = answer ? await writeReport($, runId, node.id, answer) : undefined
-  let prepared = run
-  let outcome = reportPath ? { ...parsed, reportPath } : parsed
-  if (parsed.state === 'completed') {
-    const verification = await verifyNode($, run, node)
-    prepared = { ...run, nodes: run.nodes.map(current => current.id === node.id ? { ...current, verification } : current) }
-    if (verification.status !== 'passed') {
-      outcome = { ...outcome, state: 'failed', error: verification.error ?? verification.evidence.find(item => !item.passed)?.detail ?? 'Verification checks are missing.' }
+  return { run, node, report }
+}
+
+async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
+  const claim = await serialized(async () => claimCompletion(end))
+  if (!claim) return
+  const { run, node, report } = claim
+  let result: CompletionResult
+  try {
+    const answer = end.answer || report || (end.isAborted ? '' : await recoverReport($, end.agentId))
+    const parsed = parseOutcome({ reason: end.reason, isAborted: end.isAborted, answer })
+    const reportPath = answer ? await writeReport($, run.runId, node.id, answer) : undefined
+    let outcome = reportPath ? { ...parsed, reportPath } : parsed
+    let verification: NodeRun['verification']
+    if (parsed.state === 'completed') {
+      verification = await verifyNode($, run, node)
+      if (verification.status !== 'passed') {
+        outcome = { ...outcome, state: 'failed', error: verification.error ?? verification.evidence.find(item => !item.passed)?.detail ?? 'Verification checks are missing.' }
+      }
     }
+    result = { outcome, verification }
+  } catch (error) {
+    result = { outcome: { state: 'failed', error: `Completion processing failed: ${message(error)}` } }
+  }
+  await serialized(() => applyCompletion($, claim, result))
+}
+
+async function applyCompletion($: EngineInterface, claim: CompletionClaim, result: CompletionResult): Promise<void> {
+  const runId = claim.run.runId
+  const run = runs.get(runId)
+  const node = run?.nodes.find(current => current.id === claim.node.id)
+  if (!run || run.sessionId !== sessionId || !node || node.state !== 'running' || node.agentId !== claim.node.agentId) {
+    $.ui.log(`Dropped completion for ${runId}/${claim.node.id}: ownership or running agent changed`)
+    return
+  }
+  let prepared = run
+  const { outcome, verification } = result
+  if (verification) {
+    prepared = { ...run, nodes: run.nodes.map(current => current.id === node.id ? { ...current, verification } : current) }
   }
   const finished = markFinished(prepared, node.id, outcome, await $.clock.now())
   runs.set(runId, outcome.state === 'failed' ? await attemptRecovery($, finished, node.id) : finished)
@@ -1324,7 +1362,7 @@ export function register(on: On, options: PluginOptions) {
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
       $.clock.after(0, () => {
-        serialized(() => onAgentDone($, end)).catch(error => {
+        onAgentDone($, end).catch(error => {
           $.ui.log(`could not record the end of agent ${end.agentId}: ${message(error)}`)
         })
       })
