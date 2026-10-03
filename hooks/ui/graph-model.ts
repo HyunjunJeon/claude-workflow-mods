@@ -11,6 +11,8 @@ export type GraphNode = {
   color: string
   activity: string
   tail: string
+  /** Badge while the node's worker waits for a permission answer; the graph and lanes show it as `activity`. */
+  waiting?: string
   incoming: string[]
   selected: boolean
   expanded: boolean

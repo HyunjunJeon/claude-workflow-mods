@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { createRun, markFinished, markRunning } from '../hooks/engine/run.ts'
 import type { Run } from '../hooks/engine/types.ts'
+import { viewLines } from '../hooks/ui/views.ts'
 import { buildPane, clampRunIndex, formatDuration, nodeOrder, stepSelection, visibleRuns, type Line, type ViewState } from '../hooks/ui/view-model.ts'
 
 const VIEW: ViewState = { runIndex: 0, details: false, prefs: {} }
@@ -21,6 +22,18 @@ function fanIn(runId = 'r1', sessionId = 's1', createdAt = 1): Run {
 }
 
 const text = (line: Line) => line.map(s => s.text).join('')
+
+test('a node waiting for a permission answer shows a yellow badge in every graph view and its card', async () => {
+  const run = markRunning(fanIn(), 'a', 'agent-a', 1_000)
+  const waiting = new Map([['agent-a', 'Bash']])
+  const badged = (line: Line) => line.some(s => s.text.includes('waiting: Bash') && s.color === 'yellow')
+  for (const graphView of ['graph', 'lanes', 'timeline'] as const) {
+    const model = buildPane([run], { ...VIEW, graphView }, 5_000, { waiting })
+    expect(viewLines(model.graph!, 100).some(badged)).toBe(true)
+    expect(badged(model.cards.find(card => card.id === 'a')!.header)).toBe(true)
+  }
+  expect(buildPane([run], VIEW, 5_000).cards.some(card => badged(card.header))).toBe(false)
+})
 
 test('an empty project explains how to start a run', async () => {
   const model = buildPane([], VIEW, 0)

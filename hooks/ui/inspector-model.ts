@@ -23,6 +23,8 @@ export type InspectorInput = {
   selectedRunId?: string
   selectedDecisionId?: string
   page: number
+  /** Worker agent id -> tool whose permission answer it waits for. */
+  waiting?: ReadonlyMap<string, string>
 }
 
 export type InspectorAction = { id: string; label: string }
@@ -512,9 +514,11 @@ function verificationSegment(node: NodeRun, t: InspectorStrings): Segment | unde
   return undefined
 }
 
-function nodeLine(node: NodeRun, t: InspectorStrings, s: Strings): Line {
+function nodeLine(node: NodeRun, t: InspectorStrings, s: Strings, waiting?: ReadonlyMap<string, string>): Line {
   const style = stateStyle(node.state)
   const line = indented(seg(`${ICON[node.state]} `, style), bold(node.id), seg(`  ${s.state[node.state]}`, style))
+  const tool = node.state === 'running' && node.agentId ? waiting?.get(node.agentId) : undefined
+  if (tool !== undefined) line.push(dim(' · '), seg(s.waitingPermission(tool), { color: 'yellow', bold: true }))
   const verification = verificationSegment(node, t)
   if (verification) line.push(dim(' · '), verification)
   if (node.recovery) line.push(dim(` · ${t.recovery(node.recovery.used, MAX_AUTO_RECOVERIES)}`))
@@ -565,7 +569,7 @@ function contextView(input: InspectorInput, t: InspectorStrings, s: Strings): In
     const writes = [...new Set(run.definition.nodes.flatMap(node => node.writes ?? []))]
     lines.push(indented(dim(writes.length ? t.writes(writes.join(', ')) : t.noWrites)))
     const nodes = [...run.nodes].sort((a, b) => NODE_PRIORITY[a.state] - NODE_PRIORITY[b.state])
-    for (const node of nodes.slice(0, PAGE_SIZE)) lines.push(nodeLine(node, t, s))
+    for (const node of nodes.slice(0, PAGE_SIZE)) lines.push(nodeLine(node, t, s, input.waiting))
     if (nodes.length > PAGE_SIZE) lines.push(indented(dim(t.more(nodes.length - PAGE_SIZE))))
 
     lines.push([], [heading(t.evidence)])

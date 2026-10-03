@@ -90,6 +90,9 @@ const agentEventSources = new Set<string>()
 const handbacks = new Map<string, string>()
 const transcriptErrors = new Set<string>()
 const toolContexts = new Map<string, JevContext>()
+// Node workers' calls in flight (tool_use_id -> agent) and the workers waiting for a permission answer, in memory only.
+const openCalls = new Map<string, { agentId: string; tool: string }>()
+const waiting = new Map<string, { tool: string; toolUseId?: string; since: number }>()
 let userRequest = ''
 let jevEnabled = true
 let jevConfidence = 0.9
@@ -137,6 +140,46 @@ function seenAgent($: EngineInterface, agentId: string, source: string): void {
   if (agentEventSources.has(key)) return
   agentEventSources.add(key)
   debug($, `agent ${agentId} (${owner.run.runId}/${owner.nodeId}) seen via ${source}`)
+}
+
+// One episode per worker: the first mark toasts; a later mark only adds the tool_use_id the notice needs.
+async function markWaiting($: EngineInterface, agentId: string, tool: string, toolUseId?: string): Promise<void> {
+  const since = await $.clock.now()
+  const owner = nodeOfAgent(agentId)
+  const node = owner?.run.nodes.find(current => current.id === owner.nodeId)
+  if (!owner || owner.run.sessionId !== sessionId || node?.state !== 'running') return
+  const current = waiting.get(agentId)
+  const text = t.toastWaiting(owner.run.name, owner.nodeId)
+  if (current) {
+    if (current.toolUseId || !toolUseId) return
+    waiting.set(agentId, { ...current, toolUseId })
+  } else {
+    waiting.set(agentId, { tool, since, ...(toolUseId ? { toolUseId } : {}) })
+    debug($, `${owner.run.runId}/${owner.nodeId} waits for a permission answer (${tool})`)
+    $.ui.toast(text, { timeoutMs: ATTENTION_TOAST_MS })
+    updateStatus($)
+    $.ui.invalidate('ui.render')
+  }
+  if (!toolUseId) return
+  try {
+    $.ui.notice(toolUseId, text)
+  } catch (error) {
+    debug($, `permission notice for ${owner.run.runId}/${owner.nodeId} refused: ${message(error)}`)
+  }
+}
+
+// A resolved call clears only the mark it belongs to; without a call, any mark of the agent clears.
+function clearWaiting($: EngineInterface, agentId: string, call?: { toolUseId: string; tool: string }): void {
+  const mark = waiting.get(agentId)
+  if (!mark) return
+  if (call && (mark.toolUseId ? mark.toolUseId !== call.toolUseId : mark.tool !== call.tool)) return
+  waiting.delete(agentId)
+  updateStatus($)
+  $.ui.invalidate('ui.render')
+}
+
+function waitingTools(): Map<string, string> {
+  return new Map([...waiting].map(([agentId, mark]) => [agentId, mark.tool]))
 }
 
 // HTTP is primary; the session model answers only when the key is missing or the HTTP call fails, times out or is non-2xx.
@@ -358,6 +401,7 @@ function updateStatus($: EngineInterface): void {
     latest.nodes.filter(node => node.state === 'running').length,
     latest.nodes.filter(node => node.state === 'failed').length,
     active.length - 1,
+    waiting.size,
   ) : undefined
   if (text === pinnedStatus) return
   pinnedStatus = text
@@ -816,6 +860,7 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
   if (input.action === 'cancel') {
     const reason = typeof input.reason === 'string' && input.reason ? input.reason : 'cancelled on request'
     const { run: cancelled, stopAgents } = cancelRun(run, reason, now)
+    for (const node of run.nodes) if (node.agentId) clearWaiting($, node.agentId)
     await persist($, cancelled)
     const failures: { agent_id: string; error: string }[] = []
     for (const agentId of stopAgents) {
@@ -1246,6 +1291,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
       ...(shownRun() ? { selectedRunId: shownRun()?.runId } : {}),
       ...(selectedDecisionId ? { selectedDecisionId } : {}),
       page: inspectorPage,
+      waiting: waitingTools(),
     }
     const inspection = buildInspector(input)
     const body = Client
@@ -1300,7 +1346,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     })
   }
 
-  const model = buildPane(shown, view, now, { activity, t, taskCount: countTasks(agents, dagAgents) })
+  const model = buildPane(shown, view, now, { activity, waiting: waitingTools(), t, taskCount: countTasks(agents, dagAgents) })
   if (model.empty || !model.graph) {
     return Box({ flexDirection: 'column', children: [sectionTabs, gap(), ...model.header.map(line), gap(), Text({ dimColor: true, children: [model.empty ?? ''] }), ...footer] })
   }
@@ -1521,6 +1567,7 @@ export function register(on: On, options: PluginOptions) {
     const agentId = e.agentId
     if (!agentId) return yield* next(e)
     seenAgent($, agentId, 'turn.step')
+    clearWaiting($, agentId)
     activity.set(agentId, stepStarted(Date.now()))
     const stream = next(e)
     let step = await stream.next()
@@ -1548,11 +1595,27 @@ export function register(on: On, options: PluginOptions) {
     return next({ ...e, context: [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement)]), restorationContext()] })
   })
 
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const agentId = e.agent_id
+    if (agentId && nodeOfAgent(agentId)) {
+      seenAgent($, agentId, 'classic.PermissionRequest')
+      const toolUseId = [...openCalls].reverse().find(([, call]) => call.agentId === agentId && call.tool === e.tool_name)?.[0]
+      await markWaiting($, agentId, e.tool_name, toolUseId)
+    }
+    return next(e)
+  })
+
   on('tool.check', async ($, e, next) => {
     const decided = await next(e)
     if (decided.decision !== 'ask') return decided
+    const call = e.tool_use_id ? openCalls.get(e.tool_use_id) : undefined
+    // The answer stays with the person: mark the node worker that will wait for it.
+    const asked = async () => {
+      if (call && e.tool_use_id) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+      return decided
+    }
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
-    if (jevPermissionScope === 'dag' && context?.task === undefined) return decided
+    if (jevPermissionScope === 'dag' && context?.task === undefined) return asked()
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })
     const evaluation = await evaluateJev($, request, next.signal)
     const choice = evaluation.choices.get('permission')
@@ -1565,7 +1628,7 @@ export function register(on: On, options: PluginOptions) {
       stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
     }, evaluation)])
-    if (!applied) return decided
+    if (!applied) return asked()
     debug($, `Jev permission ${e.tool}: ${choice.choice} (${choice.confidence})`)
     return { decision: choice.choice, reason: `Jev ${choice.choice} (${choice.confidence})` }
   })
@@ -1583,6 +1646,7 @@ export function register(on: On, options: PluginOptions) {
       ...(def ? { task: node?.promptOverride ?? def.prompt } : {}),
     }
     toolContexts.set(e.tool_use_id, context)
+    if (agentId && owner) openCalls.set(e.tool_use_id, { agentId, tool: e.tool })
     try {
       if (!agentId) {
         if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) planningLoaded = true
@@ -1604,6 +1668,8 @@ export function register(on: On, options: PluginOptions) {
       }
     } finally {
       toolContexts.delete(e.tool_use_id)
+      openCalls.delete(e.tool_use_id)
+      if (agentId) clearWaiting($, agentId, { toolUseId: e.tool_use_id, tool: e.tool })
     }
   }).catch(async ($, e, next) => {
     // A failed hook is skipped and the call runs, so strict enforcement fails closed here with pure checks only (1 s budget).
@@ -1623,6 +1689,7 @@ export function register(on: On, options: PluginOptions) {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
+    if (e.agentId) clearWaiting($, e.agentId)
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
       try {

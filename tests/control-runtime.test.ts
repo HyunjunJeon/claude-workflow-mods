@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test, type Engine, type Mounted } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 import type { VerificationCheck } from '../hooks/engine/types.ts'
 import type { DecisionRecord } from '../hooks/engine/decisions.ts'
@@ -132,6 +132,59 @@ test('a node failing verification raises exactly one attention toast', { options
   await finish($, h)
   expect(h.toasts).toHaveLength(1)
   expect(h.toasts[0]).toMatchObject({ text: expect.stringContaining('failed verification'), timeoutMs: 12_000 })
+})
+
+const PANE = {
+  plugin: 'dag-workflow', component: 'Pane', requestId: 'dag', surface: 'terminal', viewport: { columns: 140, rows: 40 },
+  props: { title: 'DAG', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+} as const
+
+async function paneShows($: Engine, text: RegExp): Promise<boolean> {
+  const ui = (await $.ui.mount(PANE as any)) as Mounted<'terminal', 'Pane'>
+  const found = await ui.find({ type: 'Text', text })
+  await ui.unmount()
+  return found !== undefined
+}
+
+test('a node waiting for a permission answer is badged, noticed and toasted once, and clears when the call resolves', async ($, on) => {
+  let reached!: () => void
+  let release!: () => void
+  const prompted = new Promise<void>(resolve => { reached = resolve })
+  const answered = new Promise<void>(resolve => { release = resolve })
+  // Registered before the harness: the host's permission dialog stays open until the test answers it.
+  on('tool.call', { tool: 'Write' }, async (_engine, e) => {
+    await $.classic.PermissionRequest({ agent_id: e.agentId, tool_name: 'Write', tool_input: { file_path: e.file_path } })
+    await $.classic.PermissionRequest({ agent_id: e.agentId, tool_name: 'Write', tool_input: { file_path: e.file_path } })
+    reached()
+    await answered
+    return { result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
+  })
+  const h = harness(on)
+  await boot($)
+  await start($, { key: 'ask', name: 'ask', nodes: [{ id: 'a', prompt: 'Produce artifact', verify: CHECK }] })
+  const call = { tool: 'Write', file_path: '/work/a', content: 'x', agentId: 'agent-1', tool_use_id: 'ask-call' } as const
+  const pending = $.tool.call(call)
+  await prompted
+  expect(await paneShows($, /waiting: Write/)).toBe(true)
+  expect(h.statuses.at(-1)).toContain('1 waiting for permission')
+  expect(h.toasts).toEqual([{ text: 'DAG ask › a is waiting for your permission', timeoutMs: 12_000 }])
+  expect(h.notices).toEqual([{ toolUseId: 'ask-call', text: 'DAG ask › a is waiting for your permission' }])
+  release()
+  await pending
+  expect(await paneShows($, /waiting: Write/)).toBe(false)
+  expect(h.statuses.at(-1)).not.toContain('waiting')
+})
+
+test('a permission request from an agent outside the DAG changes nothing', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await start($, { key: 'ask', name: 'ask', nodes: [{ id: 'a', prompt: 'Produce artifact', verify: CHECK }] })
+  const statuses = [...h.statuses]
+  await $.classic.PermissionRequest({ agent_id: 'stranger', tool_name: 'Write', tool_input: {} })
+  expect(h.statuses).toEqual(statuses)
+  expect(h.toasts).toEqual([])
+  expect(h.notices).toEqual([])
+  expect(await paneShows($, /waiting: /)).toBe(false)
 })
 
 test('context persists requests and notes and survives clear with the new session id', async ($, on) => {

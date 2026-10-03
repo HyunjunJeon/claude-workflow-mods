@@ -22,6 +22,7 @@ export function harness(on: On) {
   const stats: string[] = []
   const statuses: (string | undefined)[] = []
   const toasts: { text: string; timeoutMs?: number }[] = []
+  const notices: { toolUseId: string; text: string | undefined }[] = []
   const sends: EventOf['session.send'][] = []
   const prompts: string[] = []
   const locks = new Set<string>()
@@ -108,12 +109,14 @@ export function harness(on: On) {
   on('ui.log', ($, e) => { logs.push(e.text); logOptions.push('to' in e ? { to: e.to } : undefined); return { value: undefined } })
   on('ui.status', ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.toast', ($, e) => { toasts.push({ text: e.text, ...(e.timeoutMs === undefined ? {} : { timeoutMs: e.timeoutMs }) }); return { value: undefined } })
+  on('ui.notice', ($, e) => { notices.push({ toolUseId: e.tool_use_id, text: e.text }); return { value: undefined } })
   on('prompt.submit', ($, e) => { prompts.push(e.text); return { text: e.text } })
   on('skill.prompt', ($, e) => ({ text: e.text }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
-  return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, sends, prompts, locks, lockMtimes, control }
+  on('classic.PermissionRequest', () => ({}))
+  return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, locks, lockMtimes, control }
 }
 
 export async function boot($: Engine) {

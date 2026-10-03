@@ -56,6 +56,7 @@ export function timelineLines(model: GraphModel, columns: number): Line[] {
       { text: `${fit(node.label, labelWidth, true)} `, ...(node.selected ? { bold: true as const } : related ? {} : { dim: true as const }) },
       { text: bar(node, t0, span, cells, model.now), ...tone },
       { text: ` ${spent}`, dim: true },
+      ...(node.waiting ? [{ text: ` ${node.waiting}`, color: 'yellow', bold: true as const }] : []),
       ...(critical.has(node.id) ? [{ text: ' ◆', bold: true as const }] : []),
     ]
   })

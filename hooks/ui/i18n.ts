@@ -53,7 +53,9 @@ export type Strings = {
   writingTool: (tool: string) => string
   runningTool: (tool: string, elapsed: string) => string
   stalled: string
-  statusLine: (name: string, done: number, total: number, running: number, failed: number, otherRuns: number) => string
+  waitingPermission: (tool: string) => string
+  statusLine: (name: string, done: number, total: number, running: number, failed: number, otherRuns: number, waiting: number) => string
+  toastWaiting: (run: string, node: string) => string
   toastNodeFailed: (run: string, node: string) => string
   toastVerificationFailed: (run: string, node: string) => string
   toastHandoff: string
@@ -121,7 +123,9 @@ const EN: Strings = {
   writingTool: tool => `⚙ ${tool} now`,
   runningTool: (tool, elapsed) => `▶ ${tool} running ${elapsed}`,
   stalled: '⚠ possibly stalled',
-  statusLine: (name, done, total, running, failed, otherRuns) => `DAG ${name}: ${done}/${total} done · ${running} running${failed ? ` · ${failed} failed` : ''}${otherRuns ? ` · +${otherRuns} runs` : ''}`,
+  waitingPermission: tool => `waiting: ${tool}`,
+  statusLine: (name, done, total, running, failed, otherRuns, waiting) => `DAG ${name}: ${done}/${total} done · ${running} running${waiting ? ` · ${waiting} waiting for permission` : ''}${failed ? ` · ${failed} failed` : ''}${otherRuns ? ` · +${otherRuns} runs` : ''}`,
+  toastWaiting: (run, node) => `DAG ${run} › ${node} is waiting for your permission`,
   toastNodeFailed: (run, node) => `DAG ${run}: node ${node} failed`,
   toastVerificationFailed: (run, node) => `DAG ${run}: node ${node} failed verification`,
   toastHandoff: 'A DAG run was offered to this session. Open /dag sessions to accept it.',
@@ -189,7 +193,9 @@ const KO: Strings = {
   writingTool: tool => `⚙ ${tool} 인자 작성 중`,
   runningTool: (tool, elapsed) => `▶ ${tool} 실행 중 ${elapsed}`,
   stalled: '⚠ 멈췄을 수 있음',
-  statusLine: (name, done, total, running, failed, otherRuns) => `DAG ${name}: ${done}/${total} 완료 · 실행 중 ${running}${failed ? ` · 실패 ${failed}` : ''}${otherRuns ? ` · +${otherRuns}개 실행` : ''}`,
+  waitingPermission: tool => `승인 대기: ${tool}`,
+  statusLine: (name, done, total, running, failed, otherRuns, waiting) => `DAG ${name}: ${done}/${total} 완료 · 실행 중 ${running}${waiting ? ` · 권한 승인 대기 ${waiting}` : ''}${failed ? ` · 실패 ${failed}` : ''}${otherRuns ? ` · +${otherRuns}개 실행` : ''}`,
+  toastWaiting: (run, node) => `DAG ${run} › ${node} 노드가 권한 승인을 기다립니다`,
   toastNodeFailed: (run, node) => `DAG ${run}: 노드 ${node} 실패`,
   toastVerificationFailed: (run, node) => `DAG ${run}: 노드 ${node} 검증 실패`,
   toastHandoff: '이 세션에 DAG 실행이 넘어왔습니다. /dag sessions에서 수락하세요.',
