@@ -21,5 +21,11 @@ export function lintDefinition(definition: Definition): string[] {
   if (definition.nodes.length >= 2 && !definition.nodes.some(isVerificationNode)) {
     warnings.push('the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.')
   }
+  const feeds = new Set(definition.nodes.flatMap(node => node.dependsOn))
+  for (const node of definition.nodes) {
+    if (node.category === 'quick' && node.dependsOn.length >= 2 && !feeds.has(node.id) && isVerificationNode(node)) {
+      warnings.push(`node "${node.id}": the final audit requires judgment across inputs, while quick is reserved for mechanical checks - route it to unspecified-low or higher; both quick and unspecified-low use sonnet.`)
+    }
+  }
   return warnings
 }

@@ -34,7 +34,41 @@ test('read-only shell commands pass and anything that can write is refused', asy
     ['ls && touch x', 'touch is not on the read-only command list'],
     ['sort -o out.txt in.txt', 'sort -o writes a file'],
     ['git ls-files | xargs rm', 'xargs is not on the read-only command list'],
-    ['FOO=1 sed -i s/a/b/ f', 'sed is not on the read-only command list'],
+    ['FOO=1 sed -i s/a/b/ f', 'sed -i is not allowed in the main conversation'],
+  ]
+  for (const [command, problem] of writing) expect(readOnlyBashProblem(command)).toBe(problem)
+})
+
+test('loops, version probes, uv pip reads and printing sed pass; their writing forms do not', async () => {
+  const readOnly = [
+    'for d in Day03 Day04 Day05; do echo "=== $d .py files"; find $d -name "*.py" -not -path "*/.venv/*" | sort; done; echo; ls -la Day03/.venv 2>&1 | head -5; which uv; uv --version; python3 --version',
+    'ls -la Day03/.venv Day04/.venv 2>&1 | head; which uv; uv --version',
+    'ls -a Day03 | grep -E "venv|^\\." ; grep -rhoE "^\\s*(from|import) [a-z_]+" Day03 --include=*.py | sed -E \'s/^\\s*(from|import) //\' | cut -d. -f1 | sort | uniq -c | sort -rn',
+    'for f in Day03/uv.lock Day05/uv.lock; do echo "== $f"; rg -A1 \'^name = "pydantic"$\' $f; done',
+    "sed -n '1,40p' README.md",
+    "sed -n '/dependency-groups/,/^$/p;/\\[tool.pytest/,/^$/p' Day03/pyproject.toml",
+    'uv pip list -p .venv/bin/python',
+    'uv pip freeze',
+    'if [ -f a.txt ]; then cat a.txt; else echo none; fi',
+    'while read line; do echo "$line"; done < list.txt',
+  ]
+  for (const command of readOnly) expect(`${command} => ${readOnlyBashProblem(command) ?? 'ok'}`).toBe(`${command} => ok`)
+
+  const writing: [string, string][] = [
+    ['for f in *.tmp; do rm $f; done', 'rm is not on the read-only command list'],
+    ['for f in $(ls); do cat $f; done', 'command substitution can run anything'],
+    ['for in; do ls; done', 'a for loop must read "for NAME in WORDS"'],
+    ["sed 's/a/b/w out.txt' f", 'sed s with the w or e flag writes files or runs commands'],
+    ["sed -n '1w out.txt' f", 'sed command "w" can write files or run commands'],
+    ["sed 's/x/date/e' f", 'sed s with the w or e flag writes files or runs commands'],
+    ['sed -f script.sed f', 'sed -f is not allowed in the main conversation'],
+    ['uv pip install requests', 'uv pip install is not a read-only uv command'],
+    ['uv lock', 'uv lock is not a read-only uv command'],
+    ['uv sync --version extra', 'uv sync is not a read-only uv command'],
+    ['curl -s https://pypi.org/pypi/openrouter/json', 'curl is not on the read-only command list'],
+    ['if true; then touch x; fi', 'touch is not on the read-only command list'],
+    ['cat <(rm -rf build)', 'process substitution can run anything'],
+    ['diff <(ls a) <(ls b)', 'process substitution can run anything'],
   ]
   for (const [command, problem] of writing) expect(readOnlyBashProblem(command)).toBe(problem)
 })
@@ -75,6 +109,26 @@ test('the lint flags contract gaps per node and a missing verification node only
   expect(lintDefinition(noVerify)).toEqual(['the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.'])
   expect(lintDefinition(def([{ id: 'a', prompt: full }, { id: 'final', label: 'Run tests', prompt: full, dependsOn: ['a'] }]))).toEqual([])
   expect(isVerificationNode({ id: 'verify', prompt: full, dependsOn: [] })).toBe(false)
+})
+
+test('the lint reserves quick for mechanical checks rather than a final audit', async () => {
+  const def = (nodes: unknown[]) => {
+    const r = parseDefinition({ key: 'k', nodes })
+    if (!r.ok) throw new Error(r.error.message)
+    return r.value
+  }
+  const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
+  const lanes = [{ id: 'a', prompt: full }, { id: 'b', prompt: full }]
+  expect(lintDefinition(def([...lanes, { id: 'audit', category: 'quick', prompt: full, dependsOn: ['a', 'b'] }]))).toHaveLength(1)
+  expect(lintDefinition(def([...lanes, { id: 'audit', category: 'unspecified-low', prompt: full, dependsOn: ['a', 'b'] }]))).toEqual([])
+  expect(lintDefinition(def([...lanes, { id: 'verify-a', category: 'quick', prompt: full, dependsOn: ['a'] }]))).toEqual([])
+  expect(
+    lintDefinition(def([
+      ...lanes,
+      { id: 'verify-ab', category: 'quick', prompt: full, dependsOn: ['a', 'b'] },
+      { id: 'report', category: 'writing', prompt: full, dependsOn: ['verify-ab'] },
+    ])),
+  ).toEqual([])
 })
 
 test('the injected protocol states the rule for each enforcement level', async () => {

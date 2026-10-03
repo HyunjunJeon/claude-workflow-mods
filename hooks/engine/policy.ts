@@ -54,7 +54,89 @@ const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
   'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'find', 'fd', 'tree', 'pwd', 'echo',
   'printf', 'stat', 'file', 'du', 'df', 'which', 'type', 'basename', 'dirname', 'realpath', 'readlink',
   'sort', 'uniq', 'cut', 'tr', 'diff', 'cmp', 'jq', 'date', 'whoami', 'uname', 'nl', 'column', 'true', 'cd',
+  'test', '[', 'read',
 ])
+
+// Shell structure words: what follows them on the same segment is a command
+// checked like any other, and a bare closing word carries no command at all.
+const SHELL_LEADERS: ReadonlySet<string> = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!'])
+const SHELL_CLOSERS: ReadonlySet<string> = new Set(['done', 'fi'])
+const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-V', '--help', '-h'])
+const UV_PIP_READ_ONLY: ReadonlySet<string> = new Set(['list', 'freeze', 'show', 'check'])
+const SED_FLAGS = /^-[nEru]+$|^--(quiet|silent|regexp-extended|unbuffered)$/
+const SED_SAFE_COMMANDS: ReadonlySet<string> = new Set(['p', 'P', 'd', 'D', '=', 'q', 'Q', 'n', 'N', 'h', 'H', 'g', 'G', 'x', 'l', '{', '}'])
+
+// A sed script is read-only unless it writes (w, W, s///w) or runs (e, s///e)
+// something; scanning skips delimited regexes so a ';' or 'w' inside one is text.
+function sedScriptProblem(script: string): string | undefined {
+  let i = 0
+  const delimited = (delimiter: string): boolean => {
+    while (i < script.length) {
+      const ch = script[i++]
+      if (ch === '\\') i++
+      else if (ch === delimiter) return true
+    }
+    return false
+  }
+  const address = (): boolean => {
+    if (script[i] === '/') {
+      i++
+      return delimited('/')
+    }
+    if (script[i] === '\\' && i + 1 < script.length) {
+      const delimiter = script[i + 1] as string
+      i += 2
+      return delimited(delimiter)
+    }
+    while (i < script.length && /[\d$~]/.test(script[i] as string)) i++
+    return true
+  }
+  const skip = () => {
+    while (i < script.length && /[\s;]/.test(script[i] as string)) i++
+  }
+  skip()
+  while (i < script.length) {
+    if (!address()) return 'sed script has an unterminated address'
+    if (script[i] === ',') {
+      i++
+      if (!address()) return 'sed script has an unterminated address'
+    }
+    while (script[i] === ' ' || script[i] === '!') i++
+    const command = script[i++]
+    if (command === undefined) return 'sed script lacks a command'
+    if (command === 's' || command === 'y') {
+      const delimiter = script[i++]
+      if (!delimiter || !delimited(delimiter) || !delimited(delimiter)) return `sed ${command} command is unterminated`
+      const start = i
+      while (i < script.length && /[A-Za-z0-9]/.test(script[i] as string)) i++
+      if (/[weW]/.test(script.slice(start, i))) return 'sed s with the w or e flag writes files or runs commands'
+    } else if (!SED_SAFE_COMMANDS.has(command)) {
+      return `sed command "${command}" can write files or run commands`
+    }
+    skip()
+  }
+  return undefined
+}
+
+function sedProblem(args: string[]): string | undefined {
+  const scripts: string[] = []
+  for (let k = 0; k < args.length; k++) {
+    const arg = args[k] as string
+    if (SED_FLAGS.test(arg)) continue
+    if (arg === '-e' || arg === '--expression') {
+      scripts.push(args[++k] ?? '')
+      continue
+    }
+    if (arg.startsWith('-')) return `sed ${arg} is not allowed in the main conversation`
+    if (scripts.length === 0) scripts.push(arg)
+  }
+  if (scripts.length === 0) return 'sed without a script'
+  for (const script of scripts) {
+    const problem = sedScriptProblem(script)
+    if (problem) return problem
+  }
+  return undefined
+}
 
 const GIT_READ_ONLY: ReadonlySet<string> = new Set([
   'status', 'log', 'diff', 'show', 'ls-files', 'ls-tree', 'rev-parse', 'blame', 'describe', 'shortlog',
@@ -134,16 +216,32 @@ export function readOnlyBashProblem(command: string): string | undefined {
   const text = command.replace(/\d?>&\d/g, ' ').replace(/\d?>\s*\/dev\/null/g, ' ')
   const outsideSingle = text.replace(/'[^']*'/g, "''")
   if (/[`]|\$\(/.test(outsideSingle)) return 'command substitution can run anything'
+  if (/<\(/.test(outsideSingle)) return 'process substitution can run anything'
   if (/>/.test(outsideSingle.replace(/"[^"]*"/g, '""'))) return 'output redirection writes files'
   for (const segment of splitSegments(text)) {
-    const tokens = tokenize(segment)
-    while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] as string)) tokens.shift()
+    const tokens = tokenize(segment).filter((token, k, all) => !/^\d?<$/.test(token) && !/^\d?<[^<(]/.test(token) && !/^\d?<$/.test(all[k - 1] ?? ''))
+    while (tokens.length > 0 && (SHELL_LEADERS.has(tokens[0] as string) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] as string))) tokens.shift()
     const head = tokens[0]
     if (!head) continue
+    if (SHELL_CLOSERS.has(head) && tokens.length === 1) continue
+    if (head === 'for') {
+      if (tokens.length >= 3 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[1] as string) && tokens[2] === 'in') continue
+      return 'a for loop must read "for NAME in WORDS"'
+    }
     const name = head.split('/').pop() as string
     const args = tokens.slice(1)
+    if (args.length === 1 && VERSION_FLAGS.has(args[0] as string)) continue
     if (name === 'git') {
       const problem = gitVerdict(args)
+      if (problem) return problem
+      continue
+    }
+    if (name === 'uv') {
+      if (args[0] === 'pip' && UV_PIP_READ_ONLY.has(args[1] as string)) continue
+      return `uv ${args.slice(0, args[0] === 'pip' ? 2 : 1).join(' ')} is not a read-only uv command`.trim()
+    }
+    if (name === 'sed') {
+      const problem = sedProblem(args)
       if (problem) return problem
       continue
     }
