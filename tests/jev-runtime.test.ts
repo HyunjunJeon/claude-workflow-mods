@@ -1,5 +1,5 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
-import type { HttpInit, HttpResponse, On } from 'claude-code'
+import type { HttpInit, HttpResponse, ModelCompleteRequest, ModelCompleteResult, On } from 'claude-code'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { createRun } from '../hooks/engine/run.ts'
 import type { Run } from '../hooks/engine/types.ts'
@@ -26,6 +26,13 @@ function choice(value: string, confidence = 0.95) {
   return { type: 'choice', choice: value, confidence }
 }
 
+const USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+function modelReply(choice: string, confidence = 0.95): ModelCompleteResult {
+  const answer = { type: 'choice', choice, confidence, probabilities: { [choice]: confidence } }
+  return { isAnswered: true, text: JSON.stringify({ answers: { permission: answer } }), usage: USAGE }
+}
+
 function harness(on: On, key: string | null = 'fake-test-key') {
   const clock = mock.clock(on, { now: 1_000 })
   mock.store(on)
@@ -38,7 +45,14 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   const control = {
     reply: response({ a: choice('architect'), b: choice('quick'), c: choice('writing') }),
     failure: false,
+    model: { isAnswered: false, reason: 'empty-reply', usage: USAGE } as ModelCompleteResult | Error,
   }
+  const models: ModelCompleteRequest[] = []
+  on('model.complete', ($, e) => {
+    models.push(e)
+    if (control.model instanceof Error) throw control.model
+    return { value: control.model }
+  })
   // Mutable transport control is the API seam, never a production evaluator mock.
   let transport: (() => Promise<HttpResponse>) | undefined
   on('http.fetch', async ($, e) => {
@@ -70,7 +84,7 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   on('turn.complete', () => ({ text: '' }))
   on('classic.SessionStart', () => ({}))
   return {
-    clock, files, requests, spawns, order, control,
+    clock, files, requests, spawns, order, control, models,
     transport(value: () => Promise<HttpResponse>) { transport = value },
   }
 }
@@ -132,7 +146,7 @@ test('new starts batch every node once, route spawns, and preserve definition an
 })
 
 for (const disabled of ['no-key', 'off']) {
-  test(`routing and permission never use HTTP when ${disabled}`, { options: { jev_enabled: disabled !== 'off' } }, async ($, on) => {
+  test(`routing and permission never use HTTP when ${disabled}`, { options: { jev_enabled: disabled !== 'off', jev_model_fallback: disabled === 'off' } }, async ($, on) => {
     const h = harness(on, disabled === 'no-key' ? null : 'fake-test-key')
     on('tool.check', () => ({ decision: 'ask', reason: 'approval', rule: 'test-rule' }))
     await boot($)
@@ -144,7 +158,33 @@ for (const disabled of ['no-key', 'off']) {
     ])
     expect(await $.tool.check({ tool: PROBE, input: {} })).toEqual({ decision: 'ask', reason: 'approval', rule: 'test-rule' })
     expect(h.requests).toHaveLength(0)
+    expect(h.models).toHaveLength(0)
     expect(h.spawns.map(spawn => spawn.model)).toEqual(['sonnet', 'sonnet'])
+  })
+}
+
+const MODEL_FALLBACKS = [
+  { name: 'missing key and an answered model', key: null, status: 200, model: modelReply('allow'), decision: 'allow' },
+  { name: 'missing key and an aborted model', key: null, status: 200, model: { isAnswered: false, reason: 'aborted', usage: USAGE } as const, decision: 'ask' },
+  { name: 'HTTP 503 and an answered model', key: 'fake-test-key', status: 503, model: modelReply('allow'), decision: 'allow' },
+  { name: 'missing key and a rejected model call', key: null, status: 200, model: new Error('test model failure'), decision: 'ask' },
+]
+
+for (const item of MODEL_FALLBACKS) {
+  test(`session model fallback with ${item.name} decides ${item.decision}`, async ($, on) => {
+    const h = harness(on, item.key)
+    h.control.reply = response({}, item.status)
+    h.control.model = item.model
+    on('tool.check', () => ({ decision: 'ask', reason: 'baseline', rule: 'rule' }))
+    await boot($)
+    const verdict = await $.tool.check({ tool: PROBE, input: {} })
+    expect(verdict.decision).toBe(item.decision)
+    if (item.decision === 'ask') expect(verdict).toEqual({ decision: 'ask', reason: 'baseline', rule: 'rule' })
+    expect(h.requests).toHaveLength(item.key ? 1 : 0)
+    expect(h.models).toHaveLength(1)
+    expect(h.models[0]).toMatchObject({ model: 'sonnet', effort: 'low', timeoutMs: 5_000 })
+    const [record] = (await dag($, { action: 'decisions' })).decisions
+    expect(record).toMatchObject({ backend: 'model', source: item.decision === 'allow' ? 'jev' : 'baseline' })
   })
 }
 

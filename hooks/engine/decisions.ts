@@ -14,6 +14,8 @@ export type DecisionRecord = {
   readonly proposed: string
   readonly selected: string
   readonly source: 'jev' | 'baseline'
+  // Which Jev backend answered or failed; absent in records written before the model fallback or without a call.
+  readonly backend?: 'http' | 'model'
   readonly outcome: DecisionOutcome
   readonly ruleset: string
   readonly threshold: number
@@ -49,6 +51,7 @@ function isDecision(value: unknown): value is DecisionRecord {
   if (value.source !== 'jev' && value.source !== 'baseline') return false
   if (typeof value.outcome !== 'string' || !outcomes.includes(value.outcome)) return false
   if (value.confidence !== undefined && (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1)) return false
+  if (value.backend !== undefined && value.backend !== 'http' && value.backend !== 'model') return false
   if (value.runId !== undefined && typeof value.runId !== 'string') return false
   if (value.nodeId !== undefined && typeof value.nodeId !== 'string') return false
   if (value.probabilities !== undefined && (!isRecord(value.probabilities) || !Object.values(value.probabilities).every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1))) return false

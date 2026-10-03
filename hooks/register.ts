@@ -3,7 +3,7 @@ import { parseDefinition } from './engine/definition.ts'
 import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, lintDefinition } from './engine/lint.ts'
-import { parseChoices, permissionRequest, recoveryRequest, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
+import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSummary, emptyContext, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
@@ -93,6 +93,7 @@ const toolContexts = new Map<string, JevContext>()
 let userRequest = ''
 let jevEnabled = true
 let jevConfidence = 0.9
+let jevModelFallback = true
 let jevApiKey: string | undefined
 let ticks = 0
 let workflowContext = emptyContext('', '', 0)
@@ -116,6 +117,7 @@ type JevEvaluation = {
   choices: ReadonlyMap<string, JevChoice>
   outcome: Exclude<DecisionOutcome, 'applied' | 'low-confidence' | 'ask' | 'existing-decision'> | 'answered'
   latencyMs: number
+  backend?: 'http' | 'model'
 }
 
 function serialized<T>(job: () => Promise<T>): Promise<T> {
@@ -137,9 +139,41 @@ function seenAgent($: EngineInterface, agentId: string, source: string): void {
   debug($, `agent ${agentId} (${owner.run.runId}/${owner.nodeId}) seen via ${source}`)
 }
 
-async function evaluateJev($: EngineInterface, request: JevRequest): Promise<JevEvaluation> {
-  if (!jevEnabled || !jevApiKey) return { choices: new Map(), outcome: jevEnabled ? 'missing-key' : 'disabled', latencyMs: 0 }
+// HTTP is primary; the session model answers only when the key is missing or the HTTP call fails, times out or is non-2xx.
+async function evaluateJev($: EngineInterface, request: JevRequest, signal?: AbortSignal): Promise<JevEvaluation> {
+  if (!jevEnabled) return { choices: new Map(), outcome: 'disabled', latencyMs: 0 }
+  if (!jevApiKey && !jevModelFallback) return { choices: new Map(), outcome: 'missing-key', latencyMs: 0 }
   const startedAt = await $.clock.now()
+  if (jevApiKey) {
+    const http = await evaluateJevHttp($, request, jevApiKey, startedAt)
+    if (!jevModelFallback || (http.outcome !== 'http-error' && http.outcome !== 'timeout' && http.outcome !== 'transport-error')) return http
+  }
+  return evaluateJevModel($, request, startedAt, signal)
+}
+
+async function evaluateJevModel($: EngineInterface, request: JevRequest, startedAt: number, signal?: AbortSignal): Promise<JevEvaluation> {
+  const ask = modelPrompt(request)
+  debug($, `Jev model fallback started (${Object.keys(request.questions).length} question(s))`)
+  try {
+    const reply = await $.model.complete(
+      { model: 'sonnet', system: ask.system, prompt: ask.prompt, maxTokens: ask.maxTokens, effort: 'low', timeoutMs: JEV_TIMEOUT_MS },
+      signal ? { signal } : undefined,
+    )
+    const latencyMs = (await $.clock.now()) - startedAt
+    if (!reply.isAnswered) {
+      $.ui.log(`Jev model fallback unavailable (${reply.reason}); keeping existing decisions`)
+      return { choices: new Map(), outcome: reply.reason === 'aborted' ? 'timeout' : reply.reason === 'api-error' ? 'http-error' : 'invalid-response', latencyMs, backend: 'model' }
+    }
+    const choices = parseModelChoices(reply.text, request.questions)
+    if (choices.size !== Object.keys(request.questions).length) $.ui.log('Jev model fallback returned incomplete decisions; keeping existing decisions for unanswered questions')
+    return { choices, outcome: choices.size ? 'answered' : 'invalid-response', latencyMs, backend: 'model' }
+  } catch (error) {
+    $.ui.log(`Jev model fallback failed (${error instanceof Error ? error.name : 'unknown error'}); keeping existing decisions`)
+    return { choices: new Map(), outcome: 'transport-error', latencyMs: (await $.clock.now()) - startedAt, backend: 'model' }
+  }
+}
+
+async function evaluateJevHttp($: EngineInterface, request: JevRequest, apiKey: string, startedAt: number): Promise<JevEvaluation> {
   debug($, `Jev request started (${Object.keys(request.questions).length} question(s))`)
   let timeout: ReturnType<EngineInterface['clock']['after']> | undefined
   const deadline = new Promise<undefined>(resolve => {
@@ -149,21 +183,21 @@ async function evaluateJev($: EngineInterface, request: JevRequest): Promise<Jev
     const response = await Promise.race([
       $.http.fetch('https://api.typesafe.ai/v1/systemone', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${jevApiKey}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
       }),
       deadline,
     ])
     if (!response || !response.ok) {
-      $.ui.log(`Jev unavailable (${response ? response.status : 'timeout'}); keeping existing decisions`)
-      return { choices: new Map(), outcome: response ? 'http-error' : 'timeout', latencyMs: (await $.clock.now()) - startedAt }
+      $.ui.log(`Jev unavailable (${response ? response.status : 'timeout'}); ${jevModelFallback ? 'asking the session model' : 'keeping existing decisions'}`)
+      return { choices: new Map(), outcome: response ? 'http-error' : 'timeout', latencyMs: (await $.clock.now()) - startedAt, backend: 'http' }
     }
     const choices = parseChoices(response.text, request.questions)
     if (choices.size !== Object.keys(request.questions).length) $.ui.log('Jev returned incomplete decisions; keeping existing decisions for unanswered questions')
-    return { choices, outcome: choices.size ? 'answered' : 'invalid-response', latencyMs: (await $.clock.now()) - startedAt }
+    return { choices, outcome: choices.size ? 'answered' : 'invalid-response', latencyMs: (await $.clock.now()) - startedAt, backend: 'http' }
   } catch (error) {
-    $.ui.log(`Jev request failed (${error instanceof Error ? error.name : 'unknown error'}); keeping existing decisions`)
-    return { choices: new Map(), outcome: 'transport-error', latencyMs: (await $.clock.now()) - startedAt }
+    $.ui.log(`Jev request failed (${error instanceof Error ? error.name : 'unknown error'}); ${jevModelFallback ? 'asking the session model' : 'keeping existing decisions'}`)
+    return { choices: new Map(), outcome: 'transport-error', latencyMs: (await $.clock.now()) - startedAt, backend: 'http' }
   } finally {
     timeout?.cancel()
     debug($, `Jev request finished in ${(await $.clock.now()) - startedAt} ms`)
@@ -206,8 +240,8 @@ async function persistDecisions($: EngineInterface, records: DecisionRecord[]): 
   $.ui.invalidate('ui.render')
 }
 
-function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold'>): DecisionRecord {
-  return { ...input, id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold: jevConfidence }
+function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: JevEvaluation): DecisionRecord {
+  return { ...input, ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold: jevConfidence }
 }
 
 async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Run> {
@@ -227,7 +261,7 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
       source: outcome === 'applied' ? 'jev' : 'baseline', outcome,
       latencyMs: evaluation.latencyMs, stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-    }))
+    }, evaluation))
     if (choice && choice.confidence >= jevConfidence) {
       debug($, `Jev route ${run.runId}/${node.id}: ${choice.choice} (${choice.confidence})`)
       return { ...node, routing: { source: 'jev' as const, category: choice.choice, confidence: choice.confidence } }
@@ -622,7 +656,7 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
     source: outcome === 'applied' ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
     stateHash: hash(stableStringify(request.state)),
     ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-  })])
+  }, evaluation)])
   if (outcome !== 'applied' || !kind) return run
   const reason = (node.error ?? 'The node failed.').slice(0, 2_000)
   const prepared: Run = {
@@ -1330,6 +1364,7 @@ export function register(on: On, options: PluginOptions) {
   language = options.language === 'ko' ? 'ko' : 'en'
   autoRecovery = options.auto_recovery !== false
   jevEnabled = options.jev_enabled !== false
+  jevModelFallback = options.jev_model_fallback !== false
   if (typeof options.jev_confidence === 'number' && Number.isFinite(options.jev_confidence) && options.jev_confidence >= 0 && options.jev_confidence <= 1) jevConfidence = options.jev_confidence
   t = stringsFor(options.language)
   if (typeof options.max_concurrent === 'number' && options.max_concurrent >= 1) maxConcurrent = Math.floor(options.max_concurrent)
@@ -1348,7 +1383,9 @@ export function register(on: On, options: PluginOptions) {
       } catch (error) {
         $.ui.log(`Jev credentials unavailable (${error instanceof Error ? error.name : 'unknown error'}); keeping existing decisions`)
       }
-      if (!jevApiKey) $.ui.log('Jev inactive: TYPESAFE_API_KEY is not set; keeping existing decisions')
+      if (!jevApiKey) $.ui.log(jevModelFallback
+        ? 'Jev API inactive: TYPESAFE_API_KEY is not set; using the session model, billed to your Claude plan'
+        : 'Jev inactive: TYPESAFE_API_KEY is not set; keeping existing decisions')
     }
     sessionId = await $.session.id()
     await $.tool.register({ name: 'dag', description: TOOL_DESCRIPTION, inputSchema: INPUT_SCHEMA })
@@ -1517,7 +1554,7 @@ export function register(on: On, options: PluginOptions) {
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
     if (jevPermissionScope === 'dag' && context?.task === undefined) return decided
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })
-    const evaluation = await evaluateJev($, request)
+    const evaluation = await evaluateJev($, request, next.signal)
     const choice = evaluation.choices.get('permission')
     const outcome = decisionOutcome(evaluation, choice)
     const applied = outcome === 'applied' && choice && (choice.choice === 'allow' || choice.choice === 'deny')
@@ -1527,7 +1564,7 @@ export function register(on: On, options: PluginOptions) {
       source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
       stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-    })])
+    }, evaluation)])
     if (!applied) return decided
     debug($, `Jev permission ${e.tool}: ${choice.choice} (${choice.confidence})`)
     return { decision: choice.choice, reason: `Jev ${choice.choice} (${choice.confidence})` }

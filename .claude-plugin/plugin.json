@@ -16,6 +16,12 @@
       "description": "With TYPESAFE_API_KEY, classify DAG workers and resolve uncertain tool permissions; missing or uncertain decisions retain the existing flow",
       "default": true
     },
+    "jev_model_fallback": {
+      "type": "boolean",
+      "title": "Jev session-model fallback",
+      "description": "When TYPESAFE_API_KEY is missing or the Jev API fails, times out or returns an error, ask the session's own Sonnet model instead; its usage counts against your Claude plan",
+      "default": true
+    },
     "jev_confidence": {
       "type": "number",
       "title": "Jev minimum confidence",

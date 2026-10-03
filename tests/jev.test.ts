@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { permissionRequest, parseChoices, routingRequest } from '../hooks/engine/jev.ts'
+import { modelPrompt, parseModelChoices, permissionRequest, parseChoices, routingRequest } from '../hooks/engine/jev.ts'
 import { hash } from '../hooks/engine/hash.ts'
 import { createRun } from '../hooks/engine/run.ts'
 
@@ -78,6 +78,36 @@ test('choice parsing accepts only requested keys and includes confidence boundar
     ['b', { choice: 'quick', confidence: 1 }],
   ])
 })
+
+test('the model prompt carries the request state and questions and parses a valid reply', () => {
+  const request = routingRequest(run(), ['a', 'b'])
+  const prompt = modelPrompt(request)
+  expect(JSON.parse(prompt.prompt)).toEqual({ state: request.state, questions: request.questions })
+  expect(prompt.maxTokens).toBeLessThanOrEqual(4_000)
+  const probabilities = { architect: 0.92, quick: 0.08 }
+  const parsed = parseModelChoices(`\n${JSON.stringify({ answers: {
+    a: { type: 'choice', choice: 'architect', confidence: 0.92, probabilities },
+    b: { type: 'choice', choice: 'quick', confidence: 1, probabilities: { quick: 1 } },
+  } })}\n`, request.questions)
+  expect([...parsed]).toEqual([
+    ['a', { choice: 'architect', confidence: 0.92, probabilities }],
+    ['b', { choice: 'quick', confidence: 1, probabilities: { quick: 1 } }],
+  ])
+})
+
+const MODEL_REJECTS: readonly [string, string][] = [
+  ['malformed JSON', '```json\n{"answers":{}}\n```'],
+  ['confidence out of range', JSON.stringify({ answers: { permission: { type: 'choice', choice: 'allow', confidence: 1.2, probabilities: { allow: 1 } } } })],
+  ['choice outside options', JSON.stringify({ answers: { permission: { type: 'choice', choice: 'maybe', confidence: 0.95, probabilities: { allow: 1 } } } })],
+  ['unknown question id', JSON.stringify({ answers: { other: { type: 'choice', choice: 'allow', confidence: 0.95, probabilities: { allow: 1 } } } })],
+  ['missing probabilities', JSON.stringify({ answers: { permission: { type: 'choice', choice: 'allow', confidence: 0.95 } } })],
+]
+
+for (const [name, text] of MODEL_REJECTS) {
+  test(`the model reply parser leaves the question unanswered for ${name}`, () => {
+    expect(parseModelChoices(text, permissionRequest('Read', {}, { request: '', projectRoot: '/work' }).questions).size).toBe(0)
+  })
+}
 
 for (const text of ['{', 'null', '[]', '{}', '{"answers":null}', '{"answers":[]}', '{"answers":"wrong"}']) {
   test(`choice parsing falls back for invalid envelope ${text}`, () => {
