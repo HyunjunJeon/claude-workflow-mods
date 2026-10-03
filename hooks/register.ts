@@ -254,7 +254,9 @@ async function refreshExternalRuns($: EngineInterface): Promise<void> {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
     try {
       const loaded = JSON.parse(await $.fs.read(`${runsDir}/${entry.name}`)) as Run
-      if (loaded.schemaVersion === 1 && loaded.sessionId !== sessionId && typeof loaded.runId === 'string') runs.set(loaded.runId, loaded)
+      const current = runs.get(loaded.runId)
+      if (loaded.schemaVersion === 1 && loaded.sessionId !== sessionId && typeof loaded.runId === 'string'
+        && (!current || loaded.updatedAt > current.updatedAt)) runs.set(loaded.runId, loaded)
     } catch (error) {
       $.ui.log(`could not refresh ${entry.name}: ${message(error)}`)
     }
@@ -686,7 +688,18 @@ async function notifyHandoff($: EngineInterface, run: Run): Promise<void> {
 async function handoffAction($: EngineInterface, operation: 'request' | 'accept' | 'cancel', input: { runId: string; target?: string }): Promise<{ text: string }> {
   if (!/^[A-Za-z0-9_.-]+$/.test(input.runId)) return { text: 'Invalid run id.' }
   const lock = `${runsDir}/.${input.runId}.handoff-lock`
-  const acquired = await $.process.run(['mkdir', lock])
+  let acquired = await $.process.run(['mkdir', lock])
+  if (acquired.exitCode !== 0) {
+    try {
+      const stat = await $.fs.stat(lock)
+      if ((await $.clock.now()) - stat.mtimeMs > 60_000) {
+        const removed = await $.process.run(['rmdir', lock])
+        if (removed.exitCode === 0) acquired = await $.process.run(['mkdir', lock])
+      }
+    } catch (error) {
+      $.ui.log(`Could not recover handoff lock ${lock}: ${message(error)}`)
+    }
+  }
   if (acquired.exitCode !== 0) return { text: 'Another handoff operation owns this run. Try again after it finishes.' }
   try {
     await refreshSessions($)
@@ -701,6 +714,7 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
         : target ? requestHandoff(run, target, context) : { ok: false as const, error: { code: 'unknown_session', message: 'Choose an active session shown by /dag sessions.' } }
     if (!result.ok) return { text: `${result.error.code}: ${result.error.message}` }
     await persist($, result.value)
+    const warnings: string[] = []
     if (operation === 'accept') {
       const sourcePath = `${projectRoot}/${DAG_SUBDIR}/context/${run.sessionId}.json`
       try {
@@ -709,11 +723,19 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
           if (!workflowContext.notes.some(existing => existing.text === note.text)) workflowContext = addNote(workflowContext, { text: note.text, at: context.now })
         }
       } catch (error) {
-        $.ui.log(`Could not import source context notes: ${message(error)}`)
+        const warning = `Could not import source context notes: ${message(error)}`
+        $.ui.log(warning)
+        warnings.push(warning)
       }
       userRequest = `Manual handoff accepted: ${run.runId}. Goal: ${run.definition.goal ?? run.name}. Continue only the remaining nodes under their declared scopes.`
       workflowContext = recordRequest(workflowContext, { at: context.now, text: userRequest })
-      await persistContext($)
+      try {
+        await persistContext($)
+      } catch (error) {
+        const warning = `Could not persist accepted context: ${message(error)}`
+        $.ui.log(warning)
+        warnings.push(warning)
+      }
     }
     if (operation === 'request') {
       if (result.value.handoff?.offeredAt !== undefined) await notifyHandoff($, result.value)
@@ -722,11 +744,17 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
     }
     await refreshSessions($)
     $.ui.invalidate('ui.render')
-    return { text: operation === 'request' ? `Handoff requested for ${run.runId}. Running nodes drain first; ${input.target} must explicitly accept.` : `${operation === 'accept' ? 'Accepted' : 'Cancelled handoff for'} ${run.runId}.` }
+    const text = operation === 'request' ? `Handoff requested for ${run.runId}. Running nodes drain first; ${input.target} must explicitly accept.` : `${operation === 'accept' ? 'Accepted' : 'Cancelled handoff for'} ${run.runId}.`
+    return { text: text + (warnings.length ? ` Warning: ${warnings.join(' ')}` : '') }
   } catch (error) {
     return { text: `Handoff failed: ${message(error)}` }
   } finally {
-    await $.process.run(['rmdir', lock])
+    try {
+      const released = await $.process.run(['rmdir', lock])
+      if (released.exitCode !== 0) $.ui.log(`Could not release handoff lock ${lock}: ${released.stderr.trim() || `exit ${released.exitCode}`}`)
+    } catch (error) {
+      $.ui.log(`Could not release handoff lock ${lock}: ${message(error)}`)
+    }
   }
 }
 
@@ -1192,7 +1220,7 @@ export function register(on: On, options: PluginOptions) {
       if (sessionClosed) return
       try {
         await refreshSessions($)
-        await refreshExternalRuns($)
+        await serialized(() => refreshExternalRuns($))
         $.ui.invalidate('ui.render')
       } catch (error) {
         $.ui.log(`could not refresh project sessions: ${message(error)}`)
@@ -1248,7 +1276,7 @@ export function register(on: On, options: PluginOptions) {
     const peer = e.origin.kind === 'peer' || e.origin.kind === 'peer-send-message'
     if (e.agentId || !peer || !/(^|\n)\[dag-handoff\](?:\s|$)/.test(e.text)) return next(e)
     await refreshSessions($)
-    await refreshExternalRuns($)
+    await serialized(() => refreshExternalRuns($))
     $.ui.log('A manual handoff is available. Open /dag sessions or the Sessions pane to inspect and accept it.')
     $.ui.invalidate('ui.render')
     return { consumed: 'Manual handoff awaits user action; no work was accepted automatically.' }

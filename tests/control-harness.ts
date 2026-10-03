@@ -15,10 +15,14 @@ export function harness(on: On) {
   const processes: EventOf['process.run'][] = []
   const requests: JevRequest[] = []
   const reads: string[] = []
+  const readOnce = new Map<string, string>()
+  const writeErrors = new Map<string, string>()
+  const logs: string[] = []
   const stats: string[] = []
   const sends: EventOf['session.send'][] = []
   const prompts: string[] = []
   const locks = new Set<string>()
+  const lockMtimes = new Map<string, number>()
   const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
@@ -61,17 +65,28 @@ export function harness(on: On) {
   })
   on('fs.read', ($, e) => {
     reads.push(e.path)
+    const override = readOnce.get(e.path)
+    if (override !== undefined) {
+      readOnce.delete(e.path)
+      return { value: override }
+    }
     const text = files.get(e.path)
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: text }
   })
   on('fs.stat', ($, e) => {
     stats.push(e.path)
+    if (locks.has(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: lockMtimes.get(e.path) ?? 1_000, isLink: false } }
     const text = files.get(e.path)
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } }
   })
-  on('fs.write', ($, e) => { files.set(e.path, e.text); return { value: undefined } })
+  on('fs.write', ($, e) => {
+    const error = writeErrors.get(e.path)
+    if (error !== undefined) throw new Error(error)
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
   on('agent.list', () => ({ value: [] }))
   on('agent.spawn', ($, e) => {
     spawns.push(e)
@@ -83,13 +98,13 @@ export function harness(on: On) {
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('prompt.submit', ($, e) => { prompts.push(e.text); return { text: e.text } })
   on('skill.prompt', ($, e) => ({ text: e.text }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
-  return { clock, files, store, spawns, processes, requests, reads, stats, sends, prompts, locks, control }
+  return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, stats, sends, prompts, locks, lockMtimes, control }
 }
 
 export async function boot($: Engine) {
