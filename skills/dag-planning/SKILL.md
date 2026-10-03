@@ -17,7 +17,7 @@ Reading is not planning. Before `start`, write the run plan in one breath - the 
 
 ## The shape
 
-A run is a declarative definition: a stable `key` (idempotency: starting the same key with the same definition returns the existing run), a human `name`, a `goal`, and `nodes`. Each node has an `id`, a self-contained English `prompt`, a `category` that routes it to a model, and optional `dependsOn` listing the node ids that must complete first. Optional per-node extras: `agent` (a subagent type such as `Explore`), `label`, `task_summary`, `description`, `load_skills`.
+A run is a declarative definition: a stable `key` (idempotency: starting the same key with the same definition returns the existing run), a human `name`, a `goal`, and `nodes`. Each node has an `id`, a self-contained English `prompt`, a `category` that routes it to a model, and optional `dependsOn` listing the node ids that must complete first. Every node also REQUIRES `verify`: 1-16 checks the runtime itself runs after the node reports completion, each either `{"kind": "file", "path": "<project-relative>", "contains": "<nonempty text>"}` (`contains` optional) or `{"kind": "command", "argv": ["<program>", "<arg>"]}`. `start` and `amend` refuse a definition with any node lacking it (`verification_required`). Optional `writes` lists the project-relative files or folders the node will change, so overlapping scopes across sessions become visible. Paths in both fields cannot be absolute, contain `..`, or point inside `.claude`. Optional per-node extras: `agent` (a subagent type such as `Explore`), `label`, `task_summary`, `description`, `load_skills`.
 
 `dependsOn` is ordering AND data. When a node starts, the plugin pastes the outputs of its direct dependencies into its prompt (each one's `## Output` section, up to 4,000 characters, plus the path of the full report). List as dependencies exactly the nodes whose results a node consumes - no more, no fewer.
 
@@ -27,11 +27,23 @@ A run is a declarative definition: a stable `key` (idempotency: starting the sam
   "definition": {
     "key": "docs-refresh-1",
     "name": "Docs refresh",
-    "goal": "Every page under docs/ matches the current API in src/, and every code sample compiles.",
+    "goal": "README.md documents the current DAG tool actions in hooks/engine/tool-spec.ts, with an independent audit report.",
     "nodes": [
-      { "id": "audit", "category": "quick", "prompt": "TASK: List every page under docs/ that references an API missing from src/. DELIVERABLE: ... SCOPE: read docs/ and src/, write nothing. VERIFY: ... STOP WHEN: ..." },
-      { "id": "rewrite", "category": "writing", "dependsOn": ["audit"], "prompt": "TASK: Rewrite each page the audit node listed against src/. ..." },
-      { "id": "verify", "category": "quick", "dependsOn": ["rewrite"], "prompt": "TASK: Compile every code sample under docs/ and check every internal link. ..." }
+      { "id": "audit", "category": "quick", "writes": ["notes/docs-audit.md"],
+        "verify": [{ "kind": "file", "path": "notes/docs-audit.md", "contains": "## Stale pages" }],
+        "prompt": "TASK: Compare README.md with hooks/engine/tool-spec.ts. DELIVERABLE: notes/docs-audit.md with a '## Stale pages' section listing missing or wrong action descriptions. SCOPE: read those two files, write only the report. VERIFY: recheck each finding against the tool schema. STOP WHEN: every action has been checked and the report exists." },
+      { "id": "rewrite", "category": "writing", "dependsOn": ["audit"], "writes": ["README.md"],
+        "verify": [
+          { "kind": "file", "path": "README.md", "contains": "/dag run" },
+          { "kind": "command", "argv": ["git", "diff", "--check", "--", "README.md"] }
+        ],
+        "prompt": "TASK: Correct README.md using the audit. DELIVERABLE: updated action descriptions. SCOPE: edit README.md only. VERIFY: compare the changed descriptions to hooks/engine/tool-spec.ts and run git diff --check -- README.md. STOP WHEN: each finding is addressed." },
+      { "id": "verify", "category": "unspecified-low", "dependsOn": ["rewrite"], "writes": ["notes/docs-verify.md"],
+        "verify": [
+          { "kind": "command", "argv": ["claude", "plugin", "validate", "."] },
+          { "kind": "file", "path": "notes/docs-verify.md", "contains": "Action audit: PASS" }
+        ],
+        "prompt": "TASK: Independently compare every documented action with hooks/engine/tool-spec.ts. DELIVERABLE: notes/docs-verify.md with evidence per action; write Action audit: PASS only if all match. SCOPE: read README.md and hooks/engine/tool-spec.ts, write only the report. VERIFY: run claude plugin validate . and record its result. STOP WHEN: every action has a supported verdict; report failed if any mismatch remains." }
     ]
   }
 }
@@ -41,7 +53,7 @@ The plugin appends the reporting contract to every node prompt itself: each node
 
 ## Goal before start
 
-Every run is goal-bound. `definition.goal` names the deliverable the graph produces in one sentence that a node can act on; every node sees it. Completion claims are false until proven against captured evidence: the verification node produces that evidence, and the run is done when the goal's observable condition holds - never merely when the last node reports.
+Every run is goal-bound. `definition.goal` names the deliverable the graph produces in one sentence that a node can act on; every node sees it. Completion claims are false until proven against captured evidence: the runtime's `verify` checks gate each node, the verification node produces the whole-result evidence, and the run is done when the goal's observable condition holds - never merely when the last node reports.
 
 ## Running a DAG
 
@@ -56,13 +68,21 @@ Every run is goal-bound. `definition.goal` names the deliverable the graph produ
 A settled run is not a dead end, and completed nodes keep their results:
 
 - `retry {run_id}` gives every failed or cancelled node a fresh attempt and re-runs their skipped dependents. `node_id` + `prompt` edits that node's instruction as it retries. A running run refuses with `run_still_active`; a completed node refuses with `node_not_retryable` - use `amend`.
-- `amend {run_id, definition}` diffs each node's fingerprint (prompt, category, agent, dependsOn): only changed or added nodes and their transitive dependents re-run. Amending a running node is refused with `amend_running_node`; the key must stay the same.
+- `amend {run_id, definition}` diffs each node's fingerprint (prompt, category, agent, dependsOn, verify, writes): only changed or added nodes and their transitive dependents re-run. Amending a running node is refused with `amend_running_node`; the key must stay the same.
 - `send {run_id, node_id, message}` steers a RUNNING node in place. A finished node cannot be revived (`node_not_continuable`); retry it with a prompt instead.
 - `cancel {run_id, reason}` stops the run's running nodes and cancels everything not started. Cancel is for abandoning the plan, never for impatience.
 
+## Verification and automatic recovery
+
+When a node reports completion, the runtime runs its `verify` checks (commands from the project root, no shell, 30-second limit, exit code 0 passes) and saves the evidence to `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking it `completed`. A failing check or missing evidence turns the node `failed`, so its dependents never start. Passing checks prove only what they check, not that the work is semantically right, so pick checks that would fail if the deliverable were wrong; never a no-op such as `true`. A node from an old definition with no `verify` fails as unverified: amend the definition with checks instead of treating it as done.
+
+With `auto_recovery` on (the default) and a confident Jev classification, a failed node retries automatically: `transient` on the same model grade, `implementation` on Opus, at most two extra attempts per node, with the original prompt, scope and goal kept. `missing-input`, `clarification`, `permanent`, uncertain or failed classifications, cancelled runs, pending handoffs and nodes without checks are left for you to `retry` or `amend`.
+
 ## Resume and other sessions
 
-Runs are checkpointed under `.claude/dag/runs/`, with each node's full report in `.claude/dag/runs/<run_id>/<node>.md`. When the same session resumes, nodes whose agents are gone start again. A run owned by another session is read-only until you `attach` it, which adopts the run and continues its remaining nodes here.
+Runs are checkpointed under `.claude/dag/runs/`, with each node's full report in `.claude/dag/runs/<run_id>/<node>.md`. When the same session resumes, nodes whose agents are gone start again. A run owned by another session is read-only. `attach` adopts it only when its owner session is no longer active and no handoff is pending (`owner_active`, `manual_handoff_required` otherwise). Moving a run between live sessions is a user action: the owner runs `/dag handoff <run> <session>`, running nodes drain while nothing new starts, and the target user runs `/dag accept <run>`. You cannot issue those commands.
+
+The plugin keeps this session's last 8 user requests and pinned notes and re-injects a bounded context snapshot with source paths at the first prompt, after compaction, after `/clear` and on resume. The `context`, `decisions` and `sessions` actions read that snapshot, the decision history, and same-project sessions with overlapping declared `writes`. Overlaps are information only; serialize or narrow your `writes` when you see one.
 
 ## Supervising a run
 
@@ -70,4 +90,4 @@ Observation is supervision. On every progress note, check the finished node's ou
 
 ## What the main conversation may do
 
-Under strict enforcement the main conversation keeps Read, LSP, web search/fetch, AskUserQuestion, plan mode, task listing/stopping, read-only Bash (`ls`, `cat`, `rg`, `find` without `-exec`/`-delete`, `git status|log|diff|show|...`) and the dag tool. Everything else is refused with an instruction to move the work into a node. Plans live in the DAG definition, never in TodoWrite or TaskCreate. Verify a settled run with Read and read-only Bash, or with a verification node when the check needs to run commands.
+Under strict enforcement the main conversation keeps Read, LSP, web search/fetch, AskUserQuestion, plan mode, task listing/stopping, read-only Bash (`ls`, `cat`, `rg`, `find` without `-exec`/`-delete`, `git status|log|diff|show|...`, `<tool> --version`, `uv pip list|freeze|show|check`, printing `sed -n`, and `for`/`if`/`while` loops whose commands are all read-only) and the dag tool. Everything else is refused with an instruction to move the work into a node. Plans live in the DAG definition, never in TodoWrite or TaskCreate. Verify a settled run with Read and read-only Bash, or with a verification node when the check needs to run commands.
