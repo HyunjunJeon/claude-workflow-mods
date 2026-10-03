@@ -60,6 +60,12 @@ export type Strings = {
   toastVerificationFailed: (run: string, node: string) => string
   toastHandoff: string
   toastSettledFailed: (run: string, failed: number) => string
+  toastPaneWaiting: (reason: string) => string
+  bandOpen: string
+  bandRunning: (count: number) => string
+  bandWaiting: (count: number) => string
+  bandOtherRuns: (count: number) => string
+  bandPaneWaiting: (reason: string) => string
 }
 
 const EN: Strings = {
@@ -130,6 +136,12 @@ const EN: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: node ${node} failed verification`,
   toastHandoff: 'A DAG run was offered to this session. Open /dag sessions to accept it.',
   toastSettledFailed: (run, failed) => `DAG ${run} settled with ${failed} failed node(s)`,
+  toastPaneWaiting: reason => `DAG pane not shown · type 0 at an empty prompt or run /dag to open it (${reason})`,
+  bandOpen: 'DAG pane',
+  bandRunning: count => `${count} running`,
+  bandWaiting: count => `${count} waiting for permission`,
+  bandOtherRuns: count => `+${count} runs`,
+  bandPaneWaiting: reason => `pane not shown: ${reason}`,
 }
 
 const KO: Strings = {
@@ -200,6 +212,12 @@ const KO: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: 노드 ${node} 검증 실패`,
   toastHandoff: '이 세션에 DAG 실행이 넘어왔습니다. /dag sessions에서 수락하세요.',
   toastSettledFailed: (run, failed) => `DAG ${run} 종료: 실패 노드 ${failed}개`,
+  toastPaneWaiting: reason => `DAG 패널 미표시 · 빈 프롬프트에서 0을 입력하거나 /dag로 여세요 (${reason})`,
+  bandOpen: 'DAG 패널',
+  bandRunning: count => `실행 중 ${count}`,
+  bandWaiting: count => `권한 승인 대기 ${count}`,
+  bandOtherRuns: count => `+${count}개 실행`,
+  bandPaneWaiting: reason => `패널 미표시: ${reason}`,
 }
 
 export function stringsFor(language: unknown): Strings {

@@ -1,4 +1,4 @@
-import type { EngineInterface, On, PluginOptions, RenderInput } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
@@ -34,6 +34,7 @@ import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import type { NodeRun, RecoveryKind, Run, VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
+import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
 import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
@@ -73,6 +74,7 @@ let projectRoot = ''
 let queue: Promise<unknown> = Promise.resolve()
 let view: ViewState = { runIndex: 0, details: false, prefs: {}, mode: 'dag' }
 let paneClosedByUser = false
+let paneWaitReason: string | undefined
 let maxConcurrent = 8
 let retentionDays = 14
 let t: Strings = stringsFor('en')
@@ -392,17 +394,8 @@ async function refreshExternalRuns($: EngineInterface): Promise<void> {
 }
 
 function updateStatus($: EngineInterface): void {
-  const active = [...runs.values()].filter(run => run.sessionId === sessionId && !isSettled(run))
-  const latest = active.reduce<Run | undefined>((best, run) => !best || run.updatedAt >= best.updatedAt ? run : best, undefined)
-  const text = latest ? t.statusLine(
-    latest.name,
-    latest.nodes.filter(node => node.state === 'completed').length,
-    latest.nodes.length,
-    latest.nodes.filter(node => node.state === 'running').length,
-    latest.nodes.filter(node => node.state === 'failed').length,
-    active.length - 1,
-    waiting.size,
-  ) : undefined
+  const active = summarizeActive(runs.values(), sessionId, waiting.size)
+  const text = active ? t.statusLine(active.run.name, active.done, active.total, active.running, active.failed, active.otherRuns, active.waiting) : undefined
   if (text === pinnedStatus) return
   pinnedStatus = text
   $.ui.status(text)
@@ -1085,14 +1078,33 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
   return { text: statusText(runs.get(run.runId) ?? run, sessionId) }
 }
 
+// While the surface holds the pane undrawn the band stands in for it; one toast per wait says why.
+function setPaneWaitReason($: EngineInterface, reason: string | undefined): void {
+  if (reason === paneWaitReason) return
+  if (reason !== undefined && paneWaitReason === undefined) $.ui.toast(t.toastPaneWaiting(reason), { timeoutMs: ATTENTION_TOAST_MS })
+  paneWaitReason = reason
+  $.ui.invalidate('ui.render')
+}
+
 async function openPane($: EngineInterface, byUser: boolean): Promise<void> {
   if (!byUser && paneClosedByUser) return
   if (byUser) paneClosedByUser = false
   try {
-    await $.ui.open(byUser ? { id: PANE_ID, title: 'DAG', focus: true, closeOnEscape: true } : { id: PANE_ID, title: 'DAG' })
+    const opened = await $.ui.open(byUser ? { id: PANE_ID, title: 'DAG', focus: true, closeOnEscape: true } : { id: PANE_ID, title: 'DAG' })
+    setPaneWaitReason($, opened.isPlaced ? undefined : opened.reason)
   } catch (error) {
     $.ui.log(`could not open the DAG pane: ${message(error)}`)
   }
+}
+
+async function openFromBand($: EngineInterface, runId: string, nodeId: string | undefined): Promise<void> {
+  const runIndex = shownRuns().findIndex(run => run.runId === runId)
+  if (nodeId !== undefined && runIndex !== -1) {
+    inspectorView = 'dag'
+    view = { ...view, mode: 'dag', runIndex, selected: nodeId }
+  }
+  await openPane($, true)
+  $.ui.invalidate('ui.render')
 }
 
 function scoped(key: string): string {
@@ -1238,6 +1250,21 @@ async function handlePaneKey($: EngineInterface, key: string, shift: boolean): P
   $.ui.invalidate('ui.render')
 }
 
+function drawLine({ Box, Text }: Pick<Elements[RenderSurface], 'Box' | 'Text'>, segments: Line) {
+  return Box({
+    flexDirection: 'row',
+    children: segments.map(s =>
+      Text({
+        ...(s.color ? { color: s.color } : {}),
+        ...(s.bold ? { bold: true } : {}),
+        ...(s.dim ? { dimColor: true } : {}),
+        wrap: 'truncate-end',
+        children: [s.text],
+      }),
+    ),
+  })
+}
+
 async function drawPane($: EngineInterface, e: RenderEvent) {
   const agentId = e.props.view?.agentId
   if (agentId !== lastPaneAgentId) {
@@ -1252,19 +1279,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
   const Client = (elements as Partial<Pick<Extract<typeof elements, { Client: unknown }>, 'Client'>>).Client
   const now = await $.clock.now()
   const redraw = () => $.ui.invalidate('ui.render')
-  const line = (segments: Line) =>
-    Box({
-      flexDirection: 'row',
-      children: segments.map(s =>
-        Text({
-          ...(s.color ? { color: s.color } : {}),
-          ...(s.bold ? { bold: true } : {}),
-          ...(s.dim ? { dimColor: true } : {}),
-          wrap: 'truncate-end',
-          children: [s.text],
-        }),
-      ),
-    })
+  const line = (segments: Line) => drawLine(elements, segments)
   const gap = () => Text({ children: [' '] })
   const sections = [
     { id: 'dag' as const, label: 'DAG', key: 'g' },
@@ -1722,7 +1737,36 @@ export function register(on: On, options: PluginOptions) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID) return next(e)
+    // The host raises no render for a pane it holds undrawn, so this one proves it is placed.
+    setPaneWaitReason($, undefined)
     return drawPane($, e)
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const summary = e.props.hasSurvey ? undefined : summarizeActive(runs.values(), sessionId, waiting.size)
+    const band = summary && buildBand({
+      summary, waitingAgents: waiting, columns: e.props.bodyColumns, rows: e.props.maxRows, t,
+      ...(paneWaitReason === undefined ? {} : { paneWaitReason }),
+    })
+    if (!summary || !band) return next(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Button } = elements
+    return Box({
+      flexDirection: 'column',
+      children: [
+        ...(band.summary ? [drawLine(elements, band.summary)] : []),
+        Box({
+          flexDirection: 'row',
+          columnGap: BAND_GAP,
+          children: band.buttons.map(button => Button({
+            key: button.key, label: button.label, hotkey: button.hotkey, plain: true,
+            onPress: () => openFromBand($, summary.run.runId, button.nodeId),
+          })),
+        }),
+        ...(band.notice ? [drawLine(elements, band.notice)] : []),
+        await next(e),
+      ],
+    })
   })
 
   on('tool.call', { tool: /^SubagentHandback$/ }, async ($, e, next) => {
