@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import type { Run } from '../hooks/engine/types.ts'
 import { SCENARIOS, type Scenario } from './scenarios.ts'
+import { classifyToolResults, verificationOf, type NodeVerificationReport, type ToolResultCounts, type VerificationTotals } from './report.ts'
 import { shapeOf, type ShapeMetrics } from './shape.ts'
 
 const REPO = realpathSync(new URL('..', import.meta.url).pathname)
@@ -14,15 +15,17 @@ type RunReport = ShapeMetrics & {
   status: string
   states: Record<string, number>
   nodeStates: { id: string; state: string; error?: string }[]
+  nodeVerification: NodeVerificationReport[]
+  verificationTotals: VerificationTotals
 }
 
-type TranscriptReport = {
+type TranscriptReport = ToolResultCounts & {
   path?: string
   skillBeforeStart: boolean | null
   starts: number
-  planningRefusals: number
-  toolDenials: number
 }
+
+const NO_COUNTS: ToolResultCounts = { planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 }
 
 type ScenarioResult = {
   id: string
@@ -73,16 +76,15 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
       files.push({ path, mtime: (await Bun.file(path).stat()).mtimeMs })
     }
   } catch {
-    return { skillBeforeStart: null, starts: 0, planningRefusals: 0, toolDenials: 0 }
+    return { skillBeforeStart: null, starts: 0, ...NO_COUNTS }
   }
   const newest = files.sort((a, b) => b.mtime - a.mtime)[0]
-  if (!newest) return { skillBeforeStart: null, starts: 0, planningRefusals: 0, toolDenials: 0 }
+  if (!newest) return { skillBeforeStart: null, starts: 0, ...NO_COUNTS }
   let index = 0
   let skillAt = -1
   let firstStartAt = -1
   let starts = 0
-  let planningRefusals = 0
-  let toolDenials = 0
+  const resultTexts: string[] = []
   for (const line of (await Bun.file(newest.path).text()).split('\n')) {
     if (!line.trim()) continue
     const row = JSON.parse(line) as { type?: string; isSidechain?: boolean; message?: { content?: unknown } }
@@ -94,14 +96,10 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
         starts += 1
         if (firstStartAt < 0) firstStartAt = index
       }
-      if (block.type === 'tool_result') {
-        const text = JSON.stringify(block.content ?? '')
-        if (text.includes('planning_skill_required')) planningRefusals += 1
-        if (text.includes('dag-workflow refused')) toolDenials += 1
-      }
+      if (block.type === 'tool_result') resultTexts.push(JSON.stringify(block.content ?? ''))
     }
   }
-  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, planningRefusals, toolDenials }
+  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, ...classifyToolResults(resultTexts) }
 }
 
 async function runScenario(scenario: Scenario, root: string, options: Options): Promise<ScenarioResult> {
@@ -128,7 +126,8 @@ async function runScenario(scenario: Scenario, root: string, options: Options): 
     const states: Record<string, number> = {}
     for (const node of run.nodes) states[node.state] = (states[node.state] ?? 0) + 1
     const nodeStates = run.nodes.map(node => ({ id: node.id, state: node.state, ...(node.error ? { error: node.error } : {}) }))
-    return { runId: run.runId, status: run.status, states, nodeStates, ...shapeOf(run.definition) }
+    const verification = verificationOf(run)
+    return { runId: run.runId, status: run.status, states, nodeStates, nodeVerification: verification.nodes, verificationTotals: verification.totals, ...shapeOf(run.definition) }
   })
   const checked = await Bun.$`sh -c ${scenario.check}`.cwd(dir).nothrow().quiet()
   const unchangedOk = await (async () => {
@@ -178,8 +177,13 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
       .flatMap(run => run.nodeStates.filter(n => n.state !== 'completed'))
       .map(n => `${n.id}:${n.state}${n.error ? ` (${n.error.slice(0, 60)})` : ''}`)
       .join('; ')
-    return `| ${r.id} | ${r.expect} | ${r.runs.length} | ${shape} | ${main?.nodes ?? '-'} | ${main?.depth ?? '-'} | ${widths || '-'} | ${main?.fanInNodes ?? '-'} | ${main?.verify ?? '-'} | ${main?.warnings ?? '-'} | ${categories || '-'} | ${status} | ${r.check.passed && r.unchangedOk ? 'PASS' : 'FAIL'} | ${r.transcript.skillBeforeStart} | ${r.transcript.planningRefusals}/${r.transcript.toolDenials} | ${problems || '-'} | ${r.seconds}s |`
+    const totals = r.runs.reduce((sum, run) => ({ verified: sum.verified + run.verificationTotals.verifiedNodes, nodes: sum.nodes + run.nodeVerification.length, retries: sum.retries + run.verificationTotals.autoRetries }), { verified: 0, nodes: 0, retries: 0 })
+    return `| ${r.id} | ${r.expect} | ${r.runs.length} | ${shape} | ${main?.nodes ?? '-'} | ${main?.depth ?? '-'} | ${widths || '-'} | ${main?.fanInNodes ?? '-'} | ${main?.verify ?? '-'} | ${main?.warnings ?? '-'} | ${categories || '-'} | ${status} | ${r.check.passed && r.unchangedOk ? 'PASS' : 'FAIL'} | ${r.transcript.skillBeforeStart} | ${r.transcript.planningRefusals}/${r.transcript.toolDenials} | ${r.transcript.verificationRequired}/${r.transcript.invalidVerification} | ${totals.verified}/${totals.nodes} | ${totals.retries} | ${problems || '-'} | ${r.seconds}s |`
   })
+  const all = results.flatMap(r => r.runs)
+  const sum = (pick: (t: VerificationTotals) => number) => all.reduce((n, run) => n + pick(run.verificationTotals), 0)
+  const totalNodes = all.reduce((n, run) => n + run.nodeVerification.length, 0)
+  const verifySummary = `Verification: ${sum(t => t.verifiedNodes)}/${totalNodes} nodes verified, ${sum(t => t.failedVerification)} failed, ${sum(t => t.missingVerification)} missing; automatic retries: ${sum(t => t.autoRetries)}; start/amend refusals: ${results.reduce((n, r) => n + r.transcript.verificationRequired, 0)} verification_required, ${results.reduce((n, r) => n + r.transcript.invalidVerification, 0)} invalid_verification.`
   return [
     `# DAG shape evaluation ${stamp}`,
     '',
@@ -187,8 +191,10 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
     '',
     `Distinct shapes: ${shapes.size} (${[...shapes].join(', ')}). Distinct producer shapes: ${producerShapes.size} (${[...producerShapes].join(', ')}). Scenarios matching their expected shape: ${matches}/${results.length}.`,
     '',
-    '| scenario | expected | runs | shape | nodes | depth | layer widths | fan-in nodes | verify node | warnings | categories | status | outcome check | skill before start | refusals (planning/tools) | unfinished nodes | time |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    verifySummary,
+    '',
+    '| scenario | expected | runs | shape | nodes | depth | layer widths | fan-in nodes | verify node | warnings | categories | status | outcome check | skill before start | refusals (planning/tools) | verify refusals (required/invalid) | verified/total nodes | auto retries | unfinished nodes | time |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...rows,
     '',
   ].join('\n')
