@@ -339,15 +339,20 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
 }
 
+const settleSubmits = new Set<string>()
+
 async function tick($: EngineInterface, runId: string): Promise<Run | undefined> {
   const current = runs.get(runId)
   if (!current || current.sessionId !== sessionId) return current
   let run = advance(current, await $.clock.now())
   if (run.handoff) run = offerHandoff(run, await $.clock.now())
-  else {
-    for (const id of nextToStart(run, maxConcurrent)) run = await startNode($, run, id)
-  }
   await persist($, run)
+  if (!run.handoff) {
+    for (const id of nextToStart(run, maxConcurrent)) {
+      run = await startNode($, run, id)
+      await persist($, run)
+    }
+  }
   await refreshSessions($)
   if (run.handoff?.offeredAt !== undefined && current.handoff?.offeredAt === undefined) await notifyHandoff($, run)
   if (!run.handoff && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) {
@@ -361,11 +366,21 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
 
 async function announce($: EngineInterface, run: Run): Promise<void> {
   $.ui.invalidate('ui.render')
-  if (!isSettled(run) || run.settledNotified) return
-  const notified = { ...run, settledNotified: true }
-  await persist($, notified)
-  $.prompt.submit({ text: settleMessage(notified, TOOL_NAME) }).catch(error => {
+  if (!isSettled(run) || run.settledNotified || settleSubmits.has(run.runId)) return
+  settleSubmits.add(run.runId)
+  // Plugin submissions run once idle; never await them in the queue.
+  $.prompt.submit({ text: settleMessage(run, TOOL_NAME) }).then(result => {
+    if ('drop' in result) throw new Error(result.drop)
+    return serialized(async () => {
+      const current = runs.get(run.runId)
+      if (current?.sessionId === sessionId && isSettled(current)) {
+        await persist($, { ...current, settledNotified: true })
+      }
+    })
+  }).catch(error => {
     $.ui.log(`could not tell the session that ${run.runId} settled: ${message(error)}`)
+  }).finally(() => {
+    settleSubmits.delete(run.runId)
   })
 }
 
@@ -1197,7 +1212,12 @@ export function register(on: On, options: PluginOptions) {
     }
     try {
       await refreshSessions($)
-      await serialized(() => recoverRuns($))
+      await serialized(async () => {
+        await recoverRuns($)
+        for (const run of runs.values()) {
+          if (run.sessionId === sessionId && isSettled(run) && !run.settledNotified) await announce($, run)
+        }
+      })
     } catch (error) {
       $.ui.log(`could not recover session work: ${message(error)}`)
     }
