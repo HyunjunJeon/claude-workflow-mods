@@ -9,6 +9,8 @@ argument-hint: "[task]"
 
 In this session every piece of work runs as a DAG of subagent nodes through `mcp__dag-workflow__dag`. The main conversation plans, reads, orchestrates and verifies; Edit, Write, mutating Bash, Agent and the other work tools run INSIDE DAG nodes. This skill is how you plan that DAG well. A one-step task is a one-node DAG - the rules below still apply.
 
+If the `mcp__dag-workflow__dag` tool is unavailable, the mod is switched off (`--safe-mode`, `disableAllHooks` or `allowManagedModsOnly` leave skills loaded but remove the tool and hooks). Tell the user that DAG orchestration is off for this session and do the work directly; make no claims about runs, nodes, panes or checkpoints, and do not follow the rest of this skill.
+
 ## Planning - MANDATORY first step
 
 Before defining ANY graph, read `${CLAUDE_SKILL_DIR}/references/planning.md` IN FULL with the Read tool. It carries the doctrine this file deliberately omits: how to decompose the request into nodes, how to route each node's `category`, how to keep parallel write scopes disjoint, what to pass along `dependsOn`, the node prompt contract, the verification wave, and the failure playbook. A graph defined without it is unplanned work.
