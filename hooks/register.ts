@@ -29,7 +29,7 @@ import {
   snapshotOf,
   advance,
 } from './engine/run.ts'
-import { expiredRuns } from './engine/retention.ts'
+import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import type { NodeRun, RecoveryKind, Run, VerificationEvidence } from './engine/types.ts'
@@ -53,6 +53,9 @@ const PREFS_KEY = 'collapse-prefs'
 const VIEW_KEY = 'pane-view'
 const FALLBACK_GRAPH_COLUMNS = 60
 const JEV_TIMEOUT_MS = 5_000
+const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
+const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
+const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
 
 type ToolInput = Readonly<Record<string, unknown>>
 type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
@@ -74,7 +77,10 @@ let enforcement: Enforcement = 'strict'
 let planningLoaded = false
 let interactive = true
 let extraAllowed: ReadonlySet<string> = new Set()
-const reportDirsMade = new Set<string>()
+const dirsMade = new Set<string>()
+let gitignoreChecked = false
+let contextOnDisk = false
+let jevPermissionScope: 'all' | 'dag' = 'all'
 const activity = new Map<string, Activity>()
 const handbacks = new Map<string, string>()
 const transcriptErrors = new Set<string>()
@@ -151,11 +157,26 @@ function decisionOutcome(evaluation: JevEvaluation, choice: JevChoice | undefine
   return choice.choice === 'ask' ? 'ask' : 'applied'
 }
 
+// Creates a .claude/dag subdirectory on its first write and, once per session, the .gitignore.
+async function ensureDir($: EngineInterface, dir: string): Promise<void> {
+  if (dirsMade.has(dir)) return
+  const made = await $.process.run(['mkdir', '-p', dir])
+  if (made.exitCode !== 0) throw new Error(`cannot create ${dir}: ${made.stderr.trim()}`)
+  dirsMade.add(dir)
+  if (gitignoreChecked) return
+  const path = `${projectRoot}/${DAG_SUBDIR}/.gitignore`
+  if (!(await $.fs.exists(path))) await $.fs.write(path, GITIGNORE)
+  gitignoreChecked = true
+}
+
 async function persistDecisions($: EngineInterface, records: DecisionRecord[]): Promise<void> {
   decisionRecords = appendDecisions(decisionRecords, records)
   const content = JSON.stringify({ schemaVersion: 1, projectRoot, sessionId, records: decisionRecords })
-  const path = `${projectRoot}/${DAG_SUBDIR}/decisions/${sessionId}.json`
-  const result = metadataWrites.then(() => $.fs.write(path, content))
+  const dir = `${projectRoot}/${DAG_SUBDIR}/decisions`
+  const result = metadataWrites.then(async () => {
+    await ensureDir($, dir)
+    await $.fs.write(`${dir}/${sessionId}.json`, content)
+  })
   metadataWrites = result.catch(() => undefined)
   try {
     await result
@@ -205,25 +226,34 @@ function restorationContext(): string {
   return contextSummary(workflowContext, [...runs.values()], contextPath())
 }
 
+// Plain conversations keep requests in memory; the file appears once the session uses the DAG.
+function contextWanted(): boolean {
+  return contextOnDisk || workflowContext.notes.length > 0 || [...runs.values()].some(run => run.sessionId === sessionId)
+}
+
 async function persistContext($: EngineInterface): Promise<void> {
+  if (!contextWanted()) return
   const path = contextPath()
   const content = JSON.stringify(workflowContext)
-  const result = metadataWrites.then(() => $.fs.write(path, content))
+  const result = metadataWrites.then(async () => {
+    await ensureDir($, `${projectRoot}/${DAG_SUBDIR}/context`)
+    await $.fs.write(path, content)
+    contextOnDisk = true
+  })
   metadataWrites = result.catch(() => undefined)
   await result
 }
 
 async function loadMetadata($: EngineInterface): Promise<void> {
-  await $.process.run(['mkdir', '-p', `${projectRoot}/${DAG_SUBDIR}/context`, `${projectRoot}/${DAG_SUBDIR}/decisions`])
   workflowContext = emptyContext(projectRoot, sessionId, await $.clock.now())
   decisionRecords = []
-  const contexts = await $.fs.list(`${projectRoot}/${DAG_SUBDIR}/context`)
-  if (contexts.some(entry => entry.name === `${sessionId}.json`)) {
+  contextOnDisk = await $.fs.exists(contextPath())
+  if (contextOnDisk) {
     workflowContext = parseContext(JSON.parse(await $.fs.read(contextPath())), projectRoot, sessionId) ?? workflowContext
   }
-  const logs = await $.fs.list(`${projectRoot}/${DAG_SUBDIR}/decisions`)
-  if (logs.some(entry => entry.name === `${sessionId}.json`)) {
-    decisionRecords = parseDecisionLog(JSON.parse(await $.fs.read(`${projectRoot}/${DAG_SUBDIR}/decisions/${sessionId}.json`)), projectRoot, sessionId)
+  const decisionsPath = `${projectRoot}/${DAG_SUBDIR}/decisions/${sessionId}.json`
+  if (await $.fs.exists(decisionsPath)) {
+    decisionRecords = parseDecisionLog(JSON.parse(await $.fs.read(decisionsPath)), projectRoot, sessionId)
   }
   userRequest = workflowContext.requests.at(-1)?.text ?? ''
 }
@@ -250,6 +280,7 @@ async function refreshSessions($: EngineInterface, closed = false): Promise<void
 }
 
 async function refreshExternalRuns($: EngineInterface): Promise<void> {
+  if (!(await $.fs.exists(runsDir))) return
   for (const entry of await $.fs.list(runsDir)) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
     try {
@@ -265,19 +296,25 @@ async function refreshExternalRuns($: EngineInterface): Promise<void> {
 
 async function persist($: EngineInterface, run: Run): Promise<void> {
   runs.set(run.runId, run)
+  await ensureDir($, runsDir)
   await $.fs.write(`${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n')
+  // The session's first owned run makes its in-memory context durable.
+  if (run.sessionId === sessionId && !contextOnDisk && workflowContext.sessionId === sessionId) {
+    try {
+      await persistContext($)
+    } catch (error) {
+      $.ui.log(`could not persist workflow context: ${message(error)}`)
+    }
+  }
 }
 
 async function loadRuns($: EngineInterface): Promise<void> {
   const root = await $.session.cwd()
   projectRoot = root
   runsDir = `${root}/${RUNS_SUBDIR}`
-  const made = await $.process.run(['mkdir', '-p', runsDir])
-  if (made.exitCode !== 0) throw new Error(`cannot create ${runsDir}: ${made.stderr.trim()}`)
-  const dagDir = `${root}/${DAG_SUBDIR}`
-  if (!(await $.fs.list(dagDir)).some(entry => entry.name === '.gitignore')) {
-    await $.fs.write(`${dagDir}/.gitignore`, '# dag-workflow run checkpoints and node reports\n*\n')
-  }
+  dirsMade.clear()
+  gitignoreChecked = false
+  if (!(await $.fs.exists(runsDir))) return
   for (const entry of await $.fs.list(runsDir)) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
     try {
@@ -287,10 +324,77 @@ async function loadRuns($: EngineInterface): Promise<void> {
       $.ui.log(`skipped unreadable checkpoint ${entry.name}: ${message(error)}`)
     }
   }
-  for (const run of expiredRuns([...runs.values()], await $.clock.now(), retentionDays, sessionId)) {
-    const removed = await $.process.run(['rm', '-f', `${runsDir}/${run.runId}.json`])
-    if (removed.exitCode === 0) runs.delete(run.runId)
-    else $.ui.log(`could not prune expired checkpoint ${run.runId}: ${removed.stderr.trim()}`)
+}
+
+async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string): Promise<boolean> {
+  try {
+    const removed = await $.process.run(['rm', flag, path])
+    if (removed.exitCode === 0) return true
+    $.ui.log(`could not prune ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
+  } catch (error) {
+    $.ui.log(`could not prune ${path}: ${message(error)}`)
+  }
+  return false
+}
+
+async function listIfPresent($: EngineInterface, dir: string): Promise<Awaited<ReturnType<EngineInterface['fs']['list']>>> {
+  try {
+    return (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
+  } catch (error) {
+    $.ui.log(`could not list ${dir} for retention: ${message(error)}`)
+    return []
+  }
+}
+
+async function pruneArtifacts($: EngineInterface): Promise<void> {
+  if (!(retentionDays > 0)) return
+  const contextDir = `${projectRoot}/${DAG_SUBDIR}/context`
+  const decisionsDir = `${projectRoot}/${DAG_SUBDIR}/decisions`
+  const prefix = `dag-session:${hash(projectRoot)}:`
+  const files = (entries: Awaited<ReturnType<typeof listIfPresent>>): RetentionFile[] =>
+    entries.filter(entry => entry.kind === 'file').map(entry => ({ name: entry.name, mtimeMs: entry.mtimeMs }))
+  const sessionRecords: SessionRecord[] = []
+  try {
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(prefix)) continue
+      const record = parseSession(await $.store.get(key))
+      if (record?.projectRoot === projectRoot && key === `${prefix}${record.sessionId}`) sessionRecords.push(record)
+    }
+  } catch (error) {
+    $.ui.log(`could not read session records for retention: ${message(error)}`)
+  }
+  // A directory beside any <name>.json, even an unreadable one, belongs to that checkpoint and is never an orphan.
+  const runEntries = await listIfPresent($, runsDir)
+  const checkpoints = new Set(runEntries.filter(entry => entry.kind === 'file').map(entry => entry.name))
+  const plan = retentionPlan({
+    runs: [...runs.values()], now: await $.clock.now(), retentionDays, currentSession: sessionId,
+    runDirNames: runEntries.filter(entry => entry.kind !== 'file' && !checkpoints.has(`${entry.name}.json`)).map(entry => entry.name),
+    contextFiles: files(await listIfPresent($, contextDir)),
+    decisionFiles: files(await listIfPresent($, decisionsDir)),
+    sessionRecords,
+  })
+  for (const run of plan.runs) {
+    if (!SAFE_RUN_DIR.test(run.runId)) {
+      $.ui.log(`skipped pruning checkpoint with unsafe id ${JSON.stringify(run.runId)}`)
+      continue
+    }
+    if (await removePath($, '-f', `${runsDir}/${run.runId}.json`)) runs.delete(run.runId)
+  }
+  for (const name of plan.runDirs) {
+    if (SAFE_RUN_DIR.test(name)) await removePath($, '-rf', `${runsDir}/${name}`)
+    else $.ui.log(`skipped pruning run directory with unsafe name ${JSON.stringify(name)}`)
+  }
+  for (const [dir, names] of [[contextDir, plan.contextFiles], [decisionsDir, plan.decisionFiles]] as const) {
+    for (const name of names) {
+      if (SAFE_FILE.test(name) && !name.includes('..')) await removePath($, '-f', `${dir}/${name}`)
+    }
+  }
+  for (const id of plan.sessionKeys) {
+    try {
+      await $.store.delete(`${prefix}${id}`)
+    } catch (error) {
+      $.ui.log(`could not prune session record ${id}: ${message(error)}`)
+    }
   }
 }
 
@@ -530,11 +634,7 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
   const dir = `${runsDir}/${run.runId}`
   const reportPath = `${dir}/${node.id}.verification.${node.attempt}.json`
   try {
-    if (!reportDirsMade.has(dir)) {
-      const made = await $.process.run(['mkdir', '-p', dir])
-      if (made.exitCode !== 0) throw new Error(made.stderr)
-      reportDirsMade.add(dir)
-    }
+    await ensureDir($, dir)
     await $.fs.write(reportPath, JSON.stringify({ status, evidence }, null, 2))
     return { status, evidence, reportPath }
   } catch (error) {
@@ -545,11 +645,7 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
 async function writeReport($: EngineInterface, runId: string, nodeId: string, report: string): Promise<string | undefined> {
   const dir = `${runsDir}/${runId}`
   try {
-    if (!reportDirsMade.has(dir)) {
-      const made = await $.process.run(['mkdir', '-p', dir])
-      if (made.exitCode !== 0) throw new Error(made.stderr.trim())
-      reportDirsMade.add(dir)
-    }
+    await ensureDir($, dir)
     const path = `${dir}/${nodeId}.md`
     await $.fs.write(path, report.slice(0, REPORT_LIMIT))
     return path
@@ -1186,6 +1282,7 @@ export function register(on: On, options: PluginOptions) {
   if (options.node_messages === 'full') nodeMessages = 'full'
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
+  jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
 
   on('session.start', async ($, e, next) => {
     interactive = e.isInteractive
@@ -1204,6 +1301,11 @@ export function register(on: On, options: PluginOptions) {
       await loadRuns($)
     } catch (error) {
       $.ui.log(`could not load DAG checkpoints: ${message(error)}`)
+    }
+    try {
+      await pruneArtifacts($)
+    } catch (error) {
+      $.ui.log(`could not prune expired DAG artifacts: ${message(error)}`)
     }
     try {
       await loadMetadata($)
@@ -1356,6 +1458,7 @@ export function register(on: On, options: PluginOptions) {
     const decided = await next(e)
     if (decided.decision !== 'ask') return decided
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
+    if (jevPermissionScope === 'dag' && context?.task === undefined) return decided
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })
     const evaluation = await evaluateJev($, request)
     const choice = evaluation.choices.get('permission')

@@ -60,6 +60,10 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
     for (const path of files.keys()) if (path.startsWith(dir + '/')) names.add(path.slice(dir.length + 1).split('/')[0] as string)
     return { value: [...names].map(name => ({ name, kind: files.has(`${dir}/${name}`) ? 'file' : 'directory', size: 1, mtimeMs: 0, isLink: false })) }
   })
+  on('fs.exists', ($: any, e: any) => {
+    const path = String(e.path).replace(/\/$/, '')
+    return { value: files.has(path) || [...files.keys()].some(file => file.startsWith(path + '/')) }
+  })
   on('fs.write', ($: any, e: any) => {
     files.set(e.path, e.text)
     return { value: undefined }
@@ -443,14 +447,16 @@ test('/dag run also reads a YAML definition', async ($, on) => {
 test('the checkpoint directory ignores itself in git and node prompts say to leave it alone', async ($, on) => {
   const h = harness(on)
   await boot($)
-  expect(h.files.get('/work/.claude/dag/.gitignore')).toBe('# dag-workflow run checkpoints and node reports\n*\n')
+  expect(h.files.has('/work/.claude/dag/.gitignore')).toBe(false)
   await callDag($, { action: 'start', definition: CHAIN })
+  expect(h.files.get('/work/.claude/dag/.gitignore')).toBe('# dag-workflow run checkpoints and node reports\n*\n')
   expect(h.spawns[0]?.prompt).toContain('The project directory .claude/dag/ holds this workflow\'s own checkpoints and node reports.')
 })
 
 test('an existing .gitignore in the checkpoint directory is kept as it is', async ($, on) => {
   const h = harness(on, { '/work/.claude/dag/.gitignore': 'runs/\n' })
   await boot($)
+  await callDag($, { action: 'start', definition: CHAIN })
   expect(h.files.get('/work/.claude/dag/.gitignore')).toBe('runs/\n')
 })
 

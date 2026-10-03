@@ -24,6 +24,13 @@
       "min": 0,
       "max": 1
     },
+    "jev_permission_scope": {
+      "type": "string",
+      "title": "Jev permission scope",
+      "description": "all: Jev resolves every uncertain tool permission; dag: limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged",
+      "options": ["all", "dag"],
+      "default": "all"
+    },
     "enforcement": {
       "type": "string",
       "title": "DAG enforcement",
@@ -63,7 +70,7 @@
     "retention_days": {
       "type": "number",
       "title": "Checkpoint retention (days)",
-      "description": "Settled runs from other sessions older than this are pruned at startup; 0 keeps everything",
+      "description": "Settled runs from other sessions older than this, with their reports, plus stale context, decision and session records, are pruned at startup; 0 keeps everything",
       "default": 14,
       "min": 0
     }

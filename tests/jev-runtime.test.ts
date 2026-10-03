@@ -52,6 +52,7 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   on('session.id', () => ({ value: 'jev-session' }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.list', () => ({ value: [] }))
+  on('fs.exists', ($, e) => ({ value: files.has(e.path) || [...files.keys()].some(file => file.startsWith(e.path.replace(/\/$/, '') + '/')) }))
   on('fs.read', ($, e) => ({ value: files.get(e.path) ?? '' }))
   on('fs.write', ($, e) => { files.set(e.path, e.text); return { value: undefined } })
   on('agent.list', () => ({ value: [] }))

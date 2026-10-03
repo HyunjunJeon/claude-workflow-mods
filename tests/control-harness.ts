@@ -63,6 +63,10 @@ export function harness(on: On) {
       size: 1, mtimeMs: 0, isLink: false,
     })) }
   })
+  on('fs.exists', ($, e) => {
+    const path = e.path.replace(/\/$/, '')
+    return { value: files.has(path) || locks.has(path) || [...files.keys()].some(file => file.startsWith(path + '/')) }
+  })
   on('fs.read', ($, e) => {
     reads.push(e.path)
     const override = readOnce.get(e.path)
