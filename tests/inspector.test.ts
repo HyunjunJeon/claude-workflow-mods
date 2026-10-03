@@ -154,6 +154,15 @@ test('context shows the objective, paginated note indexes and the owned run scop
   expect(flat(foreignSelection).includes('runs/r2.json')).toBe(false)
 })
 
+test('a foreign run names its shortened session id without a trailing period', () => {
+  const owner = 'e8125de0-1111-2222-3333-444444444444'
+  const model = buildInspector(input({ view: 'context', runs: [run('r2', owner)], selectedRunId: 'r2' }))
+  const line = model.lines.map(text).find(value => value.includes('belongs to session'))
+  expect(line).toBeDefined()
+  expect(line?.includes('…')).toBe(true)
+  expect(line?.trimEnd().endsWith('…')).toBe(true)
+})
+
 test('context never shows another identity record', () => {
   const foreign = recordRequest(emptyContext(root, 'other', 0), { at: 5, text: 'secret objective' })
   const otherProject = recordRequest(emptyContext('/elsewhere', 'me', 0), { at: 5, text: 'secret objective' })

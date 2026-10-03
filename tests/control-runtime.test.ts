@@ -357,6 +357,20 @@ test('sessions refresh same-project records and manual handoff drains then expli
   expect(h.requests.at(-1)?.state).toMatchObject({ request: acceptedRequest })
 })
 
+test('accepting a handoff whose goal ends in punctuation does not double the period', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  h.store.set(`dag-session:${hash('/work')}:target`, { schemaVersion: 1, sessionId: 'target', projectRoot: '/work', updatedAt: 1_000, status: 'active', runIds: [], writes: [] })
+  const runId = await start($, { ...definition(), goal: 'Ship the artifact?!' })
+  await command($, `handoff ${runId} target`)
+  await finish($, h)
+  h.control.sessionId = 'target'
+  await boot($)
+  await command($, `accept ${runId}`)
+  const targetContext: ContextRecord = JSON.parse(h.files.get(`${ROOT}/context/target.json`) ?? 'null')
+  expect(targetContext.requests.at(-1)?.text).toBe(`Manual handoff accepted: ${runId}. Goal: Ship the artifact. Continue only the remaining nodes under their declared scopes.`)
+})
+
 test('only the manual cancel command withdraws a pending handoff', async ($, on) => {
   const h = harness(on)
   await boot($)

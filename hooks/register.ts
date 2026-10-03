@@ -972,7 +972,7 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
         $.ui.log(warning)
         warnings.push(warning)
       }
-      userRequest = `Manual handoff accepted: ${run.runId}. Goal: ${run.definition.goal ?? run.name}. Continue only the remaining nodes under their declared scopes.`
+      userRequest = `Manual handoff accepted: ${run.runId}. Goal: ${(run.definition.goal ?? run.name).replace(/[.!?]+$/, '')}. Continue only the remaining nodes under their declared scopes.`
       workflowContext = recordRequest(workflowContext, { at: context.now, text: userRequest })
       try {
         await persistContext($)

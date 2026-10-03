@@ -154,7 +154,7 @@ const EN: InspectorStrings = {
   noNotes: 'No pinned notes. Pin one with /dag note <text>.',
   scope: 'Run scope',
   noRun: 'No run owned by this session.',
-  foreignRun: sessionId => `Selected run belongs to session ${sessionId}.`,
+  foreignRun: sessionId => `Selected run belongs to session ${sessionId}`,
   writes: paths => `writes ${paths}`,
   noWrites: 'no declared writes',
   verified: 'verified',
