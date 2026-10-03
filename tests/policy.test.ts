@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { SCENARIOS } from '../eval/scenarios.ts'
 import { extractOutput } from '../hooks/engine/node-prompt.ts'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { isVerificationNode, lintDefinition } from '../hooks/engine/lint.ts'
@@ -146,6 +147,91 @@ test('the lint warns about verify paths and writes the host refuses for subagent
   const written = lintDefinition(def([{ id: 'one', prompt: full, writes: ['out/summary-final.md'] }]))
   expect(written).toHaveLength(1)
   expect(written[0]).toContain('"out/summary-final.md"')
+})
+
+const underSplitDef = (nodes: unknown[]) => {
+  const r = parseDefinition({ key: 'k', nodes })
+  if (!r.ok) throw new Error(r.error.message)
+  return r.value
+}
+const contract = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
+const fileCheck = (path: string) => ({ kind: 'file', path })
+const lane = (id: string, writes: string[], extra: Record<string, unknown> = {}) => ({
+  id,
+  category: 'quick',
+  prompt: contract,
+  writes,
+  verify: writes.map(fileCheck),
+  ...extra,
+})
+const audit = (dependsOn: string[]) => lane('audit', ['notes/audit.md'], { category: 'unspecified-low', dependsOn })
+
+test('the lint warns when one producer owns several independent files', async () => {
+  const warnings = lintDefinition(underSplitDef([
+    lane('site', ['LICENSE', '.editorconfig', 'CONTRIBUTING.md']),
+    audit(['site']),
+  ]))
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "site": one producer owns 3 files')
+  expect(warnings[0]).toContain('LICENSE, .editorconfig, CONTRIBUTING.md')
+})
+
+test('the lint warns when the only producer writes several named sections', async () => {
+  const prompt = `${contract} Write sorting.md with ## Bubble Sort, ## Merge Sort and ## Quicksort sections.`
+  const warnings = lintDefinition(underSplitDef([
+    { ...lane('write', ['sorting.md']), prompt },
+    audit(['write']),
+  ]))
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "write": the only producer writes 3 separate sections (bubble sort, merge sort, quicksort)')
+  const lanes = ['bubble', 'merge', 'quick'].map(name => ({ ...lane(name, [`notes/${name}.md`]), prompt }))
+  expect(lintDefinition(underSplitDef([...lanes, audit(['bubble', 'merge', 'quick'])]))).toEqual([])
+})
+
+test('the under-split lints stay silent on every expected scenario shape', async () => {
+  const docs = ['intro', 'install', 'usage', 'config', 'faq', 'support']
+  const shapes: Record<string, unknown[]> = {
+    'single-edit': [lane('edit', ['counter.py'])],
+    'parallel-files': [lane('license', ['LICENSE']), lane('editorconfig', ['.editorconfig']), lane('contributing', ['CONTRIBUTING.md']), audit(['license', 'editorconfig', 'contributing'])],
+    'map-reduce-docs': [
+      ...docs.map(name => lane(`fix-${name}`, [`docs/${name}.md`])),
+      lane('changes', ['docs/CHANGES.md'], { dependsOn: docs.map(name => `fix-${name}`) }),
+      audit(['changes']),
+    ],
+    'pipeline-stats': [
+      lane('gen', ['gen.py', 'data.csv']),
+      lane('stats', ['stats.py', 'stats.json'], { dependsOn: ['gen'] }),
+      lane('table', ['stats-table.md'], { dependsOn: ['stats'] }),
+      audit(['table']),
+    ],
+    'diamond-app': [
+      lane('settings', ['settings.py']),
+      lane('greeter', ['greeter.py'], { dependsOn: ['settings'] }),
+      lane('repeater', ['repeater.py'], { dependsOn: ['settings'] }),
+      lane('main', ['main.py'], { dependsOn: ['greeter', 'repeater'] }),
+      lane('tests', ['test_app.py'], { dependsOn: ['main'] }),
+      audit(['tests']),
+    ],
+    'debug-fix': [
+      lane('diagnose', ['notes/diagnosis.md']),
+      lane('fix', ['mathutil.py'], { dependsOn: ['diagnose'] }),
+      audit(['fix']),
+    ],
+    'wide-harvest': [
+      ...[1, 2, 3, 4].map(n => lane(`batch-${n}`, [`notes/batch-${n}.md`])),
+      lane('totals', ['todo-report.md'], { dependsOn: ['batch-1', 'batch-2', 'batch-3', 'batch-4'] }),
+      audit(['totals']),
+    ],
+    'research-write': [
+      ...['bubble', 'merge', 'quick'].map(name => lane(name, [`notes/${name}.md`])),
+      lane('sorting', ['sorting.md'], { dependsOn: ['bubble', 'merge', 'quick'] }),
+      audit(['sorting']),
+    ],
+  }
+  expect(Object.keys(shapes).sort()).toEqual(SCENARIOS.map(scenario => scenario.id).sort())
+  for (const [id, nodes] of Object.entries(shapes)) {
+    expect({ id, warnings: lintDefinition(underSplitDef(nodes)) }).toEqual({ id, warnings: [] })
+  }
 })
 
 test('the injected protocol states the rule for each enforcement level', async () => {

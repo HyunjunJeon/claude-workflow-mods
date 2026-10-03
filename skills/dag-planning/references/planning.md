@@ -24,6 +24,10 @@ Reading this file is not planning. Before `start`, write the run plan in one bre
 
 **Large harvests: nodes are not units of work.** When a scan must cover hundreds of files or sources, shard items INTO nodes: each `quick` node owns a batch (about 50-200 items) and writes ONE bounded report file, so `nodes = ceil(items / items_per_node)`. The aggregator reads those report files, never hundreds of raw outputs.
 
+**One node, one deliverable.** Count the deliverables before you write a node: every separate file, and every separately named section of a document (one per algorithm, per page, per module), is a candidate lane. A node that owns several of them (a `writes` list of three files, or a prompt listing `## A`, `## B`, `## C`) is under-split: make one `quick` or `writing` node per deliverable with no `dependsOn` between them, then one synthesis node that depends on all lanes and assembles or recommends. Lanes that write sections write them to their own files (for example `notes/<topic>.md`); only the synthesis node writes the final document.
+
+**Unknown cause: investigate, then fix.** When the request says "find out why" or "figure out the cause", the diagnosis is its own node whose `## Output` names the file, line and root cause; the fix node depends on it and receives that fact. A fix node that diagnoses for itself has no checkable hand-off. When you already know the cause, paste it into the fix prompt and keep a single node.
+
 **Split implementation from its test? No.** One node owns one deliverable end to end: the change AND its proof. A node that only writes code and a node that only tests it serialize on the same files and double the coordination cost. The verification wave below is a SEPARATE falsification pass, not the producer's own test.
 
 ## Category routing
@@ -94,7 +98,7 @@ Rules that make node prompts obeyed:
 - **Emphasis lives in the words.** UPPERCASE and strong verbs for load-bearing rules; no emojis or decoration.
 - **One role per node.** A node that investigates does not also fix; a node that writes does not also review its own work.
 
-**The `start` result audits this contract.** `start` returns `warnings` when a node prompt lacks the literal `TASK:` or `STOP WHEN` markers, or when a graph of two or more nodes has no verification node (a node whose id, label or summary says verify, validate, check, test, review or audit, and that depends on other nodes), or when the final audit (a verification node nothing depends on, with two or more inputs) runs on `quick`. Warnings never block the run - treat them as defects: cancel and start the fixed definition under a NEW key, or `amend` it before the affected nodes run.
+**The `start` result audits this contract.** `start` returns `warnings` when a node prompt lacks the literal `TASK:` or `STOP WHEN` markers, or when a graph of two or more nodes has no verification node (a node whose id, label or summary says verify, validate, check, test, review or audit, and that depends on other nodes), or when the final audit (a verification node nothing depends on, with two or more inputs) runs on `quick`, or when one producer node owns three or more files (`writes` plus file `verify` paths), or when the only producer names three or more `## Section` headings in its prompt. Warnings never block the run - treat them as defects: cancel and start the fixed definition under a NEW key, or `amend` it before the affected nodes run.
 
 ## The `verify` contract
 

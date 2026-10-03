@@ -13,7 +13,9 @@ In this session every piece of work runs as a DAG of subagent nodes through `mcp
 
 Before defining ANY graph, read `${CLAUDE_SKILL_DIR}/references/planning.md` IN FULL with the Read tool. It carries the doctrine this file deliberately omits: how to decompose the request into nodes, how to route each node's `category`, how to keep parallel write scopes disjoint, what to pass along `dependsOn`, the node prompt contract, the verification wave, and the failure playbook. A graph defined without it is unplanned work.
 
-Reading is not planning. Before `start`, write the run plan in one breath - the components, the waves, a one-line reason for every non-`quick` category, the edges and what each edge carries, and the verification node - then execute THAT plan.
+Reading is not planning. Split by deliverable: each independent file or named section gets its own node, and a synthesis node that depends on those lanes assembles them - a producer owning three or more deliverables is under-split. When the cause of a problem is unknown, diagnose in one node and fix in a dependent node.
+
+Before `start`, write the run plan in one breath - the components, the waves, a one-line reason for every non-`quick` category, the edges and what each edge carries, and the verification node - then execute THAT plan.
 
 ## The shape
 
