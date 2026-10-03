@@ -107,6 +107,9 @@ let inspectorPage = 0
 let inspectorColumns = FALLBACK_GRAPH_COLUMNS
 let selectedDecisionId: string | undefined
 let language: 'en' | 'ko' = 'en'
+let pinnedStatus: string | undefined
+const settleToasts = new Set<string>()
+const ATTENTION_TOAST_MS = 12_000
 
 type JevEvaluation = {
   choices: ReadonlyMap<string, JevChoice>
@@ -310,8 +313,25 @@ async function refreshExternalRuns($: EngineInterface): Promise<void> {
   }
 }
 
+function updateStatus($: EngineInterface): void {
+  const active = [...runs.values()].filter(run => run.sessionId === sessionId && !isSettled(run))
+  const latest = active.reduce<Run | undefined>((best, run) => !best || run.updatedAt >= best.updatedAt ? run : best, undefined)
+  const text = latest ? t.statusLine(
+    latest.name,
+    latest.nodes.filter(node => node.state === 'completed').length,
+    latest.nodes.length,
+    latest.nodes.filter(node => node.state === 'running').length,
+    latest.nodes.filter(node => node.state === 'failed').length,
+    active.length - 1,
+  ) : undefined
+  if (text === pinnedStatus) return
+  pinnedStatus = text
+  $.ui.status(text)
+}
+
 async function persist($: EngineInterface, run: Run): Promise<void> {
   runs.set(run.runId, run)
+  updateStatus($)
   await ensureDir($, runsDir)
   await $.fs.write(`${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n')
   // The session's first owned run makes its in-memory context durable.
@@ -480,6 +500,12 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       serialized(() => tick($, runId)).catch(error => $.ui.log(`could not continue recovered run: ${message(error)}`))
     })
   }
+  if (!isSettled(run)) settleToasts.delete(runId)
+  else if (!settleToasts.has(runId)) {
+    settleToasts.add(runId)
+    const failed = run.nodes.filter(node => node.state === 'failed').length
+    if (failed > 0 && !run.cancelReason) $.ui.toast(t.toastSettledFailed(run.name, failed), { timeoutMs: ATTENTION_TOAST_MS })
+  }
   await announce($, run)
   return run
 }
@@ -574,6 +600,9 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   }
   const finished = markFinished(prepared, node.id, outcome, await $.clock.now())
   runs.set(runId, outcome.state === 'failed' ? await attemptRecovery($, finished, node.id) : finished)
+  if (runs.get(runId)?.nodes.find(current => current.id === node.id)?.state === 'failed') {
+    $.ui.toast(verification && verification.status !== 'passed' ? t.toastVerificationFailed(run.name, node.id) : t.toastNodeFailed(run.name, node.id), { timeoutMs: ATTENTION_TOAST_MS })
+  }
   $.ui.log(`${run.name} › ${node.id}: ${outcome.state}${outcome.error ? ` (${outcome.error})` : ''}`)
   await tick($, runId)
 }
@@ -1417,6 +1446,7 @@ export function register(on: On, options: PluginOptions) {
     await refreshSessions($)
     await serialized(() => refreshExternalRuns($))
     $.ui.log('A manual handoff is available. Open /dag sessions or the Sessions pane to inspect and accept it.')
+    $.ui.toast(t.toastHandoff, { timeoutMs: ATTENTION_TOAST_MS })
     $.ui.invalidate('ui.render')
     return { consumed: 'Manual handoff awaits user action; no work was accepted automatically.' }
   })

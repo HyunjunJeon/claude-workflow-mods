@@ -113,6 +113,27 @@ for (const scenario of ['missing-input', 'clarification', 'permanent', 'low-conf
   })
 }
 
+test('the pinned status line follows a run, clears when it settles, and routine completion raises no toast', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await start($, { key: 'status', nodes: [{ id: 'a', prompt: 'Produce artifact', verify: CHECK }] })
+  expect(h.statuses.at(-1)).toContain('0/1 done · 1 running')
+  await finish($, h)
+  expect(h.statuses.at(-1)).toBe(undefined)
+  expect(h.toasts).toEqual([])
+})
+
+test('a node failing verification raises exactly one attention toast', { options: { auto_recovery: false } }, async ($, on) => {
+  const h = harness(on)
+  h.control.exitCode = 1
+  await boot($)
+  const flow = definition()
+  await start($, { ...flow, nodes: [...flow.nodes, { id: 'independent', prompt: 'Independent work', verify: CHECK }] })
+  await finish($, h)
+  expect(h.toasts).toHaveLength(1)
+  expect(h.toasts[0]).toMatchObject({ text: expect.stringContaining('failed verification'), timeoutMs: 12_000 })
+})
+
 test('context persists requests and notes and survives clear with the new session id', async ($, on) => {
   const h = harness(on)
   await boot($)
