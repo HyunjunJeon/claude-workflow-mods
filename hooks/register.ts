@@ -10,7 +10,7 @@ import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessio
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
 import { verificationProblem } from './engine/verification.ts'
-import { denyMessage, isPlanningSkill, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
+import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
 import {
   amendRun,
   cancelRun,
@@ -1506,6 +1506,19 @@ export function register(on: On, options: PluginOptions) {
     } finally {
       toolContexts.delete(e.tool_use_id)
     }
+  }).catch(async ($, e, next) => {
+    // A failed hook is skipped and the call runs, so strict enforcement fails closed here with pure checks only (1 s budget).
+    if (e.agentId || enforcement !== 'strict' || next.origin.plugin !== 'engine') return next(e)
+    let reason: string
+    try {
+      const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
+      if (verdict.allowed) return next(e)
+      reason = verdict.reason
+    } catch {
+      if (MAIN_LOOP_TOOLS.has(e.tool) || extraAllowed.has(e.tool)) return next(e)
+      reason = `${e.tool} could not be classified`
+    }
+    return { deny: `${denyMessage(e.tool, reason)} (gate failed: ${next.error.kind})` }
   })
 
   on('turn.complete', async ($, e, next) => {

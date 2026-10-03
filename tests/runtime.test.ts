@@ -89,7 +89,12 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
     return { text: e.text }
   })
   const delivered: string[] = []
-  on('tool.call', ($: any, e: any) => {
+  const failing = new Set<string>()
+  on('tool.call', async ($: any, e: any) => {
+    if (failing.delete(e.tool)) {
+      await clock.sleep(1_000)
+      throw new Error('host is down')
+    }
     if (e.tool === 'TaskStop') stopped.push(e.task_id)
     if (e.tool === 'SubagentHandback') {
       delivered.push(e.message)
@@ -100,7 +105,7 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   on('turn.complete', () => ({ text: '' }))
   on('skill.prompt', ($: any, e: any) => ({ text: e.text }))
   on('classic.SessionStart', () => ({}))
-  return { clock, files, spawns, submitted, contexts, stopped, store, opened, ran, delivered, logs }
+  return { clock, files, spawns, submitted, contexts, stopped, store, opened, ran, delivered, logs, failing }
 }
 
 const PANE = {
@@ -315,6 +320,36 @@ test('strict enforcement refuses work tools in the main conversation and lets no
   expect(allowed.deny).toBe(undefined)
   const bad = await $.command.run({ command: 'dag', args: 'enforce loose', ...COMMAND_CONTEXT })
   expect(bad.text).toContain('Unknown enforcement level')
+})
+
+test('a failing strict gate hook denies gated main-loop calls with the gate-failed message', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  // Relaxed enforcement lets the call through to a slow host that then fails; strict again when the gate hook fails.
+  await $.command.run({ command: 'dag', args: 'enforce guide', ...COMMAND_CONTEXT })
+  h.failing.add('Write')
+  const pending = $.tool.call({ tool: 'Write', file_path: '/work/a.ts', content: 'a' } as any)
+  await h.clock.settle()
+  await $.command.run({ command: 'dag', args: 'enforce strict', ...COMMAND_CONTEXT })
+  await h.clock.advance(1_000)
+  const write = await pending
+  expect(write.deny).toContain('dag-workflow refused Write in the main conversation')
+  expect(write.deny).toContain('(gate failed: throw)')
+})
+
+test('a failing strict gate hook still lets read-only tools run', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  h.failing.add('Read')
+  const pending = $.tool.call({ tool: 'Read', file_path: '/work/a.ts' } as any).then(
+    (result: any) => result,
+    (error: unknown) => ({ failed: String(error) }),
+  )
+  await h.clock.advance(1_000)
+  const read = await pending
+  // The handler passes the call on: it is never answered with a gate refusal.
+  expect(read.deny).toBe(undefined)
+  expect(JSON.stringify(read)).not.toContain('refused')
 })
 
 test('every main-session prompt carries the DAG protocol unless enforcement is off', async ($, on) => {
