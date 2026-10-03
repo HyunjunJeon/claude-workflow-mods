@@ -517,32 +517,32 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
 const settleSubmits = new Set<string>()
 
 async function tick($: EngineInterface, runId: string): Promise<Run | undefined> {
-  const current = runs.get(runId)
-  if (!current || current.sessionId !== sessionId) return current
-  let run = advance(current, await $.clock.now())
-  if (run.handoff) run = offerHandoff(run, await $.clock.now())
-  await persist($, run)
-  if (!run.handoff) {
-    for (const id of nextToStart(run, maxConcurrent)) {
-      run = await startNode($, run, id)
-      await persist($, run)
+  // Drain recovered spawn failures in this hook frame without recursive ticks.
+  // Each recovery consumes one of MAX_AUTO_RECOVERIES before rescheduling.
+  while (true) {
+    const current = runs.get(runId)
+    if (!current || current.sessionId !== sessionId) return current
+    let run = advance(current, await $.clock.now())
+    if (run.handoff) run = offerHandoff(run, await $.clock.now())
+    await persist($, run)
+    if (!run.handoff) {
+      for (const id of nextToStart(run, maxConcurrent)) {
+        run = await startNode($, run, id)
+        await persist($, run)
+      }
     }
+    await refreshSessions($)
+    if (run.handoff?.offeredAt !== undefined && current.handoff?.offeredAt === undefined) await notifyHandoff($, run)
+    if (!run.handoff && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
+    if (!isSettled(run)) settleToasts.delete(runId)
+    else if (!settleToasts.has(runId)) {
+      settleToasts.add(runId)
+      const failed = run.nodes.filter(node => node.state === 'failed').length
+      if (failed > 0 && !run.cancelReason) $.ui.toast(t.toastSettledFailed(run.name, failed), { timeoutMs: ATTENTION_TOAST_MS })
+    }
+    await announce($, run)
+    return run
   }
-  await refreshSessions($)
-  if (run.handoff?.offeredAt !== undefined && current.handoff?.offeredAt === undefined) await notifyHandoff($, run)
-  if (!run.handoff && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) {
-    $.clock.after(0, () => {
-      serialized(() => tick($, runId)).catch(error => $.ui.log(`could not continue recovered run: ${message(error)}`))
-    })
-  }
-  if (!isSettled(run)) settleToasts.delete(runId)
-  else if (!settleToasts.has(runId)) {
-    settleToasts.add(runId)
-    const failed = run.nodes.filter(node => node.state === 'failed').length
-    if (failed > 0 && !run.cancelReason) $.ui.toast(t.toastSettledFailed(run.name, failed), { timeoutMs: ATTENTION_TOAST_MS })
-  }
-  await announce($, run)
-  return run
 }
 
 async function announce($: EngineInterface, run: Run): Promise<void> {
@@ -1625,11 +1625,11 @@ export function register(on: On, options: PluginOptions) {
     if (e.agentId) activity.delete(e.agentId)
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
-      $.clock.after(0, () => {
-        onAgentDone($, end).catch(error => {
-          $.ui.log(`could not record the end of agent ${end.agentId}: ${message(error)}`)
-        })
-      })
+      try {
+        await onAgentDone($, end)
+      } catch (error) {
+        $.ui.log(`could not record the end of agent ${end.agentId}: ${message(error)}`)
+      }
     }
     if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($)
     return next(e)
