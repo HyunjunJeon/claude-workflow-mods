@@ -305,19 +305,30 @@ test('/dag run typed during a model turn starts only when that turn ends', async
   expect(h.spawns.length).toBe(2)
 })
 
-test('/dag run typed during a model turn reports a bad definition immediately', async ($, on) => {
-  const h = harness(on, { '/work/flows/bad.json': JSON.stringify({ key: 'bad', nodes: [] }) })
+function runFiles(h: ReturnType<typeof harness>): string[] {
+  return [...h.files.keys()].filter(path => path.startsWith(`${RUNS}/`) && path.endsWith('.json'))
+}
+
+test('/dag run typed during a model turn rejects a bad definition without queueing anything', async ($, on) => {
+  const h = harness(on, { '/work/flows/bad.json': JSON.stringify({ key: 'bad', nodes: [] }), '/work/flows/fan.json': JSON.stringify(FAN_IN) })
   await boot($)
 
   await $.turn.start({ turnId: 'main-turn', text: 'go' })
-  const out = await $.command.run({ command: 'dag', args: 'run flows/bad.json', ...COMMAND_CONTEXT })
-  expect(out.text).toContain('DAG not started')
+  const bad = await $.command.run({ command: 'dag', args: 'run flows/bad.json', ...COMMAND_CONTEXT })
+  expect(bad.text).toContain('DAG not started')
+  expect(bad.text).not.toContain('starts when the current turn ends')
+  expect(runFiles(h)).toEqual([])
+  // The turn is still busy: a valid definition typed next is held back, and only it starts at turn end.
+  await $.command.run({ command: 'dag', args: 'run flows/fan.json', ...COMMAND_CONTEXT })
+  expect(h.spawns.length).toBe(0)
+  expect(runFiles(h).length).toBe(1)
+
   await mainTurn($)
   await h.clock.settle()
-  expect(h.spawns.length).toBe(0)
+  expect(h.spawns.map(s => s.description)).toEqual(['Fan in: a', 'Fan in: b'])
 })
 
-test('/dag run while no turn is running spawns immediately', async ($, on) => {
+test('/dag run while no turn is running spawns immediately and a later turn end spawns nothing more', async ($, on) => {
   const h = harness(on, { '/work/flows/fan.json': JSON.stringify(FAN_IN) })
   await boot($)
 
@@ -326,6 +337,13 @@ test('/dag run while no turn is running spawns immediately', async ($, on) => {
   const out = await $.command.run({ command: 'dag', args: 'run flows/fan.json', ...COMMAND_CONTEXT })
   expect(h.spawns.length).toBe(2)
   expect(out.text).not.toContain('starts when the current turn ends')
+  expect(checkpoint(h, runFiles(h)[0]!.slice(RUNS.length + 1, -'.json'.length)).nodes.map((n: { state: string }) => n.state)).toEqual(['running', 'running', 'pending'])
+
+  await $.turn.start({ turnId: 'main-turn-2', text: 'again' })
+  await mainTurn($)
+  await h.clock.settle()
+  expect(h.spawns.length).toBe(2)
+  expect(runFiles(h).length).toBe(1)
 })
 
 test('an aborted main turn also starts the run typed during it, in order', async ($, on) => {
