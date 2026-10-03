@@ -1,3 +1,4 @@
+import { hash } from './hash.ts'
 import type { NodeRun, Run } from './types.ts'
 
 export type JevChoice = { readonly choice: string; readonly confidence: number; readonly probabilities?: Readonly<Record<string, number>> }
@@ -52,10 +53,69 @@ export function routingRequest(run: Run, ids: readonly string[]): JevRequest {
   }
 }
 
+const SECRET_NAME = /api_?key|token|secret|passw(?:or)?d/i
+const SECRET_PATTERNS: readonly (readonly [string, RegExp])[] = [
+  ['private-key', /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g],
+  ['bearer-token', /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi],
+  ['aws-access-key', /(?:AKIA|ASIA)[A-Z0-9]{16}/g],
+  ['github-token', /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g],
+  ['slack-token', /xox[abprs]-[A-Za-z0-9-]{10,}/g],
+  ['api-key', /sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g],
+]
+const SECRET_ASSIGNMENT = /([A-Za-z0-9_.-]*(?:api_?key|token|secret|passw(?:or)?d)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;"'&]+)/gi
+
+const MAX_STRING = 2_000
+const HEAD = 1_000
+const MAX_ENTRIES = 200
+const MAX_REQUEST = 4_000
+const MAX_SCOPE = 2_000
+
+export function maskSecrets(text: string): string {
+  let masked = text
+  for (const [kind, pattern] of SECRET_PATTERNS) masked = masked.replace(pattern, `[REDACTED:${kind}]`)
+  return masked.replace(SECRET_ASSIGNMENT, '$1[REDACTED:assignment]')
+}
+
+export function capText(text: string, max: number): string {
+  const masked = maskSecrets(text)
+  return masked.length > max ? `${masked.slice(0, max)}\n[truncated: original length ${text.length} characters]` : masked
+}
+
+export function boundInput(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const masked = maskSecrets(value)
+    return masked.length > MAX_STRING
+      ? { truncated: true, length: value.length, hash: hash(masked), head: masked.slice(0, HEAD) }
+      : masked
+  }
+  if (Array.isArray(value)) {
+    const items: unknown[] = value.slice(0, MAX_ENTRIES).map(boundInput)
+    if (value.length > MAX_ENTRIES) items.push({ omitted: value.length - MAX_ENTRIES })
+    return items
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value)
+    const out: Record<string, unknown> = {}
+    for (const [key, item] of entries.slice(0, MAX_ENTRIES)) {
+      out[key] = typeof item === 'string' && SECRET_NAME.test(key) ? '[REDACTED:assignment]' : boundInput(item)
+    }
+    if (entries.length > MAX_ENTRIES) out._omitted = entries.length - MAX_ENTRIES
+    return out
+  }
+  return value
+}
+
 export function permissionRequest(tool: string, input: unknown, context: JevContext): JevRequest {
   return {
     model: 'jev-latest',
-    state: { tool, input, ...context },
+    state: {
+      tool,
+      input: boundInput(input),
+      ...context,
+      request: capText(context.request, MAX_REQUEST),
+      ...(context.goal === undefined ? {} : { goal: capText(context.goal, MAX_SCOPE) }),
+      ...(context.task === undefined ? {} : { task: capText(context.task, MAX_SCOPE) }),
+    },
     questions: {
       permission: {
         type: 'choice',
