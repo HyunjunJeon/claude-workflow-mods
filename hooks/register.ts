@@ -170,6 +170,7 @@ async function markWaiting($: EngineInterface, agentId: string, tool: string, to
   }
   if (!toolUseId) return
   try {
+    // Best effort: host 2.1.288 accepts this call but draws no line under the dialog; toast, status and band carry the wait.
     $.ui.notice(toolUseId, text)
   } catch (error) {
     debug($, `permission notice for ${owner.run.runId}/${owner.nodeId} refused: ${message(error)}`)
