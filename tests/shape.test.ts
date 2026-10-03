@@ -38,18 +38,26 @@ test('metrics report widths, joins and the producer shape without the verificati
 })
 
 test('Given tool results with each marker, when classified, then every counter increments once', async () => {
+  const dag = (text: string) => ({ tool: 'mcp__dag-workflow__dag', isError: false, text })
   const counts = classifyToolResults([
-    '{"error":"planning_skill_required"}',
-    'dag-workflow refused: denied',
-    '{"error":{"code":"verification_required"}}',
-    '{"error":{"code":"invalid_verification"}}',
-    'all good',
+    dag('{"error":"planning_skill_required"}'),
+    { tool: 'Bash', isError: true, text: '<tool_use_error>dag-workflow refused Bash in the main conversation' },
+    dag('{"error":{"code":"verification_required"}}'),
+    dag('{"error":{"code":"invalid_verification"}}'),
+    dag('all good'),
   ])
   expect(counts).toEqual({ planningRefusals: 1, toolDenials: 1, verificationRequired: 1, invalidVerification: 1 })
 })
 
 test('Given results without markers, when classified, then all counters are zero', async () => {
-  expect(classifyToolResults(['ok', ''])).toEqual({ planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 })
+  expect(classifyToolResults([{ tool: 'Read', isError: false, text: 'ok' }, { tool: 'mcp__dag-workflow__dag', isError: false, text: '' }]))
+    .toEqual({ planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 })
+})
+
+test('Given a Read of the planning reference that quotes refusal codes, when classified, then nothing is counted', async () => {
+  const quoted = 'Missing checks are refused with `verification_required`, malformed ones with `invalid_verification`; planning_skill_required; dag-workflow refused'
+  expect(classifyToolResults([{ tool: 'Read', isError: false, text: quoted }]))
+    .toEqual({ planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 })
 })
 
 test('Given passed, failed and unrecorded nodes, when summarized, then per-node values and totals match', async () => {

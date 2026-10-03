@@ -25,11 +25,22 @@ export type VerificationTotals = {
   autoRetries: number
 }
 
-export function classifyToolResults(texts: string[]): ToolResultCounts {
+export type ToolResult = {
+  readonly tool: string
+  readonly isError: boolean
+  readonly text: string
+}
+
+const DAG_TOOL = 'mcp__dag-workflow__dag'
+
+// Refusal codes count only in the dag tool's own replies and denials only in error results:
+// the planning skill's reference quotes these codes, so a Read of it must not count.
+export function classifyToolResults(results: readonly ToolResult[]): ToolResultCounts {
   const counts: ToolResultCounts = { planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 }
-  for (const text of texts) {
+  for (const { tool, isError, text } of results) {
+    if (isError && text.includes('dag-workflow refused')) counts.toolDenials += 1
+    if (tool !== DAG_TOOL) continue
     if (text.includes('planning_skill_required')) counts.planningRefusals += 1
-    if (text.includes('dag-workflow refused')) counts.toolDenials += 1
     if (text.includes('verification_required')) counts.verificationRequired += 1
     if (text.includes('invalid_verification')) counts.invalidVerification += 1
   }

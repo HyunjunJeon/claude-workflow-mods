@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import type { Run } from '../hooks/engine/types.ts'
 import { SCENARIOS, type Scenario } from './scenarios.ts'
-import { classifyToolResults, verificationOf, type NodeVerificationReport, type ToolResultCounts, type VerificationTotals } from './report.ts'
+import { classifyToolResults, verificationOf, type NodeVerificationReport, type ToolResult, type ToolResultCounts, type VerificationTotals } from './report.ts'
 import { shapeOf, type ShapeMetrics } from './shape.ts'
 
 const REPO = realpathSync(new URL('..', import.meta.url).pathname)
@@ -84,22 +84,26 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
   let skillAt = -1
   let firstStartAt = -1
   let starts = 0
-  const resultTexts: string[] = []
+  const toolNames = new Map<string, string>()
+  const results: ToolResult[] = []
   for (const line of (await Bun.file(newest.path).text()).split('\n')) {
     if (!line.trim()) continue
     const row = JSON.parse(line) as { type?: string; isSidechain?: boolean; message?: { content?: unknown } }
     if (row.isSidechain || !Array.isArray(row.message?.content)) continue
-    for (const block of row.message.content as { type: string; name?: string; input?: Record<string, unknown>; content?: unknown }[]) {
+    for (const block of row.message.content as { type: string; id?: string; name?: string; input?: Record<string, unknown>; content?: unknown; tool_use_id?: string; is_error?: boolean }[]) {
+      if (block.type === 'tool_use' && block.id && block.name) toolNames.set(block.id, block.name)
       index += 1
       if (block.type === 'tool_use' && block.name === 'Skill' && String(block.input?.skill ?? '').endsWith('dag-planning') && skillAt < 0) skillAt = index
       if (block.type === 'tool_use' && block.name === 'mcp__dag-workflow__dag' && block.input?.action === 'start') {
         starts += 1
         if (firstStartAt < 0) firstStartAt = index
       }
-      if (block.type === 'tool_result') resultTexts.push(JSON.stringify(block.content ?? ''))
+      if (block.type === 'tool_result') {
+        results.push({ tool: toolNames.get(block.tool_use_id ?? '') ?? '', isError: block.is_error === true, text: JSON.stringify(block.content ?? '') })
+      }
     }
   }
-  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, ...classifyToolResults(resultTexts) }
+  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, ...classifyToolResults(results) }
 }
 
 async function runScenario(scenario: Scenario, root: string, options: Options): Promise<ScenarioResult> {
