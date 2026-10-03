@@ -166,6 +166,13 @@ const lane = (id: string, writes: string[], extra: Record<string, unknown> = {})
 })
 const audit = (dependsOn: string[]) => lane('audit', ['notes/audit.md'], { category: 'unspecified-low', dependsOn })
 
+test('a change with its own tests and docs stays one node without an under-split warning', async () => {
+  expect(lintDefinition(underSplitDef([
+    lane('feature', ['hooks/register.ts', 'tests/runtime.test.ts', 'src/band.spec.ts', 'README.md']),
+    audit(['feature']),
+  ]))).toEqual([])
+})
+
 test('the lint warns when one producer owns several independent files', async () => {
   const warnings = lintDefinition(underSplitDef([
     lane('site', ['LICENSE', '.editorconfig', 'CONTRIBUTING.md']),

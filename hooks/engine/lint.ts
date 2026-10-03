@@ -16,13 +16,15 @@ export function isVerificationNode(node: NodeDef): boolean {
 
 const MIN_SPLIT_FILES = 3
 const MIN_SPLIT_SECTIONS = 3
+// A change and its own tests are one deliverable (the doctrine keeps them in one node), so tests do not count.
+const TEST_PATH = /(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[^/]+$/
 
 function deliverablePaths(node: NodeDef): string[] {
   const paths = [
     ...(node.writes ?? []),
     ...(node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : [])),
   ]
-  return [...new Set(paths.map(path => path.replace(/\/+$/, '')))]
+  return [...new Set(paths.map(path => path.replace(/\/+$/, '')))].filter(path => !TEST_PATH.test(path))
 }
 
 function namedSections(prompt: string): string[] {
