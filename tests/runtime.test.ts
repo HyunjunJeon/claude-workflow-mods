@@ -1,4 +1,5 @@
 import { expect, mock, test, type Mounted } from 'claude-code/testing'
+import { holdWhileActive } from '../hooks/register.ts'
 
 const TOOL = 'mcp__dag-workflow__dag'
 const RUNS = '/work/.claude/dag/runs'
@@ -140,6 +141,22 @@ function checkpoint(h: ReturnType<typeof harness>, runId: string) {
 function nodeStates(snapshot: { nodes: { id: string; state: string }[] }) {
   return Object.fromEntries(snapshot.nodes.map(n => [n.id, n.state]))
 }
+
+test('holding stops after abort, without another wait, and persists active checkpoints', async () => {
+  const controller = new AbortController()
+  let processRuns = 0
+  let activeChecks = 0
+  const files = new Map<string, string>()
+  await holdWhileActive(controller.signal, () => activeChecks++ === 0, async () => {
+    processRuns++
+    controller.abort()
+    return true
+  }, async () => {
+    files.set('/work/.claude/dag/runs/dag_active.json', JSON.stringify({ status: 'running' }))
+  })
+  expect(processRuns).toBe(1)
+  expect(JSON.parse(files.get('/work/.claude/dag/runs/dag_active.json') ?? 'null')).toEqual({ status: 'running' })
+})
 
 test('a fan-in DAG runs in waves, checkpoints every change and announces when it settles', async ($, on) => {
   const h = harness(on)

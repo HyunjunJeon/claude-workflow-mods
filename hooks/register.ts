@@ -1176,19 +1176,48 @@ async function pollTranscripts($: EngineInterface): Promise<void> {
   }
 }
 
-async function holdUntilSettled($: EngineInterface): Promise<void> {
+async function holdUntilSettled($: EngineInterface, signal: AbortSignal): Promise<void> {
   const deadline = (await $.clock.now()) + HOLD_LIMIT_MS
-  while (hasActiveRun()) {
+  await holdWhileActive(signal, hasActiveRun, async () => {
     if ((await $.clock.now()) >= deadline) {
       $.ui.log(`stopped holding the session open after ${HOLD_LIMIT_MS / 60_000} minutes; a DAG run is still active`)
-      return
+      return false
     }
     try {
       await $.process.run(['sleep', '1'])
+      return true
     } catch (error) {
       $.ui.log(`could not keep the session open for the active DAG run: ${message(error)}`)
+      return false
+    }
+  }, async () => {
+    await persistActiveRuns($)
+    debug($, 'stopped holding: aborted')
+  })
+}
+
+export async function holdWhileActive(
+  signal: AbortSignal,
+  active: () => boolean,
+  wait: () => Promise<boolean>,
+  onAbort: () => Promise<void>,
+): Promise<void> {
+  while (active()) {
+    if (signal.aborted) {
+      await onAbort()
       return
     }
+    if (!(await wait())) return
+    if (signal.aborted) {
+      await onAbort()
+      return
+    }
+  }
+}
+
+async function persistActiveRuns($: EngineInterface): Promise<void> {
+  for (const run of runs.values()) {
+    if (run.sessionId === sessionId && run.status === 'running') await persist($, run)
   }
 }
 
@@ -1734,7 +1763,7 @@ export function register(on: On, options: PluginOptions) {
         }
       }
     }
-    if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($)
+    if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($, next.signal)
     return next(e)
   })
 
