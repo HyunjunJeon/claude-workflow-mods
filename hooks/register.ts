@@ -82,6 +82,10 @@ let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
 let planningLoaded = false
 let interactive = true
+// A /dag run|retry typed during a main model turn is persisted pending and started when that turn ends.
+let mainTurnBusy = false
+let deferStarts = false
+const pendingStarts: string[] = []
 let extraAllowed: ReadonlySet<string> = new Set()
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
@@ -559,6 +563,11 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
   while (true) {
     const current = runs.get(runId)
     if (!current || current.sessionId !== sessionId) return current
+    if (deferStarts) {
+      await persist($, current)
+      if (!pendingStarts.includes(runId)) pendingStarts.push(runId)
+      return current
+    }
     let run = advance(current, await $.clock.now())
     if (run.handoff) run = offerHandoff(run, await $.clock.now())
     await persist($, run)
@@ -1713,6 +1722,18 @@ export function register(on: On, options: PluginOptions) {
         $.ui.log(`could not record the end of agent ${end.agentId}: ${message(error)}`)
       }
     }
+    if (!e.agentId) {
+      mainTurnBusy = false
+      // Started here, inside the hook frame, so the workers stay visible to this plugin's own hooks.
+      while (pendingStarts.length > 0) {
+        const runId = pendingStarts.shift()!
+        try {
+          await serialized(() => tick($, runId))
+        } catch (error) {
+          $.ui.log(`could not start deferred run ${runId}: ${message(error)}`)
+        }
+      }
+    }
     if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($)
     return next(e)
   })
@@ -1732,7 +1753,22 @@ export function register(on: On, options: PluginOptions) {
   on('command.run', { command: 'dag' }, async ($, e) => {
     const verb = splitArgs(e.args ?? '')[0]
     if ((verb === 'handoff' || verb === 'accept' || verb === 'note') && e.origin.kind !== 'composer') return { text: 'This action requires a user command or pane control.' }
-    return serialized(() => runCommand($, e.args ?? ''))
+    if (!mainTurnBusy || (verb !== 'run' && verb !== 'retry')) return serialized(() => runCommand($, e.args ?? ''))
+    return serialized(async () => {
+      const before = pendingStarts.length
+      deferStarts = true
+      try {
+        const out = await runCommand($, e.args ?? '')
+        return pendingStarts.length > before ? { text: `${out.text ?? ''}\n${t.runDeferred}`.trim() } : out
+      } finally {
+        deferStarts = false
+      }
+    })
+  })
+
+  on('turn.start', async ($, e, next) => {
+    mainTurnBusy = true
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {

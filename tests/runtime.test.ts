@@ -102,6 +102,7 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
     }
     return { result: 'stopped' }
   })
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('skill.prompt', ($: any, e: any) => ({ text: e.text }))
   on('classic.SessionStart', () => ({}))
@@ -254,6 +255,65 @@ test('/dag run starts a definition file and /dag status prints its nodes', async
   expect(list.text).toContain('running')
   const bad = await $.command.run({ command: 'dag', args: 'status nope', ...COMMAND_CONTEXT })
   expect(bad.text).toContain('Unknown run "nope"')
+})
+
+async function mainTurn($: any, abort?: boolean) {
+  await $.turn.complete({ turnId: 'main-turn', answer: '', durationMs: 5, isAborted: abort === true, reason: abort ? 'aborted' : 'answer', usage: null })
+}
+
+test('/dag run typed during a model turn starts only when that turn ends', async ($, on) => {
+  const h = harness(on, { '/work/flows/fan.json': JSON.stringify(FAN_IN) })
+  await boot($)
+
+  await $.turn.start({ turnId: 'main-turn', text: 'go' })
+  const out = await $.command.run({ command: 'dag', args: 'run flows/fan.json', ...COMMAND_CONTEXT })
+  expect(h.spawns.length).toBe(0)
+  expect(out.text).toContain('starts when the current turn ends')
+  const saved = JSON.parse([...h.files.entries()].find(([path]) => path.startsWith(`${RUNS}/`) && path.endsWith('.json'))![1])
+  expect(saved.nodes.map((n: { state: string }) => n.state)).toEqual(['scheduled', 'scheduled', 'pending'])
+
+  await mainTurn($)
+  await h.clock.settle()
+  expect(h.spawns.length).toBe(2)
+})
+
+test('/dag run typed during a model turn reports a bad definition immediately', async ($, on) => {
+  const h = harness(on, { '/work/flows/bad.json': JSON.stringify({ key: 'bad', nodes: [] }) })
+  await boot($)
+
+  await $.turn.start({ turnId: 'main-turn', text: 'go' })
+  const out = await $.command.run({ command: 'dag', args: 'run flows/bad.json', ...COMMAND_CONTEXT })
+  expect(out.text).toContain('DAG not started')
+  await mainTurn($)
+  await h.clock.settle()
+  expect(h.spawns.length).toBe(0)
+})
+
+test('/dag run while no turn is running spawns immediately', async ($, on) => {
+  const h = harness(on, { '/work/flows/fan.json': JSON.stringify(FAN_IN) })
+  await boot($)
+
+  await $.turn.start({ turnId: 'main-turn', text: 'go' })
+  await mainTurn($)
+  const out = await $.command.run({ command: 'dag', args: 'run flows/fan.json', ...COMMAND_CONTEXT })
+  expect(h.spawns.length).toBe(2)
+  expect(out.text).not.toContain('starts when the current turn ends')
+})
+
+test('an aborted main turn also starts the run typed during it, in order', async ($, on) => {
+  const h = harness(on, { '/work/flows/fan.json': JSON.stringify(FAN_IN), '/work/flows/chain.json': JSON.stringify(CHAIN) })
+  await boot($)
+
+  await $.turn.start({ turnId: 'main-turn', text: 'go' })
+  await $.command.run({ command: 'dag', args: 'run flows/fan.json', ...COMMAND_CONTEXT })
+  await $.command.run({ command: 'dag', args: 'run flows/chain.json', ...COMMAND_CONTEXT })
+  expect(h.spawns.length).toBe(0)
+
+  await mainTurn($, true)
+  await h.clock.settle()
+  expect(h.spawns.map(s => s.description).length).toBe(3)
+  expect(h.spawns[0]!.prompt).toContain('Write a.txt')
+  expect(h.spawns[2]!.prompt).toContain('Step A')
 })
 
 test('a node hand-back reaches the main session as a short note and still decides the node outcome', async ($, on) => {
