@@ -274,6 +274,17 @@ test('/dag run starts a definition file and /dag status prints its nodes', async
   expect(bad.text).toContain('Unknown run "nope"')
 })
 
+test('/dag run shows definition lint warnings such as a host-blocked report name', async ($, on) => {
+  const report = { key: 'report', name: 'Report', nodes: [{ id: 'r', prompt: 'TASK: write. STOP WHEN done.', verify: [{ kind: 'file', path: 'REPORT.md' }] }] }
+  harness(on, { '/work/flows/report.json': JSON.stringify(report) })
+  await boot($)
+
+  const out = await $.command.run({ command: 'dag', args: 'run flows/report.json', ...COMMAND_CONTEXT })
+  expect(out.text).toContain('Warnings:')
+  expect(out.text).toContain('"REPORT.md" is named like a report')
+  expect(out.text).not.toContain('skill is not loaded')
+})
+
 async function mainTurn($: any, abort?: boolean) {
   await $.turn.complete({ turnId: 'main-turn', answer: '', durationMs: 5, isAborted: abort === true, reason: abort ? 'aborted' : 'answer', usage: null })
 }

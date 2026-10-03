@@ -1068,10 +1068,13 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     }
     const reply = await startDefinition($, input)
     if (reply.isError) return { text: `DAG not started:\n${reply.result}` }
-    const runId = (JSON.parse(reply.result) as { run_id: string; reused: boolean }).run_id
-    const run = runs.get(runId)
+    const started = JSON.parse(reply.result) as { run_id: string; reused: boolean; warnings?: string[] }
+    const run = runs.get(started.run_id)
     await openPane($, true)
-    return { text: run ? statusText(run, sessionId) : reply.result }
+    // /dag run is not gated by the planning skill, so only definition lint reaches the person.
+    const warnings = (started.warnings ?? []).filter(warning => !warning.includes(PLANNING_SKILL))
+    const text = run ? statusText(run, sessionId) : reply.result
+    return { text: warnings.length ? `${text}\nWarnings:\n${warnings.map(warning => `- ${warning}`).join('\n')}` : text }
   }
   if (verb !== 'status' && verb !== 'cancel' && verb !== 'retry') return { text: USAGE }
   const run = rest[0] ? runs.get(rest[0]) : undefined
