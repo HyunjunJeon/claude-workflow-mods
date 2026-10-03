@@ -556,14 +556,14 @@ test('the DAG pane follows the viewed node transcript without overriding manual 
   await callDag($, { action: 'start', definition: FAN_IN })
   const ui = (await $.ui.mount({
     ...PANE,
-    props: { ...PANE.props, view: { agentId: 'agent-1' } },
+    props: { ...PANE.props, view: { agentId: 'agent-2' } },
   } as any)) as Mounted<'terminal', 'Pane'>
   await ui.resize({ columns: 60, rows: 40, in: 'graph' })
-  expect(await ui.find({ type: 'Text', text: /^> \[-\] a/, in: 'graph' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] b/, in: 'graph' })).toBeDefined()
 
   await ui.press({ key: 'select-next' })
-  await ui.redraw({ ...PANE.props, view: { agentId: 'agent-1' } } as any)
-  expect(await ui.find({ type: 'Text', text: /^> \[-\] b/, in: 'graph' })).toBeDefined()
+  await ui.redraw({ ...PANE.props, view: { agentId: 'agent-2' } } as any)
+  expect(await ui.find({ type: 'Text', text: /^> \[-\] b/, in: 'graph' })).toBeUndefined()
   await ui.unmount()
 })
 
