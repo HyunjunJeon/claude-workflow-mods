@@ -1,4 +1,4 @@
-# dag-workflow
+# claude-dag-workflow
 
 Claude Code mod로 만든 의존성 그래프(DAG) 워크플로우입니다.
 
