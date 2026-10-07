@@ -1,6 +1,6 @@
 # dag-workflow
 
-Claude Code mod로 만든 의존성 그래프(DAG) 워크플로우입니다. omo의 mass-ulw DAG 엔진(`workflow` 도구)과 [omo-herdr-dag](https://github.com/jc01rho/omo-herdr-dag) 뷰어가 하는 일을 Claude Code 안에서 합니다.
+Claude Code mod로 만든 의존성 그래프(DAG) 워크플로우입니다.
 
 - **DAG 사용은 강제입니다.** 메인 대화는 계획, 읽기, 질문, 오케스트레이션만 하고, 실제 작업은 모두 DAG 노드에서 합니다([강제](#강제)).
 - 노드는 Claude Code 서브에이전트로 실행되고, 의존성이 풀리는 순서대로 병렬 웨이브로 돕니다.
