@@ -108,7 +108,7 @@ that prints OK when run with python3 test_app.py.
    - 읽기 전용 Bash: `ls`, `cat`, `rg`, `find`(‐exec/‐delete 제외), `git status/log/diff/show/...`, 인자가 `--version`/`--help` 하나뿐인 명령, `uv pip list/freeze/show/check`, 출력만 하는 `sed`(`-i`·`-f`·`w`·`e` 제외) 등. 명령이 모두 읽기 전용이면 `for`/`if`/`while` 구조와 입력 리다이렉트(`< 파일`)도 허용합니다. 출력 리다이렉트(`>`), 명령 치환(`$(...)`), 프로세스 치환(`<(...)`), 목록에 없는 명령이 하나라도 있으면 거부합니다.
    - 거부: Edit, Write, NotebookEdit, Agent, Workflow, TodoWrite/TaskCreate(계획은 DAG로만), 쓰기 Bash, 그 밖의 MCP 도구
    - DAG 노드 에이전트와 플러그인 자신의 호출(노드 spawn, TaskStop)은 제한하지 않습니다.
-2. **프로토콜 주입**: 사용자 프롬프트마다 "계획을 DAG로 짜서 실행하고, 의존 관계를 정확히 적고, 정착 요약을 확인하라"는 짧은 지침을 붙입니다.
+2. **프로토콜 주입**: 사용자 프롬프트마다 "계획을 DAG로 짜서 실행하고, 의존 관계를 정확히 적고, 정착 요약을 확인하라"는 짧은 지침을 붙입니다. 비대화형 세션(`session.start`의 `isInteractive`가 false인 경우, 예: `claude -p`)에서는 지침이 한 줄 더 붙어, 사용자에게 묻지 말고(AskUserQuestion도, 확인 질문도 안 됨) 스스로 결정하되 가정을 정의의 `goal`과 노드 프롬프트에 적으라고 알립니다.
 3. **도구 설명**: dag 도구 설명에 같은 원칙을 넣습니다.
 4. **계획 스킬 게이트**: 세션의 첫 `start`/`amend`는 `dag-workflow:dag-planning` 스킬을 불러오기 전까지 `planning_skill_required`로 거부됩니다([계획 스킬](#계획-스킬)). `/clear`하면 다시 불러와야 합니다. 사용자가 직접 실행하는 `/dag run`은 게이트하지 않습니다.
 
@@ -119,11 +119,29 @@ that prints OK when run with python3 test_app.py.
 `skills/dag-planning/`이 플러그인에 들어 있습니다(`/dag-workflow:dag-planning`).
 
 - `SKILL.md`: 언제 쓰나, 정의 형태(노드 필드, dependsOn으로 결과가 흐르는 방식), 목표 우선, 실행·복구(retry/amend/send/cancel)·감독 방법, 메인 대화가 할 수 있는 일
+- `SKILL.md`의 `## Alignment` 단계: 계획 읽기 뒤, 실행 계획을 쓰기 전에 질문 라운드를 최대 한 번 가집니다. 산출물 종류(예: CLI인지 문서인지), 범위(들어가고 빠지는 파일·구성요소), 완료 기준 중 하나가 정말 모호하고 Read나 `rg`로도 풀리지 않을 때만 묻습니다. 사실은 찾아보고 묻지 않으며, 모호한 것이 없으면 조용히 건너뜁니다. 라운드는 AskUserQuestion 한 번에 번호 붙인 질문 4개까지이고, 질문마다 추천 답을 첫 옵션으로 두어 "예"만 해도 받아들여집니다. 주입된 프로토콜이 비대화형 세션이라고 알리면 라운드를 건너뛰고 스스로 결정하며 가정은 `definition.goal`과 노드 프롬프트에 적습니다. 요청이 크고 모호하면 `/dag-workflow:dag-interview`나 `/dag-workflow:dag-pm`을 제안할 뿐 모델이 직접 부르지는 않습니다. 답을 받은 뒤 확정한 목표는 `definition.goal`에, 완료 기준은 `verify`에 넣습니다.
 - `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`), 안전하지만 틀린 산출물 점검표
 - 노드용 스킬 `skills/dag-node-debugging/`, `skills/dag-node-review-standards/`, `skills/dag-node-testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:dag-node-debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 테스트)입니다. 
 
 mod는 이 스킬을 강제로 연결합니다.  
-프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/check/test/review/audit가 있고 다른 노드에 의존)가 없거나, 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
+프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/check/test/review/audit가 있고 다른 노드에 의존)가 없거나, 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
+
+### 정렬 스킬: 인터뷰와 PM
+
+요청이 크고 모호하면 DAG를 짜기 전에 사용자와 먼저 맞추는 스킬 두 개가 있습니다. 둘 다 `disable-model-invocation`이라 사용자가 `/dag-workflow:dag-interview [주제]`나 `/dag-workflow:dag-pm [아이디어]`로 직접 실행할 때만 동작하고, 모델은 스스로 부르지 못합니다(계획 스킬도 제안만 합니다). 메인 대화에서 strict 강제를 그대로 받으며 실행하므로 AskUserQuestion, Read, LSP, 읽기 전용 Bash, dag 도구만 쓰고 Agent·Write·Edit·쓰기 Bash는 쓰지 못합니다. 파일은 스킬이 직접 쓰지 않습니다.
+
+- `/dag-workflow:dag-interview`: 요청을 설계 트리로 보고 라운드로 묻습니다.
+  - 질문에는 Q1, Q2 번호와 짧은 제목을 붙이고 추천 답을 밝힙니다. AskUserQuestion에서는 추천 옵션을 맨 앞에 "(Recommended)"로 두어 "예"만 해도 받아들여지게 합니다. 앞선 결정이 풀려 지금 물을 수 있는 질문은 한 라운드에 묻되, AskUserQuestion 한 번에 4개까지입니다. 넘치면 하위 가지가 많은 4개를 먼저 묻습니다.
+  - 모호함 트랙은 범위, 제약, 산출물, 검증 네 가지입니다. 라운드마다 트랙별 해결됨/미해결 표를 출력하고, 직전 두 라운드가 한 트랙에만 몰렸으면 가장 덜 다룬 트랙에서 고릅니다.
+  - 사실과 결정을 나눕니다. "프로젝트가 X를 쓴다"는 사실이라 Read, LSP, `rg` 같은 읽기 전용 명령으로 직접 찾고, "새 기능이 X를 써야 한다"는 결정이라 사용자에게 묻습니다. 사실이 너무 커서 직접 읽기 어려우면 읽기만 하는 한 노드짜리 DAG로 조사시키고, 기다리거나 폴링하지 않습니다.
+  - Refine: 자유 답변에 범위·제약·결정이 담기면 `Decision (user-stated)`, `Constraints (user-stated)`, `My reading`으로 나눠 다시 말하고 AskUserQuestion으로 확인받습니다. 확인 전에는 확정으로 보지 않고, 모델의 추론을 사용자가 말한 것으로 적지 않습니다.
+  - Restate gate: 더 물을 질문이 없고 암묵적 가정이 없으면 목표를 한 문장으로, 완료 기준을 관찰 가능한 번호 목록으로 다시 말해 확인받습니다. "Yes, plan it"을 고른 뒤에만 `dag-workflow:dag-planning`을 불러 넘기며, 목표는 `definition.goal`에, 완료 기준은 `verify` 후보에, 사용자가 말한 제약은 노드 SCOPE 줄에 들어갑니다. 그 전에는 계획할 작업의 `start`를 하지 않습니다.
+  - 요청이 이미 명확하면 한 문장으로 알리고 바로 계획 스킬로 갑니다. 비대화형 세션에서는 적용하지 않습니다.
+- `/dag-workflow:dag-pm`: 사용자를 제품 책임자로 보고 무엇을, 왜만 묻습니다. 라운드는 dag-interview와 같게(번호, 첫 옵션이 추천 답, 한 번에 4개까지) 진행합니다.
+  - 질문은 하기 전에 세 분류 중 하나로 가릅니다. 제품 결정(사용자, 문제, 범위, 우선순위, 성공 척도, 사용자에게 보이는 동작)은 사용자에게 묻고, 기술 결정(스택, 구조, 라이브러리, 데이터 모델)은 묻지 않고 "Deferred to development"로 개발 단계에 넘기며, 모름(사용자가 모르거나 다른 사람에게 달렸거나 지금 정할 수 없는 것)은 미해결 항목으로 기록합니다.
+  - 제품 질문마다 "Decide later" 선택지를 두고, 고르면 모름으로 취급해 미해결 항목에 넣습니다. 모름을 확정 요구사항으로 내놓지 않습니다.
+  - 질문이 끝나면 확정한 제품 결정, 미룬 기술 결정, 미해결 항목과 제품 목표 한 문장을 보여 주고 확인받은 뒤에야 씁니다.
+  - PRD 파일은 메인 대화가 쓸 수 없으므로 노드가 하나인 DAG `write-prd`(category `writing`, `writes`는 `docs/prd/<slug>.md`)가 씁니다. 계획 스킬을 먼저 불러 시작합니다. 노드는 Problem, Users, Goals, Scope, Requirements, Success criteria, Deferred to development, Open items 순서의 섹션을 쓰고, 미해결 항목은 `## Open items`에만 적으며 비어 있어도 "None"으로 이 섹션을 씁니다. 검증은 그 파일에 `## Open items`와 `## Goals`가 들어 있는지 확인합니다. 정착하면 PRD를 읽어 경로와 미해결 항목을 보여 주고, 다음 단계로 `/dag-workflow:dag-interview`나 일반 계획을 제안합니다.
 
 ## 결과 전달
 
@@ -410,6 +428,8 @@ bun eval/run.ts [--only id,id] [--concurrency 4] [--model sonnet] [--timeout-min
 ```
 
 러너는 시나리오마다 `/tmp/dag-shapes/<stamp>/<id>`에 고정 파일을 만들고 `claude -p --plugin-dir <이 저장소>`를 실행합니다(현재 계정의 사용량을 씁니다). 끝나면 체크포인트의 정의로 노드 수, 깊이, 레이어 폭, 팬인 노드, 검증 노드, 경고, 카테고리, 형태(전체와 검증 노드를 뺀 생산자 형태)를 측정하고, 세션 기록에서 스킬 로드가 start보다 먼저였는지와 거부 횟수를 확인하며, 결과 확인 명령을 실행합니다. 결과는 `eval/results/<stamp>.md`와 `.json`에 저장되고, 고정 파일 디렉터리는 `--keep`이 없으면 지워집니다.
+
+결과 표의 `AskUserQuestion calls` 열(`refusals (planning/tools)` 바로 뒤)은 시나리오 세션 기록의 메인 대화에서 `AskUserQuestion` 도구를 호출한 횟수입니다(서브에이전트 호출은 세지 않습니다). `claude -p`는 비대화형 세션이라 프로토콜이 사용자에게 묻지 말라고 알리므로 기대값은 0이고, 0보다 크면 모델이 물으려 했다는 뜻입니다. 사용자의 답이 있어야 하는 인터뷰(`dag-interview`, `dag-pm`)는 `claude -p`로 측정할 수 없습니다.
 
 ## 개발
 
