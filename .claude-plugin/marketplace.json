@@ -1,0 +1,5 @@
+{
+  "name": "claude-dag-workflow",
+  "owner": { "name": "jhj" },
+  "plugins": [{ "name": "dag-workflow", "source": "./" }]
+}
