@@ -46,7 +46,7 @@ test('the header, graph, dependency list and cards follow the run', async () => 
   run = markFinished(markRunning(run, 'b', 'agent-b', 1_000), 'b', { state: 'completed', answer: 'wrote b\nDAG_NODE_STATUS: completed' }, 4_000)
   const model = buildPane([run], VIEW, 13_000, { taskCount: 2 })
 
-  expect(model.header.map(text)).toEqual(['DAG  t Tasks (2)', 'Fan in  run 1/1 · r1', 'running · 1/3 done'])
+  expect(model.header.map(text)).toEqual(['DAG & Tasks(2)', 'Fan in  run 1/1 · r1', 'running · 1/3 done'])
   expect(model.graph!.nodes.map(n => [n.id, n.icon, n.color, n.incoming])).toEqual([
     ['a', '●', 'cyan', []],
     ['b', '✓', 'green', []],

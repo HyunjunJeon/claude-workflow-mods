@@ -265,7 +265,7 @@ function runSelector(runs: Run[], index: number, view: ViewState, t: Strings): R
 export function buildPane(runs: Run[], view: ViewState, now: number, context: ViewContext = {}): PaneModel {
   const ctx: Ctx = { activity: context.activity ?? new Map(), waiting: context.waiting ?? new Map(), t: context.t ?? DEFAULT_STRINGS }
   const { t } = ctx
-  const top: Line = [{ text: `DAG  ${t.tasksSwitch(context.taskCount ?? 0)}`, color: ACCENT, bold: true }]
+  const top: Line = [{ text: `DAG ${t.tasksSwitch(context.taskCount ?? 0)}`, color: ACCENT, bold: true }]
   if (runs.length === 0) return { header: [top], runs: null, graph: null, dependencies: [], cards: [], errors: [], empty: t.empty }
   const index = clampRunIndex(view.runIndex, runs.length)
   const run = runs[index] as Run
