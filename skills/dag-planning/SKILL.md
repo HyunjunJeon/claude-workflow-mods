@@ -50,6 +50,25 @@ Before `start`, state one concise run plan:
 
 Execute that plan.
 
+## Alignment
+
+After reading the reference and before writing the run plan, ask at most one round of questions.
+Ask only when one of these is ambiguous and Read or `rg` cannot settle it:
+
+- Deliverable kind, such as a CLI versus a document.
+- Scope: the files or components that are in or out.
+- Acceptance criteria: the observable result that counts as done.
+
+Look up facts; never ask for them.
+If nothing is ambiguous, skip the round silently and plan.
+Put the round in a single AskUserQuestion call with at most 4 numbered questions.
+Give each question a recommended answer as its first option, so a plain yes accepts it.
+If the injected protocol marks the session non-interactive, skip the round and decide.
+Write every assumption into `definition.goal` and the node prompts.
+When the request is large and vague, suggest `/dag-workflow:dag-interview` (multi-round interview) or `/dag-workflow:dag-pm` (PRD interview).
+Those skills are user-invoked only; never invoke them.
+After the answers, write the confirmed goal into `definition.goal` and the acceptance criteria into `verify`.
+
 ## The shape
 
 A run is a declarative definition with these fields:
