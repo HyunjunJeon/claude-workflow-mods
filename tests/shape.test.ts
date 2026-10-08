@@ -13,7 +13,7 @@ function runWith(nodes: NodeRun[]): Run {
 }
 
 function graph(edges: Record<string, string[]>): Definition {
-  const parsed = parseDefinition({ key: 'g', nodes: Object.entries(edges).map(([id, dependsOn]) => ({ id, prompt: 'p', dependsOn })) })
+  const parsed = parseDefinition({ key: 'g', goal: 'a fixture goal', nodes: Object.entries(edges).map(([id, dependsOn]) => ({ id, prompt: 'p', dependsOn })) })
   if (!parsed.ok) throw new Error(parsed.error.message)
   return parsed.value
 }

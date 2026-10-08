@@ -523,6 +523,7 @@ test('a dependent node receives its dependencies\' outputs and the settle summar
 
 const COMPLIANT = {
   key: 'compliant',
+  goal: 'x.txt exists and a verification node confirms it.',
   nodes: [
     { id: 'make', verify: VERIFY, prompt: 'TASK: Create x.txt. DELIVERABLE: x.txt. SCOPE: write x.txt only. VERIFY: cat x.txt. STOP WHEN: x.txt exists.' },
     { id: 'verify', verify: VERIFY, dependsOn: ['make'], prompt: 'TASK: Check x.txt. DELIVERABLE: a PASS/FAIL line. SCOPE: read only. VERIFY: cat x.txt. STOP WHEN: the line is reported.' },
@@ -567,7 +568,7 @@ test('guide mode and the user\'s /dag run start without the skill; guide reminds
 test('start audits the node prompt contract and asks for a verification node', async ($, on) => {
   harness(on)
   await boot($)
-  const loose = await callDag($, { action: 'start', definition: FAN_IN })
+  const loose = await callDag($, { action: 'start', definition: { ...FAN_IN, goal: 'a.txt and b.txt are merged into one file.' } })
   expect(loose.value.warnings.length).toBe(4)
   expect(loose.value.warnings[0]).toContain('node "a": the prompt lacks TASK: and STOP WHEN')
   expect(loose.value.warnings[3]).toContain('no verification node')

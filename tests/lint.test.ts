@@ -3,11 +3,13 @@ import { parseDefinition } from '../hooks/engine/definition.ts'
 import { lintDefinition } from '../hooks/engine/lint.ts'
 import { verificationProblem } from '../hooks/engine/verification.ts'
 
-const def = (nodes: unknown[]) => {
-  const r = parseDefinition({ key: 'k', nodes })
+// Every definition carries a goal unless a test passes undefined, so the goal warning stays out of the other tests.
+const build = (nodes: unknown[], goal?: string) => {
+  const r = parseDefinition({ key: 'k', ...(goal === undefined ? {} : { goal }), nodes })
   if (!r.ok) throw new Error(r.error.message)
   return r.value
 }
+const def = (nodes: unknown[]) => build(nodes, 'a fixture goal')
 const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
 const lintVerify = (verify: unknown[]) => lintDefinition(def([{ id: 'x', prompt: full, verify }]))
 const command = (...argv: string[]) => ({ kind: 'command', argv })
@@ -88,4 +90,26 @@ test('vacuous verify collects every offending check of one node into one warning
   ])
   expect(warnings[0]).not.toContain('check 2')
   expect(verificationProblem(definition)).toBeUndefined()
+})
+
+test('a definition without a goal gets the goal warning, after every other warning', async () => {
+  const nodes = [{ id: 'x', prompt: 'TASK: only a task' }]
+  for (const goal of [undefined, '', '   ']) {
+    const warnings = lintDefinition(build(nodes, goal))
+    expect({ goal, count: warnings.length }).toEqual({ goal, count: 2 })
+    expect(warnings[0]).toContain('node "x": the prompt lacks STOP WHEN')
+    expect(warnings[1]).toContain('the definition has no goal')
+    expect(warnings[1]).toBe('the definition has no goal - set "goal" to one sentence naming the deliverable and its observable done condition; every node sees it.')
+  }
+  const alone = lintDefinition(build([{ id: 'x', prompt: full }]))
+  expect(alone).toHaveLength(1)
+  expect(alone[0]).toContain('the definition has no goal')
+})
+
+test('the same definition with a goal gets no goal warning', async () => {
+  const nodes = [{ id: 'x', prompt: 'TASK: only a task' }]
+  const withGoal = lintDefinition(build(nodes, 'One sentence naming the deliverable and when it is done.'))
+  expect(withGoal).toHaveLength(1)
+  expect(withGoal.some(warning => warning.includes('the definition has no goal'))).toBe(false)
+  expect(lintDefinition(build([{ id: 'x', prompt: full }], 'One sentence naming the deliverable and when it is done.'))).toEqual([])
 })

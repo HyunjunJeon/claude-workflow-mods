@@ -118,5 +118,8 @@ export function lintDefinition(definition: Definition): string[] {
       warnings.push(`node "${node.id}": the final audit requires judgment across inputs, while quick is reserved for mechanical checks - it runs on unspecified-low instead; write unspecified-low or higher in the definition. Both quick and unspecified-low use sonnet.`)
     }
   }
+  if (definition.goal === undefined || definition.goal.trim() === '') {
+    warnings.push('the definition has no goal - set "goal" to one sentence naming the deliverable and its observable done condition; every node sees it.')
+  }
   return warnings
 }
