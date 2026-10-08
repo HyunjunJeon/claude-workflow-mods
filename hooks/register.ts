@@ -2,8 +2,8 @@ import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderS
 import { parseDefinition } from './engine/definition.ts'
 import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
-import { isBlockedReportPath, lintDefinition } from './engine/lint.ts'
-import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
+import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
+import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSummary, emptyContext, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
@@ -54,6 +54,12 @@ const PREFS_KEY = 'collapse-prefs'
 const VIEW_KEY = 'pane-view'
 const FALLBACK_GRAPH_COLUMNS = 60
 const JEV_TIMEOUT_MS = 5_000
+// Session-model routing requests (1-3 nodes, up to 8 in parallel, Sonnet at low effort) took 1.5-5.3 s in measurements,
+// so the model gets about twice the slowest of them, more room than HTTP.
+const JEV_MODEL_TIMEOUT_MS = 10_000
+const JEV_MODEL_CALLS = 8
+// The planning skill's final audit never runs on quick; the plugin holds it to that whatever the proposal or Jev said.
+const FINAL_AUDIT_CATEGORY = 'unspecified-low'
 const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
 const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
 const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
@@ -104,6 +110,8 @@ const waiting = new Map<string, { tool: string; toolUseId?: string; since: numbe
 let userRequest = ''
 let jevEnabled = true
 let jevConfidence = 0.9
+// Session-model routing answers measured 0.60-0.97 confident with every choice correct, so they apply from a lower bar.
+let jevModelRoutingConfidence = 0.8
 let jevModelFallback = true
 let jevApiKey: string | undefined
 let ticks = 0
@@ -126,11 +134,16 @@ const failureToasts = new Map<string, Set<string>>()
 const ATTENTION_TOAST_MS = 12_000
 let lastPaneAgentId: string | undefined
 
+type JevOutcome = Exclude<DecisionOutcome, 'applied' | 'low-confidence' | 'ask' | 'existing-decision'> | 'answered'
+
 type JevEvaluation = {
   choices: ReadonlyMap<string, JevChoice>
-  outcome: Exclude<DecisionOutcome, 'applied' | 'low-confidence' | 'ask' | 'existing-decision'> | 'answered'
+  outcome: JevOutcome
   latencyMs: number
   backend?: 'http' | 'model'
+  // Per question, when the questions were asked in separate requests.
+  outcomes?: ReadonlyMap<string, JevOutcome>
+  latencies?: ReadonlyMap<string, number>
 }
 
 function serialized<T>(job: () => Promise<T>): Promise<T> {
@@ -194,7 +207,8 @@ function waitingTools(): Map<string, string> {
 }
 
 // HTTP is primary; the session model answers only when the key is missing or the HTTP call fails, times out or is non-2xx.
-async function evaluateJev($: EngineInterface, request: JevRequest, signal?: AbortSignal): Promise<JevEvaluation> {
+// The model takes modelParts, the same questions split into requests it answers in parallel.
+async function evaluateJev($: EngineInterface, request: JevRequest, signal?: AbortSignal, modelParts: readonly JevRequest[] = [request]): Promise<JevEvaluation> {
   if (!jevEnabled) return { choices: new Map(), outcome: 'disabled', latencyMs: 0 }
   if (!jevApiKey && !jevModelFallback) return { choices: new Map(), outcome: 'missing-key', latencyMs: 0 }
   const startedAt = await $.clock.now()
@@ -202,28 +216,50 @@ async function evaluateJev($: EngineInterface, request: JevRequest, signal?: Abo
     const http = await evaluateJevHttp($, request, jevApiKey, startedAt)
     if (!jevModelFallback || (http.outcome !== 'http-error' && http.outcome !== 'timeout' && http.outcome !== 'transport-error')) return http
   }
-  return evaluateJevModel($, request, startedAt, signal)
+  return evaluateJevModel($, modelParts, startedAt, signal)
 }
 
-async function evaluateJevModel($: EngineInterface, request: JevRequest, startedAt: number, signal?: AbortSignal): Promise<JevEvaluation> {
+type ModelPart = { choices: ReadonlyMap<string, JevChoice>; outcome: JevOutcome; latencyMs: number; note?: string }
+
+async function evaluateJevModel($: EngineInterface, parts: readonly JevRequest[], startedAt: number, signal?: AbortSignal): Promise<JevEvaluation> {
+  const total = parts.reduce((sum, part) => sum + Object.keys(part.questions).length, 0)
+  debug($, `Jev model fallback started (${total} question(s) in ${parts.length} request(s))`)
+  const results = await Promise.all(parts.map(part => completeJevPart($, part, startedAt, signal)))
+  const notes = new Map<string, number>()
+  for (const result of results) if (result.note) notes.set(result.note, (notes.get(result.note) ?? 0) + 1)
+  for (const [note, count] of notes) $.ui.log(parts.length > 1 ? `${note} (${count} of ${parts.length} requests)` : note)
+  const choices = new Map<string, JevChoice>()
+  const outcomes = new Map<string, JevOutcome>()
+  const latencies = new Map<string, number>()
+  results.forEach((result, index) => {
+    for (const id of Object.keys(parts[index]!.questions)) {
+      const choice = result.choices.get(id)
+      if (choice) choices.set(id, choice)
+      outcomes.set(id, result.outcome === 'answered' && !choice ? 'invalid-response' : result.outcome)
+      latencies.set(id, result.latencyMs)
+    }
+  })
+  const outcome = choices.size ? 'answered' : results.find(result => result.outcome !== 'answered')?.outcome ?? 'invalid-response'
+  return { choices, outcome, latencyMs: Math.max(0, ...latencies.values()), backend: 'model', outcomes, latencies }
+}
+
+async function completeJevPart($: EngineInterface, request: JevRequest, startedAt: number, signal?: AbortSignal): Promise<ModelPart> {
   const ask = modelPrompt(request)
-  debug($, `Jev model fallback started (${Object.keys(request.questions).length} question(s))`)
   try {
     const reply = await $.model.complete(
-      { model: 'sonnet', system: ask.system, prompt: ask.prompt, maxTokens: ask.maxTokens, effort: 'low', timeoutMs: JEV_TIMEOUT_MS },
+      { model: 'sonnet', system: ask.system, prompt: ask.prompt, maxTokens: ask.maxTokens, effort: 'low', timeoutMs: JEV_MODEL_TIMEOUT_MS },
       signal ? { signal } : undefined,
     )
     const latencyMs = (await $.clock.now()) - startedAt
     if (!reply.isAnswered) {
-      $.ui.log(`Jev model fallback unavailable (${reply.reason}); keeping existing decisions`)
-      return { choices: new Map(), outcome: reply.reason === 'aborted' ? 'timeout' : reply.reason === 'api-error' ? 'http-error' : 'invalid-response', latencyMs, backend: 'model' }
+      const outcome = reply.reason === 'aborted' ? 'timeout' : reply.reason === 'api-error' ? 'http-error' : 'invalid-response'
+      return { choices: new Map(), outcome, latencyMs, note: `Jev model fallback unavailable (${reply.reason}); keeping existing decisions` }
     }
     const choices = parseModelChoices(reply.text, request.questions)
-    if (choices.size !== Object.keys(request.questions).length) $.ui.log('Jev model fallback returned incomplete decisions; keeping existing decisions for unanswered questions')
-    return { choices, outcome: choices.size ? 'answered' : 'invalid-response', latencyMs, backend: 'model' }
+    const note = choices.size !== Object.keys(request.questions).length ? 'Jev model fallback returned incomplete decisions; keeping existing decisions for unanswered questions' : undefined
+    return { choices, outcome: choices.size ? 'answered' : 'invalid-response', latencyMs, ...(note ? { note } : {}) }
   } catch (error) {
-    $.ui.log(`Jev model fallback failed (${error instanceof Error ? error.name : 'unknown error'}); keeping existing decisions`)
-    return { choices: new Map(), outcome: 'transport-error', latencyMs: (await $.clock.now()) - startedAt, backend: 'model' }
+    return { choices: new Map(), outcome: 'transport-error', latencyMs: (await $.clock.now()) - startedAt, note: `Jev model fallback failed (${error instanceof Error ? error.name : 'unknown error'}); keeping existing decisions` }
   }
 }
 
@@ -258,10 +294,11 @@ async function evaluateJevHttp($: EngineInterface, request: JevRequest, apiKey: 
   }
 }
 
-function decisionOutcome(evaluation: JevEvaluation, choice: JevChoice | undefined): DecisionOutcome {
-  if (evaluation.outcome !== 'answered') return evaluation.outcome
+function decisionOutcome(evaluation: JevEvaluation, choice: JevChoice | undefined, question: string, threshold = jevConfidence): DecisionOutcome {
+  const outcome = evaluation.outcomes?.get(question) ?? evaluation.outcome
+  if (outcome !== 'answered') return outcome
   if (!choice) return 'invalid-response'
-  if (choice.confidence < jevConfidence) return 'low-confidence'
+  if (choice.confidence < threshold) return 'low-confidence'
   return choice.choice === 'ask' ? 'ask' : 'applied'
 }
 
@@ -294,31 +331,39 @@ async function persistDecisions($: EngineInterface, records: DecisionRecord[]): 
   $.ui.invalidate('ui.render')
 }
 
-function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: JevEvaluation): DecisionRecord {
-  return { ...input, ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold: jevConfidence }
+function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: JevEvaluation, threshold = jevConfidence): DecisionRecord {
+  return { ...input, ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold }
 }
 
 async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Run> {
   if (ids.length === 0) return run
   const request = routingRequest(run, ids)
-  const evaluation = await evaluateJev($, request)
+  const evaluation = await evaluateJev($, request, undefined, routingParts(run, ids, JEV_MODEL_CALLS))
   const records: DecisionRecord[] = []
   const at = await $.clock.now()
+  const threshold = evaluation.backend === 'model' ? jevModelRoutingConfidence : jevConfidence
   const nodes = run.nodes.map(node => {
     if (!ids.includes(node.id)) return node
     const choice = evaluation.choices.get(node.id)
-    const category = run.definition.nodes.find(def => def.id === node.id)?.category ?? 'quick'
-    const outcome = decisionOutcome(evaluation, choice)
+    const def = run.definition.nodes.find(current => current.id === node.id)
+    const category = def?.category ?? 'quick'
+    const outcome = decisionOutcome(evaluation, choice, node.id, threshold)
+    const jevChoice = outcome === 'applied' ? choice : undefined
+    const ruled = (jevChoice?.choice ?? category) === 'quick' && def !== undefined && isFinalAudit(run.definition, def)
     records.push(decisionRecord({
       at, kind: 'routing', subject: node.id, runId: run.runId, nodeId: node.id,
-      proposed: category, selected: outcome === 'applied' && choice ? choice.choice : category,
-      source: outcome === 'applied' ? 'jev' : 'baseline', outcome,
-      latencyMs: evaluation.latencyMs, stateHash: hash(stableStringify(request.state)),
+      proposed: category, selected: ruled ? FINAL_AUDIT_CATEGORY : jevChoice?.choice ?? category,
+      source: ruled ? 'rule' : jevChoice ? 'jev' : 'baseline', outcome,
+      latencyMs: evaluation.latencies?.get(node.id) ?? evaluation.latencyMs, stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-    }, evaluation))
-    if (choice && choice.confidence >= jevConfidence) {
-      debug($, `Jev route ${run.runId}/${node.id}: ${choice.choice} (${choice.confidence})`)
-      return { ...node, routing: { source: 'jev' as const, category: choice.choice, confidence: choice.confidence } }
+    }, evaluation, threshold))
+    if (ruled) {
+      debug($, `final-audit rule ${run.runId}/${node.id}: ${FINAL_AUDIT_CATEGORY} instead of quick`)
+      return { ...node, routing: { source: 'rule' as const, category: FINAL_AUDIT_CATEGORY } }
+    }
+    if (jevChoice) {
+      debug($, `Jev route ${run.runId}/${node.id}: ${jevChoice.choice} (${jevChoice.confidence})`)
+      return { ...node, routing: { source: 'jev' as const, category: jevChoice.choice, confidence: jevChoice.confidence } }
     }
     return { ...node, routing: { source: 'definition' as const, category } }
   })
@@ -711,7 +756,7 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
   const evaluation = await evaluateJev($, request)
   const choice = evaluation.choices.get('recovery')
   const kind = choice ? recoveryKind(choice.choice) : undefined
-  const outcome = decisionOutcome(evaluation, choice)
+  const outcome = decisionOutcome(evaluation, choice, 'recovery')
   await persistDecisions($, [decisionRecord({
     at: await $.clock.now(), kind: 'recovery', subject: node.id, runId: run.runId, nodeId: node.id,
     proposed: 'manual', selected: outcome === 'applied' && kind ? kind : 'manual',
@@ -1485,6 +1530,8 @@ export function register(on: On, options: PluginOptions) {
   jevEnabled = options.jev_enabled !== false
   jevModelFallback = options.jev_model_fallback !== false
   if (typeof options.jev_confidence === 'number' && Number.isFinite(options.jev_confidence) && options.jev_confidence >= 0 && options.jev_confidence <= 1) jevConfidence = options.jev_confidence
+  const modelRouting = options.jev_model_routing_confidence
+  if (typeof modelRouting === 'number' && Number.isFinite(modelRouting) && modelRouting >= 0 && modelRouting <= 1) jevModelRoutingConfidence = modelRouting
   t = stringsFor(options.language)
   if (typeof options.max_concurrent === 'number' && options.max_concurrent >= 1) maxConcurrent = Math.floor(options.max_concurrent)
   if (typeof options.retention_days === 'number') retentionDays = options.retention_days
@@ -1693,7 +1740,7 @@ export function register(on: On, options: PluginOptions) {
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })
     const evaluation = await evaluateJev($, request, next.signal)
     const choice = evaluation.choices.get('permission')
-    const outcome = decisionOutcome(evaluation, choice)
+    const outcome = decisionOutcome(evaluation, choice, 'permission')
     const applied = outcome === 'applied' && choice && (choice.choice === 'allow' || choice.choice === 'deny')
     await persistDecisions($, [decisionRecord({
       at: await $.clock.now(), kind: 'permission', subject: e.tool,

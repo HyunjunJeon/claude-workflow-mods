@@ -62,7 +62,8 @@ export type NodeRun = {
   output?: string
   reportPath?: string
   routing?: {
-    readonly source: 'jev' | 'definition'
+    // rule: a final audit proposed or routed as quick runs on unspecified-low.
+    readonly source: 'jev' | 'definition' | 'rule'
     readonly category: string
     readonly confidence?: number
   }

@@ -1,5 +1,5 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
-import type { HttpInit, HttpResponse, ModelCompleteRequest, ModelCompleteResult, On } from 'claude-code'
+import type { HttpInit, HttpResponse, ModelCompleteInput, ModelCompleteResult, On } from 'claude-code'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { createRun } from '../hooks/engine/run.ts'
 import type { Run } from '../hooks/engine/types.ts'
@@ -46,10 +46,12 @@ function harness(on: On, key: string | null = 'fake-test-key') {
     reply: response({ a: choice('architect'), b: choice('quick'), c: choice('writing') }),
     failure: false,
     model: { isAnswered: false, reason: 'empty-reply', usage: USAGE } as ModelCompleteResult | Error,
+    modelFor: undefined as ((prompt: string) => ModelCompleteResult) | undefined,
   }
-  const models: ModelCompleteRequest[] = []
+  const models: ModelCompleteInput[] = []
   on('model.complete', ($, e) => {
     models.push(e)
+    if (control.modelFor) return { value: control.modelFor(e.prompt) }
     if (control.model instanceof Error) throw control.model
     return { value: control.model }
   })
@@ -182,11 +184,42 @@ for (const item of MODEL_FALLBACKS) {
     if (item.decision === 'ask') expect(verdict).toEqual({ decision: 'ask', reason: 'baseline', rule: 'rule' })
     expect(h.requests).toHaveLength(item.key ? 1 : 0)
     expect(h.models).toHaveLength(1)
-    expect(h.models[0]).toMatchObject({ model: 'sonnet', effort: 'low', timeoutMs: 5_000 })
+    expect(h.models[0]).toMatchObject({ model: 'sonnet', effort: 'low', timeoutMs: 10_000 })
     const [record] = (await dag($, { action: 'decisions' })).decisions
     expect(record).toMatchObject({ backend: 'model', source: item.decision === 'allow' ? 'jev' : 'baseline' })
   })
 }
+
+test('the session model routes each node in its own request and records each outcome', async ($, on) => {
+  const h = harness(on, null)
+  h.control.modelFor = prompt => {
+    const [id = ''] = Object.keys(JSON.parse(prompt).questions)
+    if (id === 'b') return { isAnswered: false, reason: 'aborted', usage: USAGE }
+    const answer = id === 'a'
+      ? { type: 'choice', choice: 'architect', confidence: 0.95, probabilities: { architect: 0.95, quick: 0.05 } }
+      : { type: 'choice', choice: 'writing', confidence: 0.5, probabilities: { writing: 0.5, quick: 0.5 } }
+    return { isAnswered: true, text: JSON.stringify({ answers: { [id]: answer } }), usage: USAGE }
+  }
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  expect(h.models.map(model => Object.keys(JSON.parse(model.prompt).questions))).toEqual([['a'], ['b'], ['c']])
+  expect(h.models.map(model => JSON.parse(model.prompt).state.nodes)).toEqual([
+    [{ id: 'a', task: 'Implement A', dependsOn: [], dependents: ['c'] }],
+    [{ id: 'b', task: 'Audit B', dependsOn: [], dependents: [] }],
+    [{ id: 'c', task: 'Check C', dependsOn: ['a'], dependents: [] }],
+  ])
+  expect(checkpoint(h, started.run_id).nodes.map(node => node.routing)).toEqual([
+    { source: 'jev', category: 'architect', confidence: 0.95 },
+    { source: 'definition', category: 'writing' },
+    { source: 'definition', category: 'quick' },
+  ])
+  const decisions: { subject: string; outcome: string; backend: string }[] = (await dag($, { action: 'decisions' })).decisions
+  expect(decisions.map(record => [record.subject, record.outcome, record.backend])).toEqual([
+    ['a', 'applied', 'model'],
+    ['b', 'timeout', 'model'],
+    ['c', 'low-confidence', 'model'],
+  ])
+})
 
 test('invalid, missing and low-confidence routes fall back independently', async ($, on) => {
   const h = harness(on)
@@ -289,6 +322,71 @@ for (const decision of DECISIONS) {
     // A later query cannot inherit a completed call's node scope.
     await $.tool.check({ tool: PROBE, input: {}, tool_use_id: 'scoped-call' })
     expect(body(h, 2).state.task).toBeUndefined()
+  })
+}
+
+function answerEvery(picks: Record<string, string>, confidence: number) {
+  return (prompt: string): ModelCompleteResult => {
+    const ids = Object.keys(JSON.parse(prompt).questions)
+    const answers = Object.fromEntries(ids.map(id => [id, { type: 'choice', choice: picks[id], confidence, probabilities: { [picks[id] ?? '']: confidence } }]))
+    return { isAnswered: true, text: JSON.stringify({ answers }), usage: USAGE }
+  }
+}
+
+test('session-model routing applies from its own lower threshold while permissions keep jev_confidence', async ($, on) => {
+  const h = harness(on, null)
+  h.control.modelFor = answerEvery({ a: 'architect', b: 'writing', c: 'quick', permission: 'allow' }, 0.85)
+  on('tool.check', () => ({ decision: 'ask', reason: 'baseline', rule: 'rule' }))
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  expect(checkpoint(h, started.run_id).nodes.map(node => node.routing)).toEqual([
+    { source: 'jev', category: 'architect', confidence: 0.85 },
+    { source: 'jev', category: 'writing', confidence: 0.85 },
+    { source: 'jev', category: 'quick', confidence: 0.85 },
+  ])
+  expect(await $.tool.check({ tool: PROBE, input: {} })).toEqual({ decision: 'ask', reason: 'baseline', rule: 'rule' })
+  const decisions: { kind: string; outcome: string; threshold: number }[] = (await dag($, { action: 'decisions' })).decisions
+  expect(decisions.map(record => [record.kind, record.outcome, record.threshold])).toEqual([
+    ['routing', 'applied', 0.8],
+    ['routing', 'applied', 0.8],
+    ['routing', 'applied', 0.8],
+    ['permission', 'low-confidence', 0.9],
+  ])
+})
+
+test('configured session-model routing confidence raises its bar', { options: { jev_model_routing_confidence: 0.99 } }, async ($, on) => {
+  const h = harness(on, null)
+  h.control.modelFor = answerEvery({ a: 'architect', b: 'writing', c: 'quick' }, 0.95)
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  expect(checkpoint(h, started.run_id).nodes.map(node => node.routing?.source)).toEqual(['definition', 'definition', 'definition'])
+})
+
+const AUDITED = {
+  key: 'final-audit',
+  goal: 'Ship A and B',
+  nodes: [
+    { id: 'a', prompt: 'Implement A', category: 'quick', verify: VERIFY },
+    { id: 'b', prompt: 'Implement B', category: 'quick', verify: VERIFY },
+    { id: 'audit', prompt: 'Audit A and B together', category: 'quick', dependsOn: ['a', 'b'], verify: VERIFY },
+    { id: 'design-review', prompt: 'Review the design of A and B', category: 'deep-high', dependsOn: ['a', 'b'], verify: VERIFY },
+  ],
+}
+
+for (const jev of ['answers quick', 'is off']) {
+  test(`a quick final audit runs on unspecified-low when Jev ${jev}`, { options: { jev_enabled: jev !== 'is off' } }, async ($, on) => {
+    const h = harness(on)
+    h.control.reply = response({ a: choice('quick'), b: choice('quick'), audit: choice('quick', 0.99), 'design-review': choice('deep-high') })
+    await boot($)
+    const started = await dag($, { action: 'start', definition: AUDITED })
+    expect(checkpoint(h, started.run_id).nodes.map(node => [node.id, node.routing?.source, node.routing?.category])).toEqual([
+      ['a', jev === 'is off' ? 'definition' : 'jev', 'quick'],
+      ['b', jev === 'is off' ? 'definition' : 'jev', 'quick'],
+      ['audit', 'rule', 'unspecified-low'],
+      ['design-review', jev === 'is off' ? 'definition' : 'jev', 'deep-high'],
+    ])
+    const decisions: { subject: string; proposed: string; selected: string; source: string }[] = (await dag($, { action: 'decisions' })).decisions
+    expect(decisions.find(record => record.subject === 'audit')).toMatchObject({ proposed: 'quick', selected: 'unspecified-low', source: 'rule' })
   })
 }
 

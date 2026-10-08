@@ -20,3 +20,8 @@ test('decision history is bounded, ordered and isolated by project and session',
   expect(parseDecisionLog(log, '/p', 'other')).toEqual([])
   expect(parseDecisionLog({ ...log, records: [{ ...record, confidence: 2 }] }, '/p', 's')).toEqual([])
 })
+
+test('a decision the final-audit rule made survives a reload', () => {
+  const ruled: DecisionRecord = { ...record, proposed: 'quick', selected: 'unspecified-low', source: 'rule', outcome: 'low-confidence', confidence: 0.6 }
+  expect(parseDecisionLog({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records: [ruled] }, '/p', 's')).toEqual([ruled])
+})

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { modelPrompt, parseModelChoices, permissionRequest, parseChoices, routingRequest } from '../hooks/engine/jev.ts'
+import { modelPrompt, parseModelChoices, permissionRequest, parseChoices, routingParts, routingRequest } from '../hooks/engine/jev.ts'
 import { hash } from '../hooks/engine/hash.ts'
 import { createRun } from '../hooks/engine/run.ts'
 
@@ -93,6 +93,40 @@ test('the model prompt carries the request state and questions and parses a vali
     ['a', { choice: 'architect', confidence: 0.92, probabilities }],
     ['b', { choice: 'quick', confidence: 1, probabilities: { quick: 1 } }],
   ])
+})
+
+test('routing parts spread the nodes evenly over at most the given number of requests', () => {
+  const parsed = parseDefinition({
+    key: 'wide',
+    nodes: Array.from({ length: 10 }, (_, i) => ({ id: `n${i}`, prompt: `Task ${i}` })),
+  })
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  const wide = createRun(parsed.value, { runId: 'dag_wide', sessionId: 'session', now: 1 })
+  const ids = wide.nodes.map(node => node.id)
+  const parts = routingParts(wide, ids, 8)
+  expect(parts.map(part => Object.keys(part.questions).length)).toEqual([1, 1, 1, 2, 1, 1, 1, 2])
+  expect(parts.flatMap(part => Object.keys(part.questions))).toEqual(ids)
+  for (const part of parts) expect((part.state as { nodes: { id: string }[] }).nodes.map(node => node.id)).toEqual(Object.keys(part.questions))
+  expect(routingParts(wide, ids.slice(0, 3), 8).map(part => Object.keys(part.questions))).toEqual([['n0'], ['n1'], ['n2']])
+})
+
+test('model routing hides the proposed category and lists each node\'s dependents', () => {
+  const original = run()
+  const [part] = routingParts(original, ['a', 'b'], 1)
+  expect(part?.state).toEqual({
+    goal: 'Ship the fix',
+    nodes: [
+      { id: 'a', task: 'Fix A', dependsOn: [], dependents: ['b'] },
+      { id: 'b', task: 'Check B', dependsOn: ['a'], dependents: [] },
+    ],
+  })
+  expect(part?.questions.b?.instructions).toContain('no dependents and two or more dependsOn entries')
+  expect(routingParts(original, ['b'], 8)[0]?.state).toMatchObject({ nodes: [{ id: 'b', dependents: [] }] })
+  expect((routingRequest(original, ['a']).state as { nodes: { proposedCategory?: string }[] }).nodes[0]?.proposedCategory).toBe('writing')
+})
+
+test('the model prompt asks for the 3 most likely options only', () => {
+  expect(modelPrompt(routingRequest(run(), ['a'])).system).toContain('only the 3 most likely option keys')
 })
 
 const MODEL_REJECTS: readonly [string, string][] = [

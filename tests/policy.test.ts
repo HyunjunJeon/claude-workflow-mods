@@ -121,6 +121,7 @@ test('the lint reserves quick for mechanical checks rather than a final audit', 
   const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
   const lanes = [{ id: 'a', prompt: full }, { id: 'b', prompt: full }]
   expect(lintDefinition(def([...lanes, { id: 'audit', category: 'quick', prompt: full, dependsOn: ['a', 'b'] }]))).toHaveLength(1)
+  expect(lintDefinition(def([...lanes, { id: 'audit', prompt: full, dependsOn: ['a', 'b'] }]))).toHaveLength(1)
   expect(lintDefinition(def([...lanes, { id: 'audit', category: 'unspecified-low', prompt: full, dependsOn: ['a', 'b'] }]))).toEqual([])
   expect(lintDefinition(def([...lanes, { id: 'verify-a', category: 'quick', prompt: full, dependsOn: ['a'] }]))).toEqual([])
   expect(

@@ -14,6 +14,11 @@ export function isVerificationNode(node: NodeDef): boolean {
   return [node.id, node.label, node.task_summary, node.description].some(text => text !== undefined && VERIFICATION_WORDS.test(text))
 }
 
+// The final audit: a verification node that nothing depends on and that judges two or more inputs.
+export function isFinalAudit(definition: Definition, node: NodeDef): boolean {
+  return node.dependsOn.length >= 2 && !definition.nodes.some(other => other.dependsOn.includes(node.id)) && isVerificationNode(node)
+}
+
 const MIN_SPLIT_FILES = 3
 const MIN_SPLIT_SECTIONS = 3
 // A change and its own tests are one deliverable (the doctrine keeps them in one node), so tests do not count.
@@ -70,10 +75,10 @@ export function lintDefinition(definition: Definition): string[] {
   if (definition.nodes.length >= 2 && !definition.nodes.some(isVerificationNode)) {
     warnings.push('the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.')
   }
-  const feeds = new Set(definition.nodes.flatMap(node => node.dependsOn))
   for (const node of definition.nodes) {
-    if (node.category === 'quick' && node.dependsOn.length >= 2 && !feeds.has(node.id) && isVerificationNode(node)) {
-      warnings.push(`node "${node.id}": the final audit requires judgment across inputs, while quick is reserved for mechanical checks - route it to unspecified-low or higher; both quick and unspecified-low use sonnet.`)
+    // A missing category routes as quick, so it is held to the same rule.
+    if ((node.category ?? 'quick') === 'quick' && isFinalAudit(definition, node)) {
+      warnings.push(`node "${node.id}": the final audit requires judgment across inputs, while quick is reserved for mechanical checks - it runs on unspecified-low instead; write unspecified-low or higher in the definition. Both quick and unspecified-low use sonnet.`)
     }
   }
   return warnings

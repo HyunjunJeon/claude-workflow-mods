@@ -25,8 +25,16 @@
     "jev_confidence": {
       "type": "number",
       "title": "Jev minimum confidence",
-      "description": "Minimum confidence for automatic category assignment or tool permission decisions",
+      "description": "Minimum confidence for automatic category assignment from the Jev API and for every tool permission or recovery decision",
       "default": 0.9,
+      "min": 0,
+      "max": 1
+    },
+    "jev_model_routing_confidence": {
+      "type": "number",
+      "title": "Jev session-model routing confidence",
+      "description": "Minimum confidence for applying a category the session model chose (without TYPESAFE_API_KEY or when the Jev API fails); permission and recovery decisions keep Jev minimum confidence",
+      "default": 0.8,
       "min": 0,
       "max": 1
     },

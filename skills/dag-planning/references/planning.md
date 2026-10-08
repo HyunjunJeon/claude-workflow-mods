@@ -34,7 +34,7 @@ Reading this file is not planning. Before `start`, write the run plan in one bre
 
 `category` routes the node to a model. **Start every node at `quick` and climb only as far as the work's difficulty demands. Specialty categories are chosen by the KIND of work, never by difficulty.**
 
-The main conversation proposes each category when writing the DAG definition; a user-authored definition supplies its own proposals. With Jev enabled and TYPESAFE_API_KEY configured, the plugin independently classifies node tasks using the criteria in hooks/engine/jev.ts before execution. A sufficiently confident Jev choice overrides the proposed category; uncertain or unavailable decisions retain it. The original definition remains unchanged: snapshots expose the actual category and decision source in routing, and the started model in model. Every worker uses Sonnet or Opus; Haiku is not a worker route.
+The main conversation proposes each category when writing the DAG definition; a user-authored definition supplies its own proposals. With Jev enabled (through TYPESAFE_API_KEY, or the session model when the key is missing or the API fails), the plugin independently classifies node tasks using the criteria in hooks/engine/jev.ts before execution. A sufficiently confident Jev choice overrides the proposed category; uncertain or unavailable decisions retain it. The original definition remains unchanged: snapshots expose the actual category and decision source in routing, and the started model in model. Every worker uses Sonnet or Opus; Haiku is not a worker route.
 
 The difficulty ladder, bottom rung first:
 
@@ -44,7 +44,7 @@ The difficulty ladder, bottom rung first:
 
 Escalate a node only with a one-line reason you could say out loud ("touches six files across three packages") - and only AFTER the split-first doctrine: a chunk that decomposes into safe parallel `quick` pieces was never a ladder candidate.
 
-**One standing exception: the final audit.** The last verification node - the one nothing depends on, which judges the whole result from two or more inputs - never runs on `quick`. Route it to `unspecified-low`, or higher when it must reason across many files. This distinguishes judgment from mechanical checks, not model strength: `quick` and `unspecified-low` both use Sonnet. Checks that only run a command and compare its output (a per-lane test or build) stay `quick`.
+**One standing exception: the final audit.** The last verification node - the one nothing depends on, which judges the whole result from two or more inputs - never runs on `quick`. Route it to `unspecified-low`, or higher when it must reason across many files. This distinguishes judgment from mechanical checks, not model strength: `quick` and `unspecified-low` both use Sonnet. Checks that only run a command and compare its output (a per-lane test or build) stay `quick`. The plugin enforces the exception: a final audit whose proposed or Jev-routed category is `quick` runs on `unspecified-low`, and the decision log records the source `rule`.
 
 Specialty categories:
 

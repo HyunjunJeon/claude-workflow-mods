@@ -13,7 +13,8 @@ export type DecisionRecord = {
   readonly subject: string
   readonly proposed: string
   readonly selected: string
-  readonly source: 'jev' | 'baseline'
+  // rule: the final-audit rule raised a quick final audit to unspecified-low, whatever Jev answered.
+  readonly source: 'jev' | 'baseline' | 'rule'
   // Which Jev backend answered or failed; absent in records written before the model fallback or without a call.
   readonly backend?: 'http' | 'model'
   readonly outcome: DecisionOutcome
@@ -48,7 +49,7 @@ function isDecision(value: unknown): value is DecisionRecord {
   if (!['id', 'sessionId', 'subject', 'proposed', 'selected', 'ruleset', 'stateHash'].every(key => typeof value[key] === 'string')) return false
   if (!['at', 'threshold', 'latencyMs'].every(key => typeof value[key] === 'number' && Number.isFinite(value[key]))) return false
   if (value.kind !== 'routing' && value.kind !== 'permission' && value.kind !== 'recovery') return false
-  if (value.source !== 'jev' && value.source !== 'baseline') return false
+  if (value.source !== 'jev' && value.source !== 'baseline' && value.source !== 'rule') return false
   if (typeof value.outcome !== 'string' || !outcomes.includes(value.outcome)) return false
   if (value.confidence !== undefined && (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1)) return false
   if (value.backend !== undefined && value.backend !== 'http' && value.backend !== 'model') return false

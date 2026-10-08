@@ -33,7 +33,8 @@ test('metrics report widths, joins and the producer shape without the verificati
   const m = shapeOf(graph({ fix1: [], fix2: [], fix3: [], verify: ['fix1', 'fix2', 'fix3'] }))
   expect(m).toMatchObject({ nodes: 4, edges: 3, depth: 2, widths: [3, 1], maxWidth: 3, fanInNodes: 1, verify: true, shape: 'fan-out/fan-in', producerShape: 'parallel' })
   expect(m.categories).toEqual({ '(session)': 4 })
-  expect(m.warnings).toBe(4)
+  // Four prompt-contract warnings, and verify is a final audit without a category, which routes as quick.
+  expect(m.warnings).toBe(5)
   expect(shapeOf(graph({ build: [], verify: ['build'] })).producerShape).toBe('single')
 })
 
