@@ -1,5 +1,6 @@
-# Implements "Phase 3 - 시작 전 정렬: 인터뷰·PM" (items 3a-3e) of docs/improvement-plan.md.
-# Run it AFTER Phase 1 (docs/improvement-plan.md, section "순서"): the goal-lint node edits hooks/engine/lint.ts and
+# Implements "Phase 3 - 시작 전 정렬: 인터뷰·PM" (items 3a-3e) of the improvement plan
+# (removed in bc52ef4; read it with git show bc52ef4^:docs/improvement-plan.md).
+# Run it AFTER Phase 1: the goal-lint node edits hooks/engine/lint.ts and
 # extends tests/lint.test.ts, which Phase 1 creates; if that file is missing the node fails on purpose.
 # Run it with:  /dag run flows/improvement/p3-alignment.yaml
 # Re-running after a run has settled needs a new key (for example improve-p3-alignment-2):
@@ -8,21 +9,21 @@
 #
 # Run plan (components -> waves):
 #   components: protocol flag (3a), eval metric (3a), goal-missing lint (3b), dag-interview skill (3c), dag-pm skill (3d),
-#               dag-planning alignment step (3e), README, then the audit and the progress row.
+#               dag-planning alignment step (3e), README, then the audit.
 #   wave 1: protocol-flag, eval-ask-count, skill-interview, skill-pm, planning-alignment   (five lanes, disjoint writes)
 #   wave 2: goal-lint, after protocol-flag only to serialize tests/policy.test.ts; its new warning also breaks goal-less
 #           fixtures in tests/policy.test.ts, tests/runtime.test.ts and tests/shape.test.ts, so it owns those test edits
 #   wave 3: readme, which documents the output of all six lanes
 #   wave 4: final-audit, which depends on all seven producers
-#   wave 5: progress-log
-# Categories: quick for the two small code lanes and the progress row; writing for the three skill files and the README (prose);
+# Categories: quick for the two small code lanes; writing for the three skill files and the README (prose);
 # unspecified-low for goal-lint (judgment about which existing tests to repair) and for the final audit (it judges seven inputs).
 # Assumptions beyond the plan: the skill files credit their sources inline (THIRD_PARTY_NOTICES.md belongs to Phase 2);
 # the "eval 8 scenarios show AskUserQuestion 0" criterion and the tmux interview check are NOT part of this run.
 key: improve-p3-alignment-1
 name: Improvement P3 - alignment before start
 goal: >
-  Phase 3 of docs/improvement-plan.md is implemented in the repository: the protocol injected on every prompt tells a
+  Phase 3 of the improvement plan (removed in bc52ef4; read it with git show bc52ef4^:docs/improvement-plan.md) is
+  implemented in the repository: the protocol injected on every prompt tells a
   non-interactive session not to ask the user, eval/run.ts reports AskUserQuestion calls per scenario, lintDefinition warns
   when a definition has no goal, the user-invoked skills dag-interview and dag-pm exist, dag-planning has a light alignment
   step, README.md documents all of it, and an independent audit confirms every item against the files while the manual tmux
@@ -124,6 +125,7 @@ nodes:
       (f) `## Restate gate`. The interview ends when the frontier is empty and nothing is silently assumed. Then restate (1) the goal as ONE sentence that a stranger reading only that line would turn into the same outcome and (2) a numbered list of observable acceptance criteria, and ask for confirmation with AskUserQuestion (options "Yes, plan it", "Adjust wording", "Missing scope"); any correction goes through Refine again. Only after "Yes": load the dag-workflow:dag-planning skill and hand off. The goal sentence becomes `definition.goal`, every acceptance criterion becomes a `verify` candidate (a file check with `contains`, or a command that can fail), and user-stated constraints go into the node SCOPE lines. Never call start before the user confirms.
       (g) A last line: "Doctrine adapted from the grilling skill of mattpocock/skills and the interview skill of Q00/ouroboros (both MIT). No MCP tooling from either is used."
       Sources, optional: `gh api repos/mattpocock/skills/contents/skills/productivity/grilling/SKILL.md --jq .content | base64 -d` and `gh api repos/Q00/ouroboros/contents/skills/interview/SKILL.md --jq .content | base64 -d` (retry once on a 404). Take ONLY the doctrine listed above. Leave out everything about ouroboros MCP tools, lanes, fanout ids, submit calls, seeds, version checks and subagent fan-out.
+      WRITING RULES: match the style of the current skills/dag-planning/SKILL.md and skills/dag-node-*/SKILL.md, which the owner rewrote to these rules: procedure sentences of at most 20 words and descriptive sentences of at most 25 words; one instruction per sentence; imperative mood for steps; a condition that changes the step comes first, starting with If or When; one term per concept; Prefer marks a recommendation and Optional an optional step; API names, skill names, status values and output headings stay exactly as they are (dependsOn, verify, completed, ## Output).
       In ## Output give the file path, the list of second-level headings, and one line on how the skill hands off to dag-planning.
       SCOPE: Read the repository and the two sources. Write ONLY skills/dag-interview/SKILL.md. OUT of scope: skills/dag-pm/, skills/dag-planning/ and README.md (other nodes own them). Never commit, push, install or reload plugins.
       VERIFY: Run `command claude plugin validate .`: exit code 0 (warnings are fine). Re-read the file and confirm that the frontmatter has `disable-model-invocation: true` and that the five headings Design-tree rounds, Ambiguity tracks, Facts and decisions, Refine and Restate gate exist.
@@ -168,6 +170,7 @@ nodes:
       (d) `## Writing the PRD`. The main conversation cannot write files, so a one-node DAG does it. Load the dag-workflow:dag-planning skill first (start is refused until you do), then start a definition with a one-sentence goal and ONE node: id `write-prd`, category `writing`, writes `docs/prd/<slug>.md` (ask the user for another path if they want one), a self-contained prompt that pastes every confirmed answer, and verify checks that the file contains `## Open items` and `## Goals`. The PRD sections are: Problem, Users, Goals, Scope (in and out), Requirements, Success criteria, Deferred to development, Open items. The node writes `## Open items` even when it holds only "None", so the check is meaningful. When the run settles, Read the file, show the user its path and the open items, and suggest `/dag-workflow:dag-interview` or normal planning as the next step. Do not write the PRD yourself and do not try to spawn an agent.
       (e) A last line: "Doctrine adapted from the pm skill of Q00/ouroboros (MIT): the three question classes and the open-items list. No MCP tooling is used."
       Source, optional: `gh api repos/Q00/ouroboros/contents/skills/pm/SKILL.md --jq .content | base64 -d` (retry once on a 404). Take ONLY the doctrine listed above: the classification of questions into product, technical and decide-later, and the open-items idea. Leave out everything about ouroboros MCP tools, fan-out lanes, evidence blocks, submit calls, version checks, clipboard copying and seed handoff.
+      WRITING RULES: match the style of the current skills/dag-planning/SKILL.md and skills/dag-node-*/SKILL.md, which the owner rewrote to these rules: procedure sentences of at most 20 words and descriptive sentences of at most 25 words; one instruction per sentence; imperative mood for steps; a condition that changes the step comes first, starting with If or When; one term per concept; Prefer marks a recommendation and Optional an optional step; API names, skill names, status values and output headings stay exactly as they are (dependsOn, verify, completed, ## Output).
       In ## Output give the file path, the list of second-level headings, and the exact write-prd node fields the skill prescribes (id, category, writes, verify).
       SCOPE: Read the repository and the source. Write ONLY skills/dag-pm/SKILL.md. OUT of scope: skills/dag-interview/, skills/dag-planning/ and README.md (other nodes own them). Never commit, push, install or reload plugins.
       VERIFY: Run `command claude plugin validate .`: exit code 0 (warnings are fine). Re-read the file and confirm the frontmatter has `disable-model-invocation: true` and that the headings Question classes, Confirm before writing and Writing the PRD exist, and that `write-prd` and `## Open items` appear.
@@ -196,6 +199,7 @@ nodes:
       - In a non-interactive session (the injected protocol says so) skip the round entirely: decide, and write every assumption into `definition.goal` and the node prompts.
       - When the request is large and vague, one line may suggest the user-invoked skills `/dag-workflow:dag-interview` (multi-round interview) and `/dag-workflow:dag-pm` (PRD interview); they are user-invoked only, so never try to invoke them.
       - After the answers, the confirmed goal goes into `definition.goal` and the acceptance criteria into `verify`.
+      WRITING RULES: match the style of the current skills/dag-planning/SKILL.md and skills/dag-node-*/SKILL.md, which the owner rewrote to these rules: procedure sentences of at most 20 words and descriptive sentences of at most 25 words; one instruction per sentence; imperative mood for steps; a condition that changes the step comes first, starting with If or When; one term per concept; Prefer marks a recommendation and Optional an optional step; API names, skill names, status values and output headings stay exactly as they are (dependsOn, verify, completed, ## Output).
       Edit the file in place with the Edit tool: other sections, and any earlier edits of this file by other phases, stay exactly as they are. In ## Output give the exact heading and the line range of the new section.
       SCOPE: Read the repository. Write ONLY skills/dag-planning/SKILL.md. OUT of scope: skills/dag-planning/references/planning.md, skills/dag-interview/, skills/dag-pm/ and README.md. Never commit, push, install or reload plugins.
       VERIFY: Run `grep -n "^## " skills/dag-planning/SKILL.md` and confirm that `## Alignment` sits between `## Planning - MANDATORY first step` and `## The shape`. Run `grep -c "non-interactive" skills/dag-planning/SKILL.md` and confirm it is at least 1.
@@ -298,7 +302,7 @@ nodes:
       - kind: command
         argv: [claude, plugin, validate, "."]
     prompt: |
-      TASK: Independently audit Phase 3 (items 3a-3e of docs/improvement-plan.md) against the repository and write the verdict to flows/improvement/p3-audit-notes.md.
+      TASK: Independently audit Phase 3 (items 3a-3e) of the improvement plan (removed in bc52ef4; read it with git show bc52ef4^:docs/improvement-plan.md) against the repository and write the verdict to flows/improvement/p3-audit-notes.md.
       DELIVERABLE: flows/improvement/p3-audit-notes.md with one verdict line per item below, each with the evidence you saw (command and result, or file and line), followed by the lines `Eval 8 scenarios AskUserQuestion=0 check: NOT RUN (it spends account usage and takes 10-20 minutes)`, `Manual tmux interview check: OPEN` and a final verdict line. Write the exact string `Audit: PASS` ONLY as the final verdict line and only when every item passes; otherwise write `Audit: FAIL` and end your report with `DAG_NODE_STATUS: failed: <what failed>`. The line `Manual tmux interview check: OPEN` is always written, because that check (a vague request, then a question round, then goal confirmation, then start, in a tmux session) is a manual step outside this run.
       Items and their binary observables (trust the files, not the upstream reports):
       1. 3a protocol: hooks/engine/policy.ts declares `protocolFor(level: Enforcement, interactive` and hooks/register.ts calls `protocolFor(enforcement, interactive)`. Run `bun -e "import {protocolFor} from './hooks/engine/policy.ts'; console.log(protocolFor('strict', false).includes('Non-interactive session: do not ask the user'), protocolFor('strict').includes('Non-interactive'), protocolFor('strict') === protocolFor('strict', true))"`: it must print `true false true`. tests/policy.test.ts asserts both directions.
@@ -313,26 +317,3 @@ nodes:
       SCOPE: Read the whole repository and run the commands above. Write ONLY flows/improvement/p3-audit-notes.md. Do not fix anything you find: report it as FAIL. Never commit, push, install or reload plugins.
       VERIFY: Re-read the notes file and confirm it holds one verdict per item 1-8 and that `Audit: PASS` appears only if every verdict is PASS.
       STOP WHEN: the notes file is written and every item has a verdict backed by evidence you ran yourself.
-
-  - id: progress-log
-    label: Update the P3 progress row
-    category: quick
-    dependsOn:
-      - final-audit
-    writes:
-      - docs/improvement-plan.md
-    verify:
-      - kind: file
-        path: docs/improvement-plan.md
-        contains: "| P3 | 완료 |"
-      - kind: file
-        path: docs/improvement-plan.md
-        contains: tmux 수동 점검 미완료
-      - kind: command
-        argv: [grep, -F, "| P3 | 완료 | 20", docs/improvement-plan.md]
-    prompt: |
-      TASK: Update only the P3 row of the table under `## 진행 기록` in docs/improvement-plan.md.
-      DELIVERABLE: Replace the row that starts with `| P3 |` (today `| P3 | 대기 | | |`) by one row of this shape: `| P3 | 완료 | <date> | <run id>: <one-line result>; tmux 수동 점검 미완료 |`. The date is the output of `date +%F`. The run id is the id that starts with `dag_` in the first line of your own instructions ("run dag_..."), or, if you cannot find it, the name of the newest folder in .claude/dag/runs/ (read-only `ls -t .claude/dag/runs | head -1`). The one-line result is copied from the upstream final-audit Output (for example the plugin test pass count and that items 3a-3e passed). The memo must not contain a pipe character, because it would break the table. The rows P0, P1 and P2 and everything else in the file stay exactly as they are.
-      SCOPE: Read docs/improvement-plan.md and the upstream output. Write ONLY the P3 row of docs/improvement-plan.md. Never commit, push, install or reload plugins.
-      VERIFY: Run `grep -n "^| P" docs/improvement-plan.md` and confirm that the P3 row has the shape above, that its date is today's `date +%F`, and that the P0, P1 and P2 rows are unchanged from before your edit.
-      STOP WHEN: the P3 row holds 완료, the date, the run id, the one-line result and the phrase `tmux 수동 점검 미완료`. In ## Output give the new row.

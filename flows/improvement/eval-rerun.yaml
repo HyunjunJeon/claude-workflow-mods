@@ -1,0 +1,449 @@
+# Re-runs the 8 shape scenarios of eval/scenarios.ts after Phase 2 (planning doctrine) and Phase 3 (alignment before start)
+# and compares the result with the Phase 0 baseline. The Phase 0 files under eval/baselines/ are read inputs only: this
+# definition never writes them. Its own outputs are eval/baselines/rerun-shard-<k>.md, rerun-baseline.md,
+# rerun-baseline-audit.md and rerun-vs-p0.md.
+#
+# Run:   /dag run flows/improvement/eval-rerun.yaml
+# Check: bun eval/check-definition.ts flows/improvement/eval-rerun.yaml
+#
+# Re-running after this run has settled needs a NEW key (for example eval-rerun-p3-2): the same key with the same
+# definition returns the old run and schedules nothing.
+#
+# Cost: the four shard nodes start 8 claude -p sessions on your account (about 2-4 minutes each, 4 sessions at a time).
+# eval/results/ is gitignored, so each shard copies its runner rows into a tracked file under eval/baselines/.
+#
+# Table: eval/run.ts renders 21 columns. Compared with the Phase 0 table (20 columns) the new column
+# "AskUserQuestion calls" sits right after "refusals (planning/tools)". The audit therefore compares 8 rows x 21 cells = 168.
+#
+# Timeouts: each shard runs its two scenarios one after the other (--concurrency 1) inside one Bash call, which is capped at
+# 600000 ms. So the runner gets --timeout-min 4 per scenario (about 60 s wait + 2 x 4 min worst case); the Phase 0 runs took
+# 52-212 s each, but a scenario that does exceed 4 minutes is recorded as a timed-out row in the re-run table. Rejected
+# alternative: --concurrency 2 --timeout-min 8 per shard (more margin per scenario, but 8 sessions at once instead of 4).
+#
+# Shape: shard-1..shard-4 (parallel, two scenarios each) -> baseline-combine -> baseline-audit -> compare-p0.
+# The runner stamps its output files with a one-second clock, so two runners started in the same second overwrite each
+# other. Each shard therefore waits for its own seconds window of the minute before it starts the runner.
+key: eval-rerun-p3-1
+name: Eval re-run after P2 and P3
+goal: eval/baselines/rerun-baseline.md holds the 8 rows of the eval re-run after Phases 2 and 3 with summary lines recomputed from the runner JSON results, an independent audit confirms it row by row, and eval/baselines/rerun-vs-p0.md compares it with eval/baselines/p0-baseline.md.
+nodes:
+  - id: shard-1
+    label: Run single-edit and parallel-files
+    category: quick
+    writes:
+      - eval/baselines/rerun-shard-1.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-shard-1.md
+        contains: "Results JSON: eval/results/"
+      - kind: file
+        path: eval/baselines/rerun-shard-1.md
+        contains: "| single-edit | single |"
+      - kind: file
+        path: eval/baselines/rerun-shard-1.md
+        contains: "| parallel-files | parallel |"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - |
+            const fs = require('node:fs')
+            const [k, ...ids] = process.argv.slice(1)
+            const fail = msg => { console.error(`shard ${k}: ${msg}`); process.exit(1) }
+            const shard = fs.readFileSync(`eval/baselines/rerun-shard-${k}.md`, 'utf8')
+            const m = /^Results JSON: (eval\/results\/\d{14}\.json)$/m.exec(shard)
+            if (!m) fail('no "Results JSON: eval/results/<stamp>.json" line')
+            const found = JSON.parse(fs.readFileSync(m[1], 'utf8')).results
+            if (found.map(r => r.id).join() !== ids.join()) fail(`${m[1]} holds ${found.map(r => r.id).join()}, expected ${ids.join()} (another runner may have overwritten the stamp)`)
+            for (const r of found) {
+              const cell = r.runs.map(x => `${x.shape} (producers: ${x.producerShape})`).join('; ') || 'no run'
+              const row = shard.split('\n').find(l => l.startsWith(`| ${r.id} | ${r.expect} |`))
+              if (!row) fail(`no table row for ${r.id}`)
+              if (!row.includes(`| ${cell} |`) || !row.endsWith(`| ${r.seconds}s |`)) fail(`the row for ${r.id} does not match ${m[1]}`)
+            }
+          - "1"
+          - single-edit
+          - parallel-files
+    prompt: |
+      TASK: Run the eval scenarios single-edit and parallel-files through the shape runner and record their two result rows in eval/baselines/rerun-shard-1.md.
+      DELIVERABLE: eval/baselines/rerun-shard-1.md, written after the runner finishes (create the folder eval/baselines/ when it is missing). Its content, in this order:
+        1. the line "# Eval re-run shard 1"
+        2. one line each, with nothing after the value: "Date: <output of date +%F>", "Plugin HEAD: <output of git rev-parse --short HEAD>", "Tracked changes: <number of lines printed by git status --porcelain --untracked-files=no>", "Scenarios: single-edit, parallel-files", "Stamp: <the 14-digit stamp in the runner output file name>", "Results JSON: eval/results/<stamp>.json", "Results MD: eval/results/<stamp>.md", "Command: <the exact runner command you ran, starting at bun eval/run.ts>"
+        3. a blank line, then the runner's table header line and separator line copied verbatim from eval/results/<stamp>.md, then the rows for single-edit and parallel-files copied verbatim from that file (every cell unedited, one line per row, in that order).
+        In ## Output give the stamp, the Results JSON path and, per scenario, the shape, the outcome check (PASS or FAIL), the status and the seconds.
+      SCOPE: Run the shape runner exactly once, with the command below. Its side effects are expected: it starts claude -p sessions on the user account, writes eval/results/<stamp>.md and eval/results/<stamp>.json (gitignored) and uses /tmp/dag-shapes/<stamp>. Read eval/run.ts and eval/results/. Write only eval/baselines/rerun-shard-1.md. Do not edit eval/*.ts, the other shard files or any other file. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      Procedure:
+        1. Run this one Bash command with the Bash timeout parameter set to 600000 ms. The run takes about 4 minutes. Never run it in the background and never start a second runner for the same scenarios, because every run spends the user account usage.
+           bun -e "const k=0;for(;;){const s=new Date().getSeconds();if(s>=15*k+3&&s<=15*k+9)break;await Bun.sleep(100)}" && bun eval/run.ts --only single-edit,parallel-files --concurrency 1 --timeout-min 4
+           The first part waits until the clock is in this shard's own seconds window of the minute (shard 1 seconds 3-9, shard 2 seconds 18-24, shard 3 seconds 33-39, shard 4 seconds 48-54). The runner names its output files by a one-second clock stamp and two runners that start in the same second overwrite each other, so the disjoint windows keep the four stamps distinct. Run the command exactly as written.
+        2. The runner prints a line SHAPES_DONE <path>/<stamp>.md ...; the stamp is that file name without its extension. When the call ended without a SHAPES_DONE line, stop and report failed with the last output lines.
+        3. Read eval/results/<stamp>.json. Its results array must hold exactly the ids single-edit and parallel-files; anything else means another runner overwrote the stamp, so report failed. When the table shows "no run" for both scenarios, the claude sessions never started: report failed and quote the stdoutTail text.
+        4. Write the shard file. Copy the rows even when the outcome check is FAIL, the shape differs from the expected one or a scenario timed out: they are re-run measurements, so do not rerun anything to improve them.
+      VERIFY: Re-read eval/baselines/rerun-shard-1.md and confirm that it has the Stamp, Results JSON and Command lines and that its two rows start with "| single-edit | single |" and "| parallel-files | parallel |". The runtime also runs a script that compares both rows with the Results JSON file.
+      STOP WHEN: eval/baselines/rerun-shard-1.md exists with both rows and your ## Output section is written.
+
+  - id: shard-2
+    label: Run map-reduce-docs and pipeline-stats
+    category: quick
+    writes:
+      - eval/baselines/rerun-shard-2.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-shard-2.md
+        contains: "Results JSON: eval/results/"
+      - kind: file
+        path: eval/baselines/rerun-shard-2.md
+        contains: "| map-reduce-docs | fan-out/fan-in |"
+      - kind: file
+        path: eval/baselines/rerun-shard-2.md
+        contains: "| pipeline-stats | chain |"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - |
+            const fs = require('node:fs')
+            const [k, ...ids] = process.argv.slice(1)
+            const fail = msg => { console.error(`shard ${k}: ${msg}`); process.exit(1) }
+            const shard = fs.readFileSync(`eval/baselines/rerun-shard-${k}.md`, 'utf8')
+            const m = /^Results JSON: (eval\/results\/\d{14}\.json)$/m.exec(shard)
+            if (!m) fail('no "Results JSON: eval/results/<stamp>.json" line')
+            const found = JSON.parse(fs.readFileSync(m[1], 'utf8')).results
+            if (found.map(r => r.id).join() !== ids.join()) fail(`${m[1]} holds ${found.map(r => r.id).join()}, expected ${ids.join()} (another runner may have overwritten the stamp)`)
+            for (const r of found) {
+              const cell = r.runs.map(x => `${x.shape} (producers: ${x.producerShape})`).join('; ') || 'no run'
+              const row = shard.split('\n').find(l => l.startsWith(`| ${r.id} | ${r.expect} |`))
+              if (!row) fail(`no table row for ${r.id}`)
+              if (!row.includes(`| ${cell} |`) || !row.endsWith(`| ${r.seconds}s |`)) fail(`the row for ${r.id} does not match ${m[1]}`)
+            }
+          - "2"
+          - map-reduce-docs
+          - pipeline-stats
+    prompt: |
+      TASK: Run the eval scenarios map-reduce-docs and pipeline-stats through the shape runner and record their two result rows in eval/baselines/rerun-shard-2.md.
+      DELIVERABLE: eval/baselines/rerun-shard-2.md, written after the runner finishes (create the folder eval/baselines/ when it is missing). Its content, in this order:
+        1. the line "# Eval re-run shard 2"
+        2. one line each, with nothing after the value: "Date: <output of date +%F>", "Plugin HEAD: <output of git rev-parse --short HEAD>", "Tracked changes: <number of lines printed by git status --porcelain --untracked-files=no>", "Scenarios: map-reduce-docs, pipeline-stats", "Stamp: <the 14-digit stamp in the runner output file name>", "Results JSON: eval/results/<stamp>.json", "Results MD: eval/results/<stamp>.md", "Command: <the exact runner command you ran, starting at bun eval/run.ts>"
+        3. a blank line, then the runner's table header line and separator line copied verbatim from eval/results/<stamp>.md, then the rows for map-reduce-docs and pipeline-stats copied verbatim from that file (every cell unedited, one line per row, in that order).
+        In ## Output give the stamp, the Results JSON path and, per scenario, the shape, the outcome check (PASS or FAIL), the status and the seconds.
+      SCOPE: Run the shape runner exactly once, with the command below. Its side effects are expected: it starts claude -p sessions on the user account, writes eval/results/<stamp>.md and eval/results/<stamp>.json (gitignored) and uses /tmp/dag-shapes/<stamp>. Read eval/run.ts and eval/results/. Write only eval/baselines/rerun-shard-2.md. Do not edit eval/*.ts, the other shard files or any other file. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      Procedure:
+        1. Run this one Bash command with the Bash timeout parameter set to 600000 ms. The run takes about 4 minutes. Never run it in the background and never start a second runner for the same scenarios, because every run spends the user account usage.
+           bun -e "const k=1;for(;;){const s=new Date().getSeconds();if(s>=15*k+3&&s<=15*k+9)break;await Bun.sleep(100)}" && bun eval/run.ts --only map-reduce-docs,pipeline-stats --concurrency 1 --timeout-min 4
+           The first part waits until the clock is in this shard's own seconds window of the minute (shard 1 seconds 3-9, shard 2 seconds 18-24, shard 3 seconds 33-39, shard 4 seconds 48-54). The runner names its output files by a one-second clock stamp and two runners that start in the same second overwrite each other, so the disjoint windows keep the four stamps distinct. Run the command exactly as written.
+        2. The runner prints a line SHAPES_DONE <path>/<stamp>.md ...; the stamp is that file name without its extension. When the call ended without a SHAPES_DONE line, stop and report failed with the last output lines.
+        3. Read eval/results/<stamp>.json. Its results array must hold exactly the ids map-reduce-docs and pipeline-stats; anything else means another runner overwrote the stamp, so report failed. When the table shows "no run" for both scenarios, the claude sessions never started: report failed and quote the stdoutTail text.
+        4. Write the shard file. Copy the rows even when the outcome check is FAIL, the shape differs from the expected one or a scenario timed out: they are re-run measurements, so do not rerun anything to improve them.
+      VERIFY: Re-read eval/baselines/rerun-shard-2.md and confirm that it has the Stamp, Results JSON and Command lines and that its two rows start with "| map-reduce-docs | fan-out/fan-in |" and "| pipeline-stats | chain |". The runtime also runs a script that compares both rows with the Results JSON file.
+      STOP WHEN: eval/baselines/rerun-shard-2.md exists with both rows and your ## Output section is written.
+
+  - id: shard-3
+    label: Run diamond-app and debug-fix
+    category: quick
+    writes:
+      - eval/baselines/rerun-shard-3.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-shard-3.md
+        contains: "Results JSON: eval/results/"
+      - kind: file
+        path: eval/baselines/rerun-shard-3.md
+        contains: "| diamond-app | diamond |"
+      - kind: file
+        path: eval/baselines/rerun-shard-3.md
+        contains: "| debug-fix | chain |"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - |
+            const fs = require('node:fs')
+            const [k, ...ids] = process.argv.slice(1)
+            const fail = msg => { console.error(`shard ${k}: ${msg}`); process.exit(1) }
+            const shard = fs.readFileSync(`eval/baselines/rerun-shard-${k}.md`, 'utf8')
+            const m = /^Results JSON: (eval\/results\/\d{14}\.json)$/m.exec(shard)
+            if (!m) fail('no "Results JSON: eval/results/<stamp>.json" line')
+            const found = JSON.parse(fs.readFileSync(m[1], 'utf8')).results
+            if (found.map(r => r.id).join() !== ids.join()) fail(`${m[1]} holds ${found.map(r => r.id).join()}, expected ${ids.join()} (another runner may have overwritten the stamp)`)
+            for (const r of found) {
+              const cell = r.runs.map(x => `${x.shape} (producers: ${x.producerShape})`).join('; ') || 'no run'
+              const row = shard.split('\n').find(l => l.startsWith(`| ${r.id} | ${r.expect} |`))
+              if (!row) fail(`no table row for ${r.id}`)
+              if (!row.includes(`| ${cell} |`) || !row.endsWith(`| ${r.seconds}s |`)) fail(`the row for ${r.id} does not match ${m[1]}`)
+            }
+          - "3"
+          - diamond-app
+          - debug-fix
+    prompt: |
+      TASK: Run the eval scenarios diamond-app and debug-fix through the shape runner and record their two result rows in eval/baselines/rerun-shard-3.md.
+      DELIVERABLE: eval/baselines/rerun-shard-3.md, written after the runner finishes (create the folder eval/baselines/ when it is missing). Its content, in this order:
+        1. the line "# Eval re-run shard 3"
+        2. one line each, with nothing after the value: "Date: <output of date +%F>", "Plugin HEAD: <output of git rev-parse --short HEAD>", "Tracked changes: <number of lines printed by git status --porcelain --untracked-files=no>", "Scenarios: diamond-app, debug-fix", "Stamp: <the 14-digit stamp in the runner output file name>", "Results JSON: eval/results/<stamp>.json", "Results MD: eval/results/<stamp>.md", "Command: <the exact runner command you ran, starting at bun eval/run.ts>"
+        3. a blank line, then the runner's table header line and separator line copied verbatim from eval/results/<stamp>.md, then the rows for diamond-app and debug-fix copied verbatim from that file (every cell unedited, one line per row, in that order).
+        In ## Output give the stamp, the Results JSON path and, per scenario, the shape, the outcome check (PASS or FAIL), the status and the seconds.
+      SCOPE: Run the shape runner exactly once, with the command below. Its side effects are expected: it starts claude -p sessions on the user account, writes eval/results/<stamp>.md and eval/results/<stamp>.json (gitignored) and uses /tmp/dag-shapes/<stamp>. Read eval/run.ts and eval/results/. Write only eval/baselines/rerun-shard-3.md. Do not edit eval/*.ts, the other shard files or any other file. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      Procedure:
+        1. Run this one Bash command with the Bash timeout parameter set to 600000 ms. The run takes about 4 minutes. Never run it in the background and never start a second runner for the same scenarios, because every run spends the user account usage.
+           bun -e "const k=2;for(;;){const s=new Date().getSeconds();if(s>=15*k+3&&s<=15*k+9)break;await Bun.sleep(100)}" && bun eval/run.ts --only diamond-app,debug-fix --concurrency 1 --timeout-min 4
+           The first part waits until the clock is in this shard's own seconds window of the minute (shard 1 seconds 3-9, shard 2 seconds 18-24, shard 3 seconds 33-39, shard 4 seconds 48-54). The runner names its output files by a one-second clock stamp and two runners that start in the same second overwrite each other, so the disjoint windows keep the four stamps distinct. Run the command exactly as written.
+        2. The runner prints a line SHAPES_DONE <path>/<stamp>.md ...; the stamp is that file name without its extension. When the call ended without a SHAPES_DONE line, stop and report failed with the last output lines.
+        3. Read eval/results/<stamp>.json. Its results array must hold exactly the ids diamond-app and debug-fix; anything else means another runner overwrote the stamp, so report failed. When the table shows "no run" for both scenarios, the claude sessions never started: report failed and quote the stdoutTail text.
+        4. Write the shard file. Copy the rows even when the outcome check is FAIL, the shape differs from the expected one or a scenario timed out: they are re-run measurements, so do not rerun anything to improve them.
+      VERIFY: Re-read eval/baselines/rerun-shard-3.md and confirm that it has the Stamp, Results JSON and Command lines and that its two rows start with "| diamond-app | diamond |" and "| debug-fix | chain |". The runtime also runs a script that compares both rows with the Results JSON file.
+      STOP WHEN: eval/baselines/rerun-shard-3.md exists with both rows and your ## Output section is written.
+
+  - id: shard-4
+    label: Run wide-harvest and research-write
+    category: quick
+    writes:
+      - eval/baselines/rerun-shard-4.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-shard-4.md
+        contains: "Results JSON: eval/results/"
+      - kind: file
+        path: eval/baselines/rerun-shard-4.md
+        contains: "| wide-harvest | fan-out/fan-in |"
+      - kind: file
+        path: eval/baselines/rerun-shard-4.md
+        contains: "| research-write | fan-out/fan-in |"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - |
+            const fs = require('node:fs')
+            const [k, ...ids] = process.argv.slice(1)
+            const fail = msg => { console.error(`shard ${k}: ${msg}`); process.exit(1) }
+            const shard = fs.readFileSync(`eval/baselines/rerun-shard-${k}.md`, 'utf8')
+            const m = /^Results JSON: (eval\/results\/\d{14}\.json)$/m.exec(shard)
+            if (!m) fail('no "Results JSON: eval/results/<stamp>.json" line')
+            const found = JSON.parse(fs.readFileSync(m[1], 'utf8')).results
+            if (found.map(r => r.id).join() !== ids.join()) fail(`${m[1]} holds ${found.map(r => r.id).join()}, expected ${ids.join()} (another runner may have overwritten the stamp)`)
+            for (const r of found) {
+              const cell = r.runs.map(x => `${x.shape} (producers: ${x.producerShape})`).join('; ') || 'no run'
+              const row = shard.split('\n').find(l => l.startsWith(`| ${r.id} | ${r.expect} |`))
+              if (!row) fail(`no table row for ${r.id}`)
+              if (!row.includes(`| ${cell} |`) || !row.endsWith(`| ${r.seconds}s |`)) fail(`the row for ${r.id} does not match ${m[1]}`)
+            }
+          - "4"
+          - wide-harvest
+          - research-write
+    prompt: |
+      TASK: Run the eval scenarios wide-harvest and research-write through the shape runner and record their two result rows in eval/baselines/rerun-shard-4.md.
+      DELIVERABLE: eval/baselines/rerun-shard-4.md, written after the runner finishes (create the folder eval/baselines/ when it is missing). Its content, in this order:
+        1. the line "# Eval re-run shard 4"
+        2. one line each, with nothing after the value: "Date: <output of date +%F>", "Plugin HEAD: <output of git rev-parse --short HEAD>", "Tracked changes: <number of lines printed by git status --porcelain --untracked-files=no>", "Scenarios: wide-harvest, research-write", "Stamp: <the 14-digit stamp in the runner output file name>", "Results JSON: eval/results/<stamp>.json", "Results MD: eval/results/<stamp>.md", "Command: <the exact runner command you ran, starting at bun eval/run.ts>"
+        3. a blank line, then the runner's table header line and separator line copied verbatim from eval/results/<stamp>.md, then the rows for wide-harvest and research-write copied verbatim from that file (every cell unedited, one line per row, in that order).
+        In ## Output give the stamp, the Results JSON path and, per scenario, the shape, the outcome check (PASS or FAIL), the status and the seconds.
+      SCOPE: Run the shape runner exactly once, with the command below. Its side effects are expected: it starts claude -p sessions on the user account, writes eval/results/<stamp>.md and eval/results/<stamp>.json (gitignored) and uses /tmp/dag-shapes/<stamp>. Read eval/run.ts and eval/results/. Write only eval/baselines/rerun-shard-4.md. Do not edit eval/*.ts, the other shard files or any other file. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      Procedure:
+        1. Run this one Bash command with the Bash timeout parameter set to 600000 ms. The run takes about 4 minutes. Never run it in the background and never start a second runner for the same scenarios, because every run spends the user account usage.
+           bun -e "const k=3;for(;;){const s=new Date().getSeconds();if(s>=15*k+3&&s<=15*k+9)break;await Bun.sleep(100)}" && bun eval/run.ts --only wide-harvest,research-write --concurrency 1 --timeout-min 4
+           The first part waits until the clock is in this shard's own seconds window of the minute (shard 1 seconds 3-9, shard 2 seconds 18-24, shard 3 seconds 33-39, shard 4 seconds 48-54). The runner names its output files by a one-second clock stamp and two runners that start in the same second overwrite each other, so the disjoint windows keep the four stamps distinct. Run the command exactly as written.
+        2. The runner prints a line SHAPES_DONE <path>/<stamp>.md ...; the stamp is that file name without its extension. When the call ended without a SHAPES_DONE line, stop and report failed with the last output lines.
+        3. Read eval/results/<stamp>.json. Its results array must hold exactly the ids wide-harvest and research-write; anything else means another runner overwrote the stamp, so report failed. When the table shows "no run" for both scenarios, the claude sessions never started: report failed and quote the stdoutTail text.
+        4. Write the shard file. Copy the rows even when the outcome check is FAIL, the shape differs from the expected one or a scenario timed out: they are re-run measurements, so do not rerun anything to improve them.
+      VERIFY: Re-read eval/baselines/rerun-shard-4.md and confirm that it has the Stamp, Results JSON and Command lines and that its two rows start with "| wide-harvest | fan-out/fan-in |" and "| research-write | fan-out/fan-in |". The runtime also runs a script that compares both rows with the Results JSON file.
+      STOP WHEN: eval/baselines/rerun-shard-4.md exists with both rows and your ## Output section is written.
+
+  - id: baseline-combine
+    label: Combine the shard tables into the re-run baseline
+    category: quick
+    dependsOn:
+      - shard-1
+      - shard-2
+      - shard-3
+      - shard-4
+    writes:
+      - eval/baselines/rerun-baseline.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-baseline.md
+        contains: "| scenario | expected | runs | shape |"
+      - kind: file
+        path: eval/baselines/rerun-baseline.md
+        contains: "| refusals (planning/tools) | AskUserQuestion calls | verify refusals (required/invalid) |"
+      - kind: file
+        path: eval/baselines/rerun-baseline.md
+        contains: "Scenarios matching their expected shape:"
+      - kind: file
+        path: eval/baselines/rerun-baseline.md
+        contains: "## Sources"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - |
+            const fs = require('node:fs')
+            const ids = ['single-edit', 'parallel-files', 'map-reduce-docs', 'pipeline-stats', 'diamond-app', 'debug-fix', 'wide-harvest', 'research-write']
+            const fail = msg => { console.error(msg); process.exit(1) }
+            const text = fs.readFileSync('eval/baselines/rerun-baseline.md', 'utf8')
+            const lines = text.split('\n')
+            const results = []
+            for (let k = 1; k <= 4; k++) {
+              const shard = fs.readFileSync(`eval/baselines/rerun-shard-${k}.md`, 'utf8')
+              const m = /^Results JSON: (eval\/results\/\d{14}\.json)$/m.exec(shard)
+              if (!m) fail(`shard ${k}: no Results JSON line`)
+              results.push(...JSON.parse(fs.readFileSync(m[1], 'utf8')).results)
+            }
+            if (results.map(r => r.id).sort().join() !== [...ids].sort().join()) fail(`the shard results hold ${results.map(r => r.id).join()}, expected each of ${ids.join()} once`)
+            const all = ids.map(id => results.find(r => r.id === id))
+            const rows = lines.filter(l => ids.some(id => l.startsWith(`| ${id} |`)))
+            if (rows.length !== 8) fail(`expected 8 scenario rows, found ${rows.length}`)
+            all.forEach((r, i) => {
+              const cell = r.runs.map(x => `${x.shape} (producers: ${x.producerShape})`).join('; ') || 'no run'
+              if (!rows[i].startsWith(`| ${r.id} | ${r.expect} |`) || !rows[i].includes(`| ${cell} |`) || !rows[i].endsWith(`| ${r.seconds}s |`)) fail(`row ${i + 1} (${r.id}) does not match its Results JSON result`)
+            })
+            const runs = all.flatMap(r => r.runs)
+            const shapes = new Set(runs.map(x => x.shape))
+            const matches = all.filter(r => r.runs.some(x => x.shape === r.expect || x.producerShape === r.expect)).length
+            const verified = runs.reduce((n, x) => n + x.verificationTotals.verifiedNodes, 0)
+            const total = runs.reduce((n, x) => n + x.nodeVerification.length, 0)
+            if (!text.includes(`Distinct shapes: ${shapes.size} (`)) fail(`the Distinct shapes line should say ${shapes.size}`)
+            if (!text.includes(`Scenarios matching their expected shape: ${matches}/8.`)) fail(`the matching line should say ${matches}/8`)
+            if (!text.includes(`Verification: ${verified}/${total} nodes verified`)) fail(`the Verification line should say ${verified}/${total} nodes verified`)
+    prompt: |
+      TASK: Merge the four shard files into eval/baselines/rerun-baseline.md, the combined eval re-run baseline with one table row for each of the 8 shape scenarios and summary lines recomputed from the runner JSON results.
+      DELIVERABLE: eval/baselines/rerun-baseline.md with, in this order:
+        1. the line "# Eval re-run baseline"
+        2. the lines "Date: <output of date +%F>", "Plugin HEAD: <the hash named in the shard files; when they differ write shard-<k>:<hash> for each>", "Tracked changes: <the number named in the shard files, same rule>" and "Runner: bun eval/run.ts in 4 shards of 2 scenarios, --concurrency 1 --timeout-min 4 each, model <model from options.model in the Results JSON>"
+        3. the two summary lines, in the runner's own format, recomputed as described below
+        4. the table header line and separator line copied from eval/baselines/rerun-shard-1.md, then the 8 scenario rows copied verbatim from the shard files in exactly this order: single-edit, parallel-files, map-reduce-docs, pipeline-stats, diamond-app, debug-fix, wide-harvest, research-write
+        5. a section "## Sources" with one line per shard in the form "- shard-<k>: Stamp <stamp>, <Results JSON path>, scenarios <id>, <id>".
+        Summary line formats (recompute the numbers from the 8 results of the Results JSON files, in the scenario order above):
+          Distinct shapes: <N> (<shapes joined by ", ">). Distinct producer shapes: <M> (<producer shapes joined by ", ">). Scenarios matching their expected shape: <X>/8.
+          Verification: <V>/<T> nodes verified, <F> failed, <G> missing; automatic retries: <R>; start/amend refusals: <A> verification_required, <B> invalid_verification.
+        where N and M count the distinct values of runs[].shape and runs[].producerShape over all runs of all 8 results (list them in first-seen order); X counts the scenarios having a run whose shape or producerShape equals the scenario expect value; V, F, G and R sum runs[].verificationTotals.verifiedNodes, failedVerification, missingVerification and autoRetries; T sums the lengths of runs[].nodeVerification; A and B sum transcript.verificationRequired and transcript.invalidVerification over the 8 results.
+        In ## Output give the two summary lines and, per scenario, the shape, the expected shape and the outcome check (PASS or FAIL).
+      SCOPE: Read eval/baselines/rerun-shard-1.md to rerun-shard-4.md, the Results JSON files they name under eval/results/, and eval/run.ts (the markdown function, for the summary line formats). Write only eval/baselines/rerun-baseline.md. Compute the numbers with a read-only bun -e script that prints them; do not write script files. Do not edit the shard files, do not run the eval runner. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      VERIFY: Count the table rows (exactly 8, each copied unchanged from a shard file) and recompute the summary numbers a second time with a different expression of the same rule. The runtime also runs a script that compares every row and the summary lines with the Results JSON files.
+      STOP WHEN: eval/baselines/rerun-baseline.md exists with 8 rows, both summary lines and the Sources section, and your ## Output section is written.
+
+  - id: baseline-audit
+    label: Audit the baseline against the result JSON files
+    category: unspecified-low
+    dependsOn:
+      - shard-1
+      - shard-2
+      - shard-3
+      - shard-4
+      - baseline-combine
+    writes:
+      - eval/baselines/rerun-baseline-audit.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-baseline-audit.md
+        contains: "Baseline audit: PASS"
+      - kind: file
+        path: eval/baselines/rerun-baseline-audit.md
+        contains: "Rows compared: 8/8"
+      - kind: file
+        path: eval/baselines/rerun-baseline-audit.md
+        contains: "Cells compared: 168/168"
+      - kind: file
+        path: eval/baselines/rerun-baseline-audit.md
+        contains: "Summary lines: PASS"
+      - kind: file
+        path: eval/baselines/rerun-baseline-audit.md
+        contains: "Shard coverage: PASS"
+    prompt: |
+      TASK: Falsify eval/baselines/rerun-baseline.md row by row against the eval/results/*.json files that the four shards produced, and write the verdict to eval/baselines/rerun-baseline-audit.md.
+      DELIVERABLE: eval/baselines/rerun-baseline-audit.md containing, in this order:
+        1. the line "# Eval re-run audit"
+        2. a table with the header "| scenario | cells compared | mismatches | verdict |" and one row for each of the 8 scenarios
+        3. the lines "Rows compared: <n>/8", "Cells compared: <n>/168" (each row has 21 cells), "Summary lines: PASS or FAIL" and "Shard coverage: PASS or FAIL", using the real numbers and verdicts you found
+        4. as the last line "Baseline audit: PASS" only when every row verdict, the summary lines and the shard coverage pass; otherwise "Baseline audit: FAIL" followed by one bullet per mismatch (scenario, cell, value in the baseline, value in the JSON).
+        In ## Output give the verdict and the real figures: X (scenarios matching their expected shape, out of 8), V and T (verified and total nodes from the Verification line), and the scenarios whose outcome check is FAIL, whose shape differs from the expected one or that timed out, and the AskUserQuestion calls of each scenario. Those are re-run measurements, not audit failures.
+      SCOPE: Read eval/baselines/rerun-baseline.md, eval/baselines/rerun-shard-1.md to rerun-shard-4.md, the eval/results/<stamp>.json files that the shard files name, the markdown function in eval/run.ts and verificationOf in eval/report.ts. Treat the upstream Outputs and the baseline file as claims; the Results JSON files are the evidence. Write only eval/baselines/rerun-baseline-audit.md. Do not fix the baseline: report each mismatch. You may run a read-only bun -e script that prints its findings; do not write script files and do not run the eval runner. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      Procedure:
+        1. Shard coverage: every shard file names a Results JSON file that exists; the four stamps are distinct; shard 1 holds single-edit and parallel-files, shard 2 holds map-reduce-docs and pipeline-stats, shard 3 holds diamond-app and debug-fix, shard 4 holds wide-harvest and research-write, each id exactly once across the four files.
+        2. Rows: for each of the 8 scenarios recompute all 21 cells from its JSON result exactly as the markdown function in eval/run.ts renders them (scenario, expected, runs, shape with producers, nodes, depth, layer widths, fan-in nodes, verify node, warnings, categories, status, outcome check, skill before start, refusals (planning/tools), AskUserQuestion calls, verify refusals (required/invalid), verified/total nodes, auto retries, unfinished nodes, time) and compare them cell by cell with the row in eval/baselines/rerun-baseline.md and with the row in its shard file.
+        3. Summary lines: recompute Distinct shapes, Distinct producer shapes, Scenarios matching their expected shape and the Verification line from the 8 results and compare them with the baseline file. Compare the Sources section with the shard files.
+      VERIFY: Run your comparison a second time with a different expression of the same rule and confirm that the mismatch count is identical; PASS needs 8 rows, 168 equal cells, matching summary lines and complete shard coverage.
+      STOP WHEN: eval/baselines/rerun-baseline-audit.md is written and your ## Output section is given. When any comparison fails, write the file with Baseline audit: FAIL and report DAG_NODE_STATUS: failed with the mismatch.
+
+  - id: compare-p0
+    label: Compare the re-run with the P0 baseline
+    category: quick
+    dependsOn:
+      - baseline-audit
+    writes:
+      - eval/baselines/rerun-vs-p0.md
+    verify:
+      - kind: file
+        path: eval/baselines/rerun-vs-p0.md
+        contains: "## Summary"
+      - kind: file
+        path: eval/baselines/rerun-vs-p0.md
+        contains: "## Per scenario"
+      - kind: file
+        path: eval/baselines/rerun-vs-p0.md
+        contains: "## Targets"
+      - kind: file
+        path: eval/baselines/rerun-vs-p0.md
+        contains: "P0: 6/8"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - |
+            const fs = require('node:fs')
+            const ids = ['single-edit', 'parallel-files', 'map-reduce-docs', 'pipeline-stats', 'diamond-app', 'debug-fix', 'wide-harvest', 'research-write']
+            const fail = msg => { console.error(msg); process.exit(1) }
+            const cells = line => line.split('|').slice(1, -1).map(c => c.trim())
+            const table = text => {
+              const lines = text.split('\n')
+              const head = cells(lines.find(l => l.startsWith('| scenario |')) ?? fail('a baseline file has no table header'))
+              return Object.fromEntries(ids.map(id => {
+                const row = lines.find(l => l.startsWith(`| ${id} |`)) ?? fail(`a baseline file has no row for ${id}`)
+                const c = cells(row)
+                return [id, Object.fromEntries(head.map((h, i) => [h, c[i]]))]
+              }))
+            }
+            const figures = text => {
+              const x = /Scenarios matching their expected shape: (\d+)\/8\./.exec(text)
+              const v = /Verification: (\d+)\/(\d+) nodes verified/.exec(text)
+              if (!x || !v) fail('a baseline file lacks its summary lines')
+              return `${x[1]}/8 shapes, ${v[1]}/${v[2]} nodes verified`
+            }
+            const p0 = fs.readFileSync('eval/baselines/p0-baseline.md', 'utf8')
+            const rerun = fs.readFileSync('eval/baselines/rerun-baseline.md', 'utf8')
+            const out = fs.readFileSync('eval/baselines/rerun-vs-p0.md', 'utf8')
+            if (!out.includes(`P0: ${figures(p0)}`)) fail(`the Summary should say "P0: ${figures(p0)}"`)
+            if (!out.includes(`Re-run: ${figures(rerun)}`)) fail(`the Summary should say "Re-run: ${figures(rerun)}"`)
+            const a = table(p0)
+            const b = table(rerun)
+            const lines = out.split('\n')
+            for (const id of ids) {
+              const rows = lines.filter(l => l.startsWith(`| ${id} |`))
+              if (rows.length !== 1) fail(`expected one Per scenario row for ${id}, found ${rows.length}`)
+              const want = [id, b[id].expected, a[id].shape, b[id].shape, a[id]['verified/total nodes'], b[id]['verified/total nodes'], b[id]['AskUserQuestion calls'], a[id].time, b[id].time]
+              if (cells(rows[0]).join(' | ') !== want.join(' | ')) fail(`the Per scenario row for ${id} should read: | ${want.join(' | ')} |`)
+            }
+            const targets = out.slice(out.indexOf('## Targets')).split('\n').filter(l => /^- [^:]*: (YES|NO) - \S/.test(l))
+            if (targets.length !== 5) fail(`the Targets section needs 5 bullets of the form "- <question>: YES|NO - <evidence>", found ${targets.length}`)
+    prompt: |
+      TASK: Write eval/baselines/rerun-vs-p0.md, the comparison of the eval re-run (eval/baselines/rerun-baseline.md) with the Phase 0 baseline (eval/baselines/p0-baseline.md): what changed after Phases 2 and 3, and whether the targets of those phases are reached.
+      DELIVERABLE: eval/baselines/rerun-vs-p0.md with, in this order:
+        1. the line "# Eval re-run vs P0 baseline"
+        2. a section "## Summary" with the two figure lines, each in exactly this form, plus one line for the plugin HEAD of both runs:
+             P0: <X>/8 shapes, <V>/<T> nodes verified
+             Re-run: <X>/8 shapes, <V>/<T> nodes verified
+             Plugin HEAD: P0 <hash>, re-run <hash>
+           Read X, V and T of each file from its line "Scenarios matching their expected shape: <X>/8." and its line "Verification: <V>/<T> nodes verified, ...", and the hash from its "Plugin HEAD:" line. Do not trust numbers quoted anywhere else, including this prompt: the P0 file is a fixed measurement and should read "P0: 6/8 shapes, 27/31 nodes verified", and when it does not, say so under the lines.
+        3. a section "## Per scenario" with this header line and a separator line, then one row for each of the 8 scenarios in the order single-edit, parallel-files, map-reduce-docs, pipeline-stats, diamond-app, debug-fix, wide-harvest, research-write:
+             | scenario | expected | P0 shape | re-run shape | P0 verified/total | re-run verified/total | re-run AskUserQuestion calls | P0 time | re-run time |
+           Copy each cell verbatim from the two baseline rows. Look the cells up by column header name, not by position: the P0 table has 20 columns and no "AskUserQuestion calls" column, the re-run table has 21 columns with "AskUserQuestion calls" right after "refusals (planning/tools)". "P0 shape" and "re-run shape" are the "shape" cells (with the producers part), "verified/total" is the "verified/total nodes" cell, "time" is the "time" cell.
+        4. a section "## Targets" with exactly these five bullets, in this order, each in the form "- <question>: YES - <evidence>" or "- <question>: NO - <evidence>" (the question text before the colon contains no colon of its own):
+             - wide-harvest now reaches fan-out/fan-in
+             - debug-fix now reaches chain
+             - pipeline-stats still fails on report.md (B7)
+             - a run still ends with status running (B6)
+             - every AskUserQuestion count is 0
+           Every bullet needs evidence from both files in the same line: the cells you compared (shape with producers, nodes, layer widths, status, unfinished nodes, AskUserQuestion calls) with the P0 value and the re-run value.
+           Rules: a scenario "reaches" its expected shape when the shape or the producer shape of a run equals the expected value (the rule of the line "Scenarios matching their expected shape"); say which of the two matched. pipeline-stats still fails on report.md when its re-run unfinished nodes cell names the report node as failed with the refused file name report.md, or its status is failed for that reason (the P0 row shows report:failed because the Write tool refused the filename report.md); answer NO when the report node completed. A run ends with status running when any re-run status cell contains running (name the scenarios; the P0 baseline had debug-fix and research-write). The AskUserQuestion answer is YES only when all 8 re-run counts are 0 (the non-interactive protocol of Phase 3); list the 8 counts. B6 and B7 are only the labels of two known problems, named above; do not look for a document that defines them.
+        In ## Output give the three Summary lines and the five Targets answers (YES or NO with the key evidence).
+      SCOPE: Read eval/baselines/rerun-baseline.md and eval/baselines/p0-baseline.md. Read the eval/results/<stamp>.json files named in the Sources section of eval/baselines/rerun-baseline.md only when a table cell is ambiguous. Write only eval/baselines/rerun-vs-p0.md. Do not edit either baseline file, the shard files, the audit file or any other file, and do not run the eval runner. NEVER commit, push, install anything or reload plugins, and never edit anything under .claude/.
+      VERIFY: Re-read eval/baselines/rerun-vs-p0.md and compare every Per scenario cell with the two baseline tables once more (8 rows, 9 cells each), and confirm that the Summary lines equal the figures in the two baseline files and that the Targets section has five bullets with a YES or NO and evidence from both files. The runtime also runs a script that compares the Summary lines and every Per scenario cell with the two baseline files.
+      STOP WHEN: eval/baselines/rerun-vs-p0.md exists with the Summary, Per scenario and Targets sections and your ## Output section is written.
