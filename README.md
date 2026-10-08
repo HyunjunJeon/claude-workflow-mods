@@ -119,9 +119,10 @@ that prints OK when run with python3 test_app.py.
 `skills/dag-planning/`이 플러그인에 들어 있습니다(`/dag-workflow:dag-planning`).
 
 - `SKILL.md`: 언제 쓰나, 정의 형태(노드 필드, dependsOn으로 결과가 흐르는 방식), 목표 우선, 실행·복구(retry/amend/send/cancel)·감독 방법, 메인 대화가 할 수 있는 일
-- `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응
+- `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`), 안전하지만 틀린 산출물 점검표
+- 노드용 스킬 `skills/dag-node-debugging/`, `skills/dag-node-review-standards/`, `skills/dag-node-testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:dag-node-debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 테스트)입니다. 
 
-mod는 이 스킬을 강제와 연결합니다.   
+mod는 이 스킬을 강제로 연결합니다.  
 프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/check/test/review/audit가 있고 다른 노드에 의존)가 없거나, 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
 
 ## 결과 전달
@@ -224,11 +225,13 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 
 통과는 하지만 산출물이 옳다는 것을 거의 증명하지 못하는 검사는 정의 린트가 경고합니다. 경고 문구는 `node "<id>": vacuous verify - check 1 ...`로 시작하고, `start`와 `amend`가 돌려주는 `warnings`에 담기며 `/dag run`은 `Warnings:` 아래에 보여 줍니다. 경고일 뿐이라 실행을 거부하지는 않습니다. 노드마다 경고는 하나이고, 문제가 있는 검사를 `verify` 안의 위치(1부터 셈)로 모두 나열합니다. 한 검사에는 아래 규칙 중 먼저 맞는 하나만 적용합니다.
 
-| 규칙  | 조건                                                                                   | 이유                                          |
-| --- | ------------------------------------------------------------------------------------ | ------------------------------------------- |
-| V1  | `contains` 없는 파일 검사                                                                  | 파일이 있다는 것만 증명합니다. `touch`로 만든 빈 파일도 통과합니다 |
-| V2  | 명령의 프로그램(`argv[0]`의 마지막 경로 이름)이 `true`, `:`, `echo`, `printf`, `exit`, `yes`, `sleep` | 인자와 관계없이 항상 통과합니다                           |
-| V3  | `test` 또는 `[`의 `-` 인자가 하나 이상이고 모두 `-e`, `-f`, `-d`, `-s`이거나, 프로그램이 `ls`, `stat`, `cat` | 경로가 있다는 것만 증명합니다                           |
+
+| 규칙  | 조건                                                                                     | 이유                                        |
+| --- | -------------------------------------------------------------------------------------- | ----------------------------------------- |
+| V1  | `contains` 없는 파일 검사                                                                    | 파일이 있다는 것만 증명합니다. `touch`로 만든 빈 파일도 통과합니다 |
+| V2  | 명령의 프로그램(`argv[0]`의 마지막 경로 이름)이 `true`, `:`, `echo`, `printf`, `exit`, `yes`, `sleep`  | 인자와 관계없이 항상 통과합니다                         |
+| V3  | `test` 또는 `[`의 `-` 인자가 하나 이상이고 모두 `-e`, `-f`, `-d`, `-s`이거나, 프로그램이 `ls`, `stat`, `cat` | 경로가 있다는 것만 증명합니다                          |
+
 
 `test -n`, `test -r`, `test -z`처럼 다른 연산자가 하나라도 있거나 `-` 인자가 없는 `test a = b`는 경고하지 않습니다. `/bin/true`처럼 경로가 붙어도 마지막 이름으로 판단합니다.
 
@@ -343,7 +346,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | 그래프를 클릭한 뒤 ← / →           | 이전 / 다음 실행                              |
 | Esc                        | 프롬프트로 돌아가기(`/dag`로 연 패널은 닫힘)            |
 | 빈 프롬프트에서 `0`               | DAG 패널 열기(밴드 버튼)                        |
-| 빈 프롬프트에서 `1`–`5`          | 밴드에 보이는 그 번호의 노드를 선택한 채 패널 열기           |
+| 빈 프롬프트에서 `1`–`5`           | 밴드에 보이는 그 번호의 노드를 선택한 채 패널 열기           |
 
 
 글자 단축키(`n` `p` `d` `t` `c` `v` `f`)는 패널이 키보드 포커스를 가진 동안 동작합니다. 프롬프트가 비어 있을 때 ctrl+x tab으로 패널에 포커스를 줍니다. mod의 Button 단축키는 숫자나 소문자 한 글자만 받으므로, Tab·Space·화살표는 그래프 영역을 클릭해 포커스를 준 뒤에만 동작합니다.
@@ -359,18 +362,18 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 `/config`의 플러그인 항목에서 바꿉니다.
 
 
-| 키                      | 기본값       | 설명                                                                                                                |
-| ---------------------- | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `auto_recovery`        | `true`    | 확신도 높은 Jev 실패 분류로 노드당 최대 2번 자동 재시도([자동 복구](#자동-복구))                                                               |
-| `jev_enabled`          | `true`    | Jev의 카테고리 배정·도구 자동 승인 사용(키 또는 세션 모델 대체가 필요)                                                                       |
-| `jev_model_fallback`   | `true`    | 키가 없거나 TypeSafe API가 실패·시간 초과·오류 상태일 때 세션의 Sonnet 모델로 대신 판단. 사용량은 사용자의 Claude 요금제에 포함                             |
-| `jev_confidence`       | `0.9`     | TypeSafe API의 카테고리 배정과 모든 도구 승인·복구 판단을 자동 적용할 최소 확신도(0–1)                                                  |
-| `jev_model_routing_confidence` | `0.8` | 세션 모델이 고른 카테고리를 적용할 최소 확신도(0–1). 도구 승인·복구에는 쓰지 않음                                                       |
-| `jev_permission_scope` | `all`     | Jev 도구 승인 범위. `all`은 모든 `ask` 판정, `dag`는 DAG 노드 작업자의 도구 호출만 평가                                                    |
-| `language`             | `en`      | 패널 언어(`en`, `ko`)                                                                                                 |
-| `max_concurrent`       | `8`       | 실행 하나에서 동시에 도는 노드 수                                                                                               |
-| `retention_days`       | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
-| `node_messages`        | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
+| 키                              | 기본값       | 설명                                                                                                                |
+| ------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `auto_recovery`                | `true`    | 확신도 높은 Jev 실패 분류로 노드당 최대 2번 자동 재시도([자동 복구](#자동-복구))                                                               |
+| `jev_enabled`                  | `true`    | Jev의 카테고리 배정·도구 자동 승인 사용(키 또는 세션 모델 대체가 필요)                                                                       |
+| `jev_model_fallback`           | `true`    | 키가 없거나 TypeSafe API가 실패·시간 초과·오류 상태일 때 세션의 Sonnet 모델로 대신 판단. 사용량은 사용자의 Claude 요금제에 포함                             |
+| `jev_confidence`               | `0.9`     | TypeSafe API의 카테고리 배정과 모든 도구 승인·복구 판단을 자동 적용할 최소 확신도(0–1)                                                         |
+| `jev_model_routing_confidence` | `0.8`     | 세션 모델이 고른 카테고리를 적용할 최소 확신도(0–1). 도구 승인·복구에는 쓰지 않음                                                                 |
+| `jev_permission_scope`         | `all`     | Jev 도구 승인 범위. `all`은 모든 `ask` 판정, `dag`는 DAG 노드 작업자의 도구 호출만 평가                                                    |
+| `language`                     | `en`      | 패널 언어(`en`, `ko`)                                                                                                 |
+| `max_concurrent`               | `8`       | 실행 하나에서 동시에 도는 노드 수                                                                                               |
+| `retention_days`               | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
+| `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
 
 
 ### 보관 기간
@@ -416,5 +419,5 @@ claude plugin test
 bunx -p typescript@5 tsc -p . --noEmit
 ```
 
-엔진 로직은 `hooks/engine/`, 패널 모델은 `hooks/ui/`에 `$`를 쓰지 않는 순수 함수로 있습니다.   
+엔진 로직은 `hooks/engine/`, 패널 모델은 `hooks/ui/`에 `$`를 쓰지 않는 순수 함수로 있습니다.  
 mods API 호출은 모두 `hooks/register.ts`에 있습니다.
