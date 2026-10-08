@@ -97,7 +97,7 @@ test('the planning skill is recognised by its plugin-qualified and bare names on
 
 test('the lint flags contract gaps per node and a missing verification node only for multi-node graphs', async () => {
   const def = (nodes: unknown[]) => {
-    const r = parseDefinition({ key: 'k', nodes })
+    const r = parseDefinition({ key: 'k', goal: 'a fixture goal', nodes })
     if (!r.ok) throw new Error(r.error.message)
     return r.value
   }
@@ -114,7 +114,7 @@ test('the lint flags contract gaps per node and a missing verification node only
 
 test('the lint reserves quick for mechanical checks rather than a final audit', async () => {
   const def = (nodes: unknown[]) => {
-    const r = parseDefinition({ key: 'k', nodes })
+    const r = parseDefinition({ key: 'k', goal: 'a fixture goal', nodes })
     if (!r.ok) throw new Error(r.error.message)
     return r.value
   }
@@ -135,7 +135,7 @@ test('the lint reserves quick for mechanical checks rather than a final audit', 
 
 test('the lint warns about verify paths and writes the host refuses for subagents', async () => {
   const def = (nodes: unknown[]) => {
-    const r = parseDefinition({ key: 'k', nodes })
+    const r = parseDefinition({ key: 'k', goal: 'a fixture goal', nodes })
     if (!r.ok) throw new Error(r.error.message)
     return r.value
   }
@@ -151,7 +151,7 @@ test('the lint warns about verify paths and writes the host refuses for subagent
 })
 
 const underSplitDef = (nodes: unknown[]) => {
-  const r = parseDefinition({ key: 'k', nodes })
+  const r = parseDefinition({ key: 'k', goal: 'a fixture goal', nodes })
   if (!r.ok) throw new Error(r.error.message)
   return r.value
 }
@@ -247,6 +247,18 @@ test('the injected protocol states the rule for each enforcement level', async (
   expect(protocolFor('strict')).toContain('are refused here and belong inside DAG nodes')
   expect(protocolFor('guide')).toContain('Prefer doing all work inside DAG nodes')
   expect(protocolFor('strict')).toContain('mcp__dag-workflow__dag')
+})
+
+test('a non-interactive session is told not to ask the user, an interactive one is not', async () => {
+  for (const level of ['strict', 'guide'] as const) {
+    const quiet = protocolFor(level, false)
+    expect(quiet).toContain('Non-interactive session: do not ask the user')
+    expect(quiet).toContain('record every assumption')
+    expect(protocolFor(level, true)).toBe(protocolFor(level))
+    expect(protocolFor(level, true)).not.toContain('Non-interactive session')
+    expect(protocolFor(level)).not.toContain('Non-interactive session')
+    expect(quiet.startsWith(protocolFor(level))).toBe(true)
+  }
 })
 
 test('a node output is its "## Output" section, else its report without the status line', async () => {

@@ -1713,7 +1713,7 @@ export function register(on: On, options: PluginOptions) {
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
       await persistContext($)
     }
-    return next({ ...e, context: [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement)]), restorationContext()] })
+    return next({ ...e, context: [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive)]), restorationContext()] })
   })
 
   on('classic.PermissionRequest', async ($, e, next) => {

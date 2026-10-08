@@ -273,11 +273,11 @@ export function denyMessage(tool: string, reason: string): string {
   ].join('\n')
 }
 
-export function protocolFor(level: Enforcement): string {
+export function protocolFor(level: Enforcement, interactive = true): string {
   const rule = level === 'strict'
     ? 'In this main conversation you only plan, read (Read, LSP, read-only Bash, web), ask, orchestrate and verify; Edit, Write, mutating Bash, Agent, Workflow, TodoWrite and other tools are refused here and belong inside DAG nodes.'
     : 'Prefer doing all work inside DAG nodes; this main conversation should plan, orchestrate and verify.'
-  return [
+  const lines = [
     '[dag-workflow] DAG orchestration is mandatory for this task.',
     level === 'strict'
       ? `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it; start is refused until you do.`
@@ -287,5 +287,7 @@ export function protocolFor(level: Enforcement): string {
     '- Model the real dependencies: a node lists in dependsOn every node whose result it needs; independent nodes run in parallel; keep their write scopes disjoint.',
     '- Every node automatically receives the outputs of the nodes it depends on. Set the definition\'s "goal" to the overall objective and tell each node what to produce.',
     '- start returns at once. Do not poll: when the run settles you get a summary with every node\'s output. Verify it, then use retry, amend or a follow-up run for anything missing.',
-  ].join('\n')
+  ]
+  if (!interactive) lines.push('- Non-interactive session: do not ask the user (no AskUserQuestion, no clarifying questions); decide, and record every assumption in the definition\'s goal and in the node prompts.')
+  return lines.join('\n')
 }
