@@ -1,0 +1,54 @@
+# A minimal valid DAG definition: two parallel producers and one verification node that depends on both.
+# It passes `bun eval/check-definition.ts eval/fixtures/valid-definition.yaml` with zero warnings.
+key: fixture-valid-definition
+name: Valid definition fixture
+goal: Two notes files are written in parallel and then checked together.
+nodes:
+  - id: notes-alpha
+    label: Write the alpha notes
+    category: quick
+    writes:
+      - scratch/notes-alpha.md
+    verify:
+      - kind: file
+        path: scratch/notes-alpha.md
+        contains: alpha
+    prompt: |
+      TASK: Write scratch/notes-alpha.md as a short Markdown note that contains the word alpha.
+      DELIVERABLE: scratch/notes-alpha.md with a heading and at least two lines of text.
+      SCOPE: Write only scratch/notes-alpha.md. Do not edit any other file.
+      VERIFY: Read the file back and confirm that it contains the word alpha.
+      STOP WHEN: the file exists and contains the word alpha. In ## Output give the file path.
+  - id: notes-beta
+    label: Write the beta notes
+    category: quick
+    writes:
+      - scratch/notes-beta.md
+    verify:
+      - kind: file
+        path: scratch/notes-beta.md
+        contains: beta
+    prompt: |
+      TASK: Write scratch/notes-beta.md as a short Markdown note that contains the word beta.
+      DELIVERABLE: scratch/notes-beta.md with a heading and at least two lines of text.
+      SCOPE: Write only scratch/notes-beta.md. Do not edit any other file.
+      VERIFY: Read the file back and confirm that it contains the word beta.
+      STOP WHEN: the file exists and contains the word beta. In ## Output give the file path.
+  - id: verify
+    label: Verify both notes files
+    category: unspecified-low
+    dependsOn:
+      - notes-alpha
+      - notes-beta
+    writes:
+      - scratch/verify-notes.md
+    verify:
+      - kind: file
+        path: scratch/verify-notes.md
+        contains: notes-beta.md
+    prompt: |
+      TASK: Read scratch/notes-alpha.md and scratch/notes-beta.md and judge whether each one contains its own marker word (alpha, beta).
+      DELIVERABLE: scratch/verify-notes.md holding one line per file with PASS or FAIL and a one-line reason.
+      SCOPE: Read the two notes files. Write only scratch/verify-notes.md. Do not edit the notes files.
+      VERIFY: Re-read scratch/verify-notes.md and confirm that it has one verdict line per notes file.
+      STOP WHEN: the verdict file is written. In ## Output give the verdict for each file.
