@@ -1,4 +1,4 @@
-import type { Definition, NodeDef } from './types.ts'
+import type { Definition, NodeDef, VerificationCheck } from './types.ts'
 
 const VERIFICATION_WORDS = /verif|validat|check|test|review|audit/i
 
@@ -37,6 +37,34 @@ function namedSections(prompt: string): string[] {
   return [...new Set(names.filter(name => name !== '' && name !== 'output'))]
 }
 
+// Vacuous verify checks pass without proving the deliverable is right.
+// V1: a file check without contains. V2: a command that always passes. V3: a command that only tests that a path exists.
+const ALWAYS_PASSING_PROGRAMS = new Set(['true', ':', 'echo', 'printf', 'exit', 'yes', 'sleep']) // V2
+const EXISTENCE_ONLY_PROGRAMS = new Set(['ls', 'stat', 'cat']) // V3
+const EXISTENCE_TEST_PROGRAMS = new Set(['test', '[']) // V3
+const EXISTENCE_TEST_FLAGS = new Set(['-e', '-f', '-d', '-s']) // V3
+
+function programName(argv: string[]): string {
+  return (argv[0] ?? '').split(/[\\/]/).pop() ?? ''
+}
+
+// V3: test or [ whose dash arguments are all bare existence flags; any other operator or no flag at all is a real test.
+function isExistenceTest(argv: string[]): boolean {
+  if (!EXISTENCE_TEST_PROGRAMS.has(programName(argv))) return false
+  const flags = argv.slice(1).filter(arg => arg.startsWith('-'))
+  return flags.length > 0 && flags.every(flag => EXISTENCE_TEST_FLAGS.has(flag))
+}
+
+function vacuousReason(check: VerificationCheck): string | undefined {
+  if (check.kind === 'file') {
+    return check.contains ? undefined : 'is a file check without contains, so it only proves the file exists (touch passes it)'
+  }
+  const program = programName(check.argv)
+  if (ALWAYS_PASSING_PROGRAMS.has(program)) return `runs ${program}, which always passes`
+  if (EXISTENCE_ONLY_PROGRAMS.has(program) || isExistenceTest(check.argv)) return 'only tests that a path exists'
+  return undefined
+}
+
 export function lintDefinition(definition: Definition): string[] {
   const warnings: string[] = []
   for (const node of definition.nodes) {
@@ -57,6 +85,15 @@ export function lintDefinition(definition: Definition): string[] {
       if (isBlockedReportPath(path)) {
         warnings.push(`node "${node.id}": "${path}" is named like a report, and Claude Code 2.1.288 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${node.id}-notes.md or return the text in ## Output.`)
       }
+    }
+  }
+  for (const node of definition.nodes) {
+    const clauses = (node.verify ?? []).flatMap((check, index) => {
+      const reason = vacuousReason(check)
+      return reason === undefined ? [] : [`check ${index + 1} ${reason}`]
+    })
+    if (clauses.length > 0) {
+      warnings.push(`node "${node.id}": vacuous verify - ${clauses.join('; ')} - declare a file check with nonempty contains text, or a command that exits nonzero when the deliverable is wrong.`)
     }
   }
   const producers = definition.nodes.filter(node => !isVerificationNode(node))

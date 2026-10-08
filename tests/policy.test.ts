@@ -140,11 +140,11 @@ test('the lint warns about verify paths and writes the host refuses for subagent
     return r.value
   }
   const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
-  const blocked = lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'REPORT.md' }] }]))
+  const blocked = lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'REPORT.md', contains: 'ok' }] }]))
   expect(blocked).toHaveLength(1)
   expect(blocked[0]).toContain('node "one"')
   expect(blocked[0]).toContain('"REPORT.md"')
-  expect(lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'notes/docs-audit.md' }] }]))).toEqual([])
+  expect(lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'notes/docs-audit.md', contains: 'ok' }] }]))).toEqual([])
   const written = lintDefinition(def([{ id: 'one', prompt: full, writes: ['out/summary-final.md'] }]))
   expect(written).toHaveLength(1)
   expect(written[0]).toContain('"out/summary-final.md"')
@@ -156,7 +156,7 @@ const underSplitDef = (nodes: unknown[]) => {
   return r.value
 }
 const contract = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
-const fileCheck = (path: string) => ({ kind: 'file', path })
+const fileCheck = (path: string) => ({ kind: 'file', path, contains: 'ok' })
 const lane = (id: string, writes: string[], extra: Record<string, unknown> = {}) => ({
   id,
   category: 'quick',

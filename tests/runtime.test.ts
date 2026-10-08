@@ -3,7 +3,7 @@ import { holdWhileActive } from '../hooks/register.ts'
 
 const TOOL = 'mcp__dag-workflow__dag'
 const RUNS = '/work/.claude/dag/runs'
-const VERIFY = [{ kind: 'command', argv: ['test', '-d', '/work'] }]
+const VERIFY = [{ kind: 'command', argv: ['check-control'] }]
 
 const FAN_IN = {
   key: 'fan-in',
