@@ -23,6 +23,7 @@ type TranscriptReport = ToolResultCounts & {
   path?: string
   skillBeforeStart: boolean | null
   starts: number
+  askUserQuestions: number
 }
 
 const NO_COUNTS: ToolResultCounts = { planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 }
@@ -76,14 +77,15 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
       files.push({ path, mtime: (await Bun.file(path).stat()).mtimeMs })
     }
   } catch {
-    return { skillBeforeStart: null, starts: 0, ...NO_COUNTS }
+    return { skillBeforeStart: null, starts: 0, askUserQuestions: 0, ...NO_COUNTS }
   }
   const newest = files.sort((a, b) => b.mtime - a.mtime)[0]
-  if (!newest) return { skillBeforeStart: null, starts: 0, ...NO_COUNTS }
+  if (!newest) return { skillBeforeStart: null, starts: 0, askUserQuestions: 0, ...NO_COUNTS }
   let index = 0
   let skillAt = -1
   let firstStartAt = -1
   let starts = 0
+  let askUserQuestions = 0
   const toolNames = new Map<string, string>()
   const results: ToolResult[] = []
   for (const line of (await Bun.file(newest.path).text()).split('\n')) {
@@ -93,6 +95,7 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
     for (const block of row.message.content as { type: string; id?: string; name?: string; input?: Record<string, unknown>; content?: unknown; tool_use_id?: string; is_error?: boolean }[]) {
       if (block.type === 'tool_use' && block.id && block.name) toolNames.set(block.id, block.name)
       index += 1
+      if (block.type === 'tool_use' && block.name === 'AskUserQuestion') askUserQuestions += 1
       if (block.type === 'tool_use' && block.name === 'Skill' && String(block.input?.skill ?? '').endsWith('dag-planning') && skillAt < 0) skillAt = index
       if (block.type === 'tool_use' && block.name === 'mcp__dag-workflow__dag' && block.input?.action === 'start') {
         starts += 1
@@ -103,7 +106,7 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
       }
     }
   }
-  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, ...classifyToolResults(results) }
+  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, askUserQuestions, ...classifyToolResults(results) }
 }
 
 async function runScenario(scenario: Scenario, root: string, options: Options): Promise<ScenarioResult> {
@@ -182,7 +185,7 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
       .map(n => `${n.id}:${n.state}${n.error ? ` (${n.error.slice(0, 60)})` : ''}`)
       .join('; ')
     const totals = r.runs.reduce((sum, run) => ({ verified: sum.verified + run.verificationTotals.verifiedNodes, nodes: sum.nodes + run.nodeVerification.length, retries: sum.retries + run.verificationTotals.autoRetries }), { verified: 0, nodes: 0, retries: 0 })
-    return `| ${r.id} | ${r.expect} | ${r.runs.length} | ${shape} | ${main?.nodes ?? '-'} | ${main?.depth ?? '-'} | ${widths || '-'} | ${main?.fanInNodes ?? '-'} | ${main?.verify ?? '-'} | ${main?.warnings ?? '-'} | ${categories || '-'} | ${status} | ${r.check.passed && r.unchangedOk ? 'PASS' : 'FAIL'} | ${r.transcript.skillBeforeStart} | ${r.transcript.planningRefusals}/${r.transcript.toolDenials} | ${r.transcript.verificationRequired}/${r.transcript.invalidVerification} | ${totals.verified}/${totals.nodes} | ${totals.retries} | ${problems || '-'} | ${r.seconds}s |`
+    return `| ${r.id} | ${r.expect} | ${r.runs.length} | ${shape} | ${main?.nodes ?? '-'} | ${main?.depth ?? '-'} | ${widths || '-'} | ${main?.fanInNodes ?? '-'} | ${main?.verify ?? '-'} | ${main?.warnings ?? '-'} | ${categories || '-'} | ${status} | ${r.check.passed && r.unchangedOk ? 'PASS' : 'FAIL'} | ${r.transcript.skillBeforeStart} | ${r.transcript.planningRefusals}/${r.transcript.toolDenials} | ${r.transcript.askUserQuestions} | ${r.transcript.verificationRequired}/${r.transcript.invalidVerification} | ${totals.verified}/${totals.nodes} | ${totals.retries} | ${problems || '-'} | ${r.seconds}s |`
   })
   const all = results.flatMap(r => r.runs)
   const sum = (pick: (t: VerificationTotals) => number) => all.reduce((n, run) => n + pick(run.verificationTotals), 0)
@@ -197,8 +200,8 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
     '',
     verifySummary,
     '',
-    '| scenario | expected | runs | shape | nodes | depth | layer widths | fan-in nodes | verify node | warnings | categories | status | outcome check | skill before start | refusals (planning/tools) | verify refusals (required/invalid) | verified/total nodes | auto retries | unfinished nodes | time |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| scenario | expected | runs | shape | nodes | depth | layer widths | fan-in nodes | verify node | warnings | categories | status | outcome check | skill before start | refusals (planning/tools) | AskUserQuestion calls | verify refusals (required/invalid) | verified/total nodes | auto retries | unfinished nodes | time |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...rows,
     '',
   ].join('\n')
