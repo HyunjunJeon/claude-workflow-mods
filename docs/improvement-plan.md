@@ -150,12 +150,13 @@ P3a는 P1 이후 언제든 가능하다(다른 파일). P3b는 `lint.ts`를 같�
 | B5 | 노드·실행별 토큰 사용량(`turn.complete`의 usage)을 패널·요약에 표시 | API 조사 | 0.5–1일 |
 | B6 | `claude -p` 세션이 DAG 실행이 끝나기 전에 종료됨. P0 기준선에서 debug-fix(`fix-average` running)와 research-write(`audit` scheduled)가 실행 상태 running인 채 exit 0으로 끝남(시간 초과 아님). `holdUntilSettled`(hooks/register.ts) 경로를 `bun eval/run.ts --only debug-fix,research-write --keep`로 재현해 진단 run 다음 수정 run으로 처리 | P0 기준선 | 진단 0.5일 |
 | B7 | 사용자가 `report.md`처럼 호스트가 노드 Write를 거부하는 이름(REPORT*, SUMMARY*, FINDINGS*, ANALYSIS*)을 직접 요구하면 그 노드가 실패함(pipeline-stats: report 노드 실패, 검증 2/4). 현재 lint는 이름을 바꾸라고만 안내함. 이름을 바꿀 수 없을 때의 안내(예: Bash로 쓰기)와 eval 시나리오 산출물 이름을 함께 정한다 | P0 기준선 | 0.5일 |
+| B8 | dag 도구 `start`가 정의 파일 경로도 받게 한다. 지금은 모델이 `flows/` 정의를 실행하려면 YAML 전체를 JSON으로 다시 입력해야 하고(`/dag run`은 사용자 전용), 긴 정의일수록 전사 오류 위험이 커짐 | P0·P1 dogfooding | 0.5일 |
 
 ## 진행 기록
 
 | Phase | 상태 | 날짜 | 메모 |
 | --- | --- | --- | --- |
 | P0 | 완료 | 2026-10-08 | run dag_muz6qs3k_8pxkky: 8개 시나리오 중 6/8 형태 일치, 검증 27/31 노드, 기준선 eval/baselines/p0-baseline.md |
-| P1 | 대기 | | |
+| P1 | 완료 | 2026-10-08 | dag_muz7a22o_p3oq3l - V1-V3 경고 lint, tests/lint.test.ts, 감사 통과(312 pass, 0 fail) |
 | P2 | 대기 | | |
 | P3 | 대기 | | |
