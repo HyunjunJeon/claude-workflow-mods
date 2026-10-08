@@ -1,0 +1,338 @@
+# Implements "Phase 3 - 시작 전 정렬: 인터뷰·PM" (items 3a-3e) of docs/improvement-plan.md.
+# Run it AFTER Phase 1 (docs/improvement-plan.md, section "순서"): the goal-lint node edits hooks/engine/lint.ts and
+# extends tests/lint.test.ts, which Phase 1 creates; if that file is missing the node fails on purpose.
+# Run it with:  /dag run flows/improvement/p3-alignment.yaml
+# Re-running after a run has settled needs a new key (for example improve-p3-alignment-2):
+# the same key with the same definition returns the existing run and schedules nothing.
+# Do not /reload-plugins while this run is active (decision D1): the installed plugin reads this folder directly.
+#
+# Run plan (components -> waves):
+#   components: protocol flag (3a), eval metric (3a), goal-missing lint (3b), dag-interview skill (3c), dag-pm skill (3d),
+#               dag-planning alignment step (3e), README, then the audit and the progress row.
+#   wave 1: protocol-flag, eval-ask-count, skill-interview, skill-pm, planning-alignment   (five lanes, disjoint writes)
+#   wave 2: goal-lint, after protocol-flag only to serialize tests/policy.test.ts; its new warning also breaks goal-less
+#           fixtures in tests/policy.test.ts, tests/runtime.test.ts and tests/shape.test.ts, so it owns those test edits
+#   wave 3: readme, which documents the output of all six lanes
+#   wave 4: final-audit, which depends on all seven producers
+#   wave 5: progress-log
+# Categories: quick for the two small code lanes and the progress row; writing for the three skill files and the README (prose);
+# unspecified-low for goal-lint (judgment about which existing tests to repair) and for the final audit (it judges seven inputs).
+# Assumptions beyond the plan: the skill files credit their sources inline (THIRD_PARTY_NOTICES.md belongs to Phase 2);
+# the "eval 8 scenarios show AskUserQuestion 0" criterion and the tmux interview check are NOT part of this run.
+key: improve-p3-alignment-1
+name: Improvement P3 - alignment before start
+goal: >
+  Phase 3 of docs/improvement-plan.md is implemented in the repository: the protocol injected on every prompt tells a
+  non-interactive session not to ask the user, eval/run.ts reports AskUserQuestion calls per scenario, lintDefinition warns
+  when a definition has no goal, the user-invoked skills dag-interview and dag-pm exist, dag-planning has a light alignment
+  step, README.md documents all of it, and an independent audit confirms every item against the files while the manual tmux
+  interview check stays open.
+nodes:
+  - id: protocol-flag
+    label: Add the non-interactive protocol flag
+    category: quick
+    writes:
+      - hooks/engine/policy.ts
+      - hooks/register.ts
+      - tests/policy.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/policy.ts
+        contains: "Non-interactive session: do not ask the user"
+      - kind: file
+        path: hooks/register.ts
+        contains: "protocolFor(enforcement, interactive)"
+      - kind: file
+        path: tests/policy.test.ts
+        contains: "Non-interactive session: do not ask the user"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+    prompt: |
+      TASK: Make protocolFor in hooks/engine/policy.ts take the session's interactivity, tell a non-interactive session not to ask the user, and pass the flag from the prompt.submit hook in hooks/register.ts.
+      DELIVERABLE: Three edited files.
+      (1) hooks/engine/policy.ts: change `export function protocolFor(level: Enforcement): string` (about line 276) to `protocolFor(level: Enforcement, interactive = true): string`. When interactive is false, add exactly one more line at the END of the returned lines: `- Non-interactive session: do not ask the user (no AskUserQuestion, no clarifying questions); decide, and record every assumption in the definition's goal and in the node prompts.` When interactive is true the returned text must stay byte for byte what it is today. Escape the apostrophe of "definition's" the way the neighbouring lines in that function do.
+      (2) hooks/register.ts: the prompt.submit hook (about line 1716) calls `protocolFor(enforcement)`; change it to `protocolFor(enforcement, interactive)`. The module variable `interactive` (declared about line 90) is already set from `e.isInteractive` in the session.start hook (about line 1544); do not change how it is set.
+      (3) tests/policy.test.ts: next to the test 'the injected protocol states the rule for each enforcement level', add a test (or extend it) proving, for each of strict and guide, that protocolFor(level, false) contains 'Non-interactive session: do not ask the user' and 'record every assumption', that protocolFor(level, true) equals protocolFor(level), and that neither of those two contains 'Non-interactive session'.
+      In ## Output give: the new signature, the exact sentence you added, the names of the tests you added or changed, and the pass count of the plugin test run.
+      SCOPE: Read the repository. Write ONLY hooks/engine/policy.ts, hooks/register.ts and tests/policy.test.ts; other uncommitted edits already present in those files belong to earlier work and must stay as they are. OUT of scope: hooks/engine/lint.ts and every other tests/ file (the goal-lint node owns them), eval/, skills/, README.md. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` (the `command` prefix bypasses a shell alias): exit code 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`: exit code 0 (a cold start can take over a minute, which is why the plugin's own check does not run it).
+      STOP WHEN: both commands exit 0 and the three files hold the changes above.
+
+  - id: eval-ask-count
+    label: Count AskUserQuestion calls in the eval runner
+    category: quick
+    writes:
+      - eval/run.ts
+    verify:
+      - kind: file
+        path: eval/run.ts
+        contains: askUserQuestions
+      - kind: file
+        path: eval/run.ts
+        contains: AskUserQuestion calls
+      - kind: command
+        argv: [bun, eval/run.ts, --list]
+    prompt: |
+      TASK: Add a per-scenario AskUserQuestion call count to the eval runner eval/run.ts, read from the session transcript the runner already parses.
+      DELIVERABLE: An edited eval/run.ts.
+      (1) In readTranscript(), count every `tool_use` content block whose name is `AskUserQuestion`. The loop already skips rows with isSidechain, so only main-conversation calls are counted. Keep the counter next to the existing `starts` counter.
+      (2) Add `askUserQuestions: number` to the TranscriptReport type and return it from all three return statements of readTranscript: the two early returns that find no transcript use 0, the final one uses the counter.
+      (3) In markdown(), add one column titled `AskUserQuestion calls` directly after the column `refusals (planning/tools)` in all three places: the header row, the `| --- |` separator row (one more `---`) and the row template (`${r.transcript.askUserQuestions}`). The header, the separator and every row must end up with the same number of cells, the old count plus one.
+      In ## Output give the line numbers you changed and confirm the column position and the cell count.
+      SCOPE: Read the repository. Write ONLY eval/run.ts. OUT of scope: eval/report.ts, eval/shape.ts, eval/scenarios.ts and every tests/ file. Never commit, push, install or reload plugins. Never run `bun eval/run.ts` without --list: a real run spends the user's account usage.
+      VERIFY: Run `bun eval/run.ts --list`: it prints the scenarios and exits 0. Run `bunx -p typescript@5 tsc -p . --noEmit`: exit code 0 (a cold start can take over a minute). Read the header, the separator and the row template back and count their cells.
+      STOP WHEN: the three edits exist, `bun eval/run.ts --list` exits 0 and the three cell counts match.
+
+  - id: skill-interview
+    label: Write the dag-interview skill
+    category: writing
+    writes:
+      - skills/dag-interview/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-interview/SKILL.md
+        contains: "disable-model-invocation: true"
+      - kind: file
+        path: skills/dag-interview/SKILL.md
+        contains: "name: dag-interview"
+      - kind: file
+        path: skills/dag-interview/SKILL.md
+        contains: "## Design-tree rounds"
+      - kind: file
+        path: skills/dag-interview/SKILL.md
+        contains: "## Facts and decisions"
+      - kind: file
+        path: skills/dag-interview/SKILL.md
+        contains: "## Restate gate"
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Write the user-invoked skill skills/dag-interview/SKILL.md, a requirements interview that runs in the main conversation before a DAG is planned.
+      DELIVERABLE: One new file, at most about 130 lines of English Markdown, starting with this frontmatter (the description must not contain a colon followed by a space):
+      ---
+      name: dag-interview
+      description: <one sentence: user-invoked only; aligns on a vague request through rounds of numbered questions with recommended answers before a DAG is planned, and ends with a confirmed goal and acceptance criteria>
+      disable-model-invocation: true
+      argument-hint: "[topic or request]"
+      ---
+      Body, in this order:
+      (a) A short opening: the user starts it with `/dag-workflow:dag-interview [topic]`; the model never invokes it on its own. It runs under strict enforcement, where the main conversation may use AskUserQuestion, Read, LSP, read-only Bash (ls, cat, rg, find without -exec or -delete, git status|log|diff|show) and the dag tool, and may NEVER use Agent, Write, Edit or mutating Bash. The skill therefore asks through AskUserQuestion, finds facts by reading, and writes no file. If the request is already clear, say so in one sentence and go straight to the dag-planning skill; the skill does not apply in a non-interactive session.
+      (b) a second-level heading `## Design-tree rounds`. Map the request as a design tree: every decision branches into the decisions that hang off it. The frontier is every decision whose prerequisites are already settled, that is, the questions you can ask now without guessing answers you have not heard. Ask the whole frontier in one round. Number the questions Q1, Q2 and so on, give each a short title, a body and your recommended answer, and word each so that a plain "yes" accepts the recommendation. In AskUserQuestion put the recommended answer first and mark it "(Recommended)". One AskUserQuestion call takes at most 4 questions: when the frontier is larger, ask the 4 with the most downstream branches first and continue with the rest in the next call. Each round of answers reshapes the tree: recompute the frontier before the next round. A question whose answer depends on another question still open belongs to a later round.
+      (c) `## Ambiguity tracks`. Keep four tracks visible in a compact ledger (a Markdown table: track, settled, still open) that you print at the start of every round: scope, constraints, deliverables, verification. Do not let the interview collapse onto one track; when the last two rounds touched a single track, take the next questions from the least-covered track.
+      (d) `## Facts and decisions`. Finding facts is your job, never the user's: use Read, LSP and read-only Bash (rg, ls, git log). "The project uses X" is a fact; "the new feature should use X" is a decision. When a fact is too big for reading yourself (a survey of many files, long histories), run a one-node read-only DAG: load the dag-workflow:dag-planning skill first (start is refused until you do), then start one node that only reads and reports its findings in ## Output, writing nothing but one notes file such as notes/<topic>-facts.md with a verify check that file contains "## Facts". Do not block on it and do not poll: ask the rest of the frontier now, because only the questions downstream of that fact wait, and the run-settled message delivers the output. Decisions (goals, scope, priorities, trade-offs, acceptance criteria, desired behaviour of new work) go to the user. A question that mixes a fact with a judgment goes to the user whole, with the fact shown. If your last 3 answers in a row came from reading rather than from the user, the next question goes to the user. When in doubt, ask.
+      (e) `## Refine`. Keep the user's words and your reading apart. When a free-text answer carries scope, a constraint or a decision, restate it as `Decision (user-stated): ...`, `Constraints (user-stated): ...`, and a separate `My reading: ...` for anything you inferred, then confirm with one AskUserQuestion (options such as "Correct as written", "Fix my reading", "Add a constraint", "Let me restate it") before treating the answer as settled. A plain option pick or a bare yes/no needs no Refine. Never label your own inference as user-stated.
+      (f) `## Restate gate`. The interview ends when the frontier is empty and nothing is silently assumed. Then restate (1) the goal as ONE sentence that a stranger reading only that line would turn into the same outcome and (2) a numbered list of observable acceptance criteria, and ask for confirmation with AskUserQuestion (options "Yes, plan it", "Adjust wording", "Missing scope"); any correction goes through Refine again. Only after "Yes": load the dag-workflow:dag-planning skill and hand off. The goal sentence becomes `definition.goal`, every acceptance criterion becomes a `verify` candidate (a file check with `contains`, or a command that can fail), and user-stated constraints go into the node SCOPE lines. Never call start before the user confirms.
+      (g) A last line: "Doctrine adapted from the grilling skill of mattpocock/skills and the interview skill of Q00/ouroboros (both MIT). No MCP tooling from either is used."
+      Sources, optional: `gh api repos/mattpocock/skills/contents/skills/productivity/grilling/SKILL.md --jq .content | base64 -d` and `gh api repos/Q00/ouroboros/contents/skills/interview/SKILL.md --jq .content | base64 -d` (retry once on a 404). Take ONLY the doctrine listed above. Leave out everything about ouroboros MCP tools, lanes, fanout ids, submit calls, seeds, version checks and subagent fan-out.
+      In ## Output give the file path, the list of second-level headings, and one line on how the skill hands off to dag-planning.
+      SCOPE: Read the repository and the two sources. Write ONLY skills/dag-interview/SKILL.md. OUT of scope: skills/dag-pm/, skills/dag-planning/ and README.md (other nodes own them). Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin validate .`: exit code 0 (warnings are fine). Re-read the file and confirm that the frontmatter has `disable-model-invocation: true` and that the five headings Design-tree rounds, Ambiguity tracks, Facts and decisions, Refine and Restate gate exist.
+      STOP WHEN: the file exists with that frontmatter and the five headings, and the validate command exits 0.
+
+  - id: skill-pm
+    label: Write the dag-pm skill
+    category: writing
+    writes:
+      - skills/dag-pm/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-pm/SKILL.md
+        contains: "disable-model-invocation: true"
+      - kind: file
+        path: skills/dag-pm/SKILL.md
+        contains: "name: dag-pm"
+      - kind: file
+        path: skills/dag-pm/SKILL.md
+        contains: "## Question classes"
+      - kind: file
+        path: skills/dag-pm/SKILL.md
+        contains: "write-prd"
+      - kind: file
+        path: skills/dag-pm/SKILL.md
+        contains: "## Open items"
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Write the user-invoked skill skills/dag-pm/SKILL.md, a product-requirements interview whose PRD file is written by a one-node DAG.
+      DELIVERABLE: One new file, at most about 110 lines of English Markdown, starting with this frontmatter (the description must not contain a colon followed by a space):
+      ---
+      name: dag-pm
+      description: <one sentence: user-invoked only; interviews the user as product owner, sorts every question into product decision, technical decision or unknown, and has a one-node DAG write the PRD>
+      disable-model-invocation: true
+      argument-hint: "[product idea]"
+      ---
+      Body, in this order:
+      (a) A short opening: the user starts it with `/dag-workflow:dag-pm [idea]`; the model never invokes it on its own. The user is the product owner, so the questions are about what and why, not how. It runs under strict enforcement, where the main conversation may use AskUserQuestion, Read, LSP, read-only Bash and the dag tool, and may NEVER use Agent, Write, Edit or mutating Bash. Facts about the existing product or code are found by reading, not asked. Run the rounds the way `/dag-workflow:dag-interview` does: numbered questions, a recommended answer on each, at most 4 questions per AskUserQuestion call.
+      (b) a second-level heading `## Question classes`. Classify every question BEFORE asking it, into exactly one of three classes. Product decision (who the users are, the problem, scope, priorities, success measures, user-visible behaviour): ask the user. Technical decision (stack, architecture, libraries, data model, implementation approach): do not ask the product owner; defer it to the development phase and record it under "Deferred to development". Unknown (the user does not know, it depends on someone else, or it cannot be decided now): record it as an open item. Offer a "Decide later" option on every product question, and treat that choice as an unknown. Never present an unknown as a confirmed requirement.
+      (c) `## Confirm before writing`. When no product question is left, show three lists (decided product decisions, deferred technical decisions, open items) plus a one-sentence product goal, and confirm them with one AskUserQuestion before anything is written.
+      (d) `## Writing the PRD`. The main conversation cannot write files, so a one-node DAG does it. Load the dag-workflow:dag-planning skill first (start is refused until you do), then start a definition with a one-sentence goal and ONE node: id `write-prd`, category `writing`, writes `docs/prd/<slug>.md` (ask the user for another path if they want one), a self-contained prompt that pastes every confirmed answer, and verify checks that the file contains `## Open items` and `## Goals`. The PRD sections are: Problem, Users, Goals, Scope (in and out), Requirements, Success criteria, Deferred to development, Open items. The node writes `## Open items` even when it holds only "None", so the check is meaningful. When the run settles, Read the file, show the user its path and the open items, and suggest `/dag-workflow:dag-interview` or normal planning as the next step. Do not write the PRD yourself and do not try to spawn an agent.
+      (e) A last line: "Doctrine adapted from the pm skill of Q00/ouroboros (MIT): the three question classes and the open-items list. No MCP tooling is used."
+      Source, optional: `gh api repos/Q00/ouroboros/contents/skills/pm/SKILL.md --jq .content | base64 -d` (retry once on a 404). Take ONLY the doctrine listed above: the classification of questions into product, technical and decide-later, and the open-items idea. Leave out everything about ouroboros MCP tools, fan-out lanes, evidence blocks, submit calls, version checks, clipboard copying and seed handoff.
+      In ## Output give the file path, the list of second-level headings, and the exact write-prd node fields the skill prescribes (id, category, writes, verify).
+      SCOPE: Read the repository and the source. Write ONLY skills/dag-pm/SKILL.md. OUT of scope: skills/dag-interview/, skills/dag-planning/ and README.md (other nodes own them). Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin validate .`: exit code 0 (warnings are fine). Re-read the file and confirm the frontmatter has `disable-model-invocation: true` and that the headings Question classes, Confirm before writing and Writing the PRD exist, and that `write-prd` and `## Open items` appear.
+      STOP WHEN: the file exists with that frontmatter, those headings and strings, and the validate command exits 0.
+
+  - id: planning-alignment
+    label: Add the alignment step to dag-planning
+    category: writing
+    writes:
+      - skills/dag-planning/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-planning/SKILL.md
+        contains: "## Alignment"
+      - kind: file
+        path: skills/dag-planning/SKILL.md
+        contains: dag-interview
+      - kind: file
+        path: skills/dag-planning/SKILL.md
+        contains: non-interactive
+    prompt: |
+      TASK: Add a light alignment step to skills/dag-planning/SKILL.md.
+      DELIVERABLE: One new second-level section `## Alignment` in skills/dag-planning/SKILL.md, inserted directly after the section `## Planning - MANDATORY first step` and before `## The shape`, at most about 14 lines, saying in this spirit:
+      - After reading the reference and before writing the run plan, ask ONE round of questions, and only when the deliverable kind (for example a CLI versus a document), the scope (which files or components are in or out) or the acceptance criteria (what observable result counts as done) is genuinely ambiguous and Read or rg cannot settle it. If nothing is ambiguous, skip the round silently and plan.
+      - The round is a single AskUserQuestion call with at most 4 numbered questions, each with a recommended answer as the first option so a plain yes accepts it. Facts are looked up, never asked.
+      - In a non-interactive session (the injected protocol says so) skip the round entirely: decide, and write every assumption into `definition.goal` and the node prompts.
+      - When the request is large and vague, one line may suggest the user-invoked skills `/dag-workflow:dag-interview` (multi-round interview) and `/dag-workflow:dag-pm` (PRD interview); they are user-invoked only, so never try to invoke them.
+      - After the answers, the confirmed goal goes into `definition.goal` and the acceptance criteria into `verify`.
+      Edit the file in place with the Edit tool: other sections, and any earlier edits of this file by other phases, stay exactly as they are. In ## Output give the exact heading and the line range of the new section.
+      SCOPE: Read the repository. Write ONLY skills/dag-planning/SKILL.md. OUT of scope: skills/dag-planning/references/planning.md, skills/dag-interview/, skills/dag-pm/ and README.md. Never commit, push, install or reload plugins.
+      VERIFY: Run `grep -n "^## " skills/dag-planning/SKILL.md` and confirm that `## Alignment` sits between `## Planning - MANDATORY first step` and `## The shape`. Run `grep -c "non-interactive" skills/dag-planning/SKILL.md` and confirm it is at least 1.
+      STOP WHEN: the section exists at that position and mentions the one-round limit, the non-interactive skip and both user-invoked skills.
+
+  - id: goal-lint
+    label: Warn when a definition has no goal
+    category: unspecified-low
+    dependsOn:
+      - protocol-flag
+    writes:
+      - hooks/engine/lint.ts
+      - tests/lint.test.ts
+      - tests/policy.test.ts
+      - tests/runtime.test.ts
+      - tests/shape.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/lint.ts
+        contains: the definition has no goal
+      - kind: file
+        path: tests/lint.test.ts
+        contains: the definition has no goal
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bun, eval/check-definition.ts, eval/fixtures/valid-definition.yaml]
+    prompt: |
+      TASK: Make lintDefinition in hooks/engine/lint.ts warn when the definition has no goal, add tests for it in tests/lint.test.ts, and repair the existing tests that the new warning breaks.
+      DELIVERABLE: (1) hooks/engine/lint.ts: as the LAST step of lintDefinition, immediately before `return warnings`, push exactly this warning when `definition.goal` is missing or blank (parseDefinition already trims it): `the definition has no goal - set "goal" to one sentence naming the deliverable and its observable done condition; every node sees it.` Putting it last keeps the indices of the existing warnings unchanged. Rules from Phase 1 that may already be in the file stay as they are.
+      (2) tests/lint.test.ts, which Phase 1 created: add one test that a definition without a goal gets that warning (assert the substring `the definition has no goal`), and one test that the same definition with a goal gets no goal warning. Follow the import style and helpers of the tests already in that file. If tests/lint.test.ts does not exist, Phase 1 has not landed: write nothing and report `DAG_NODE_STATUS: failed: tests/lint.test.ts is missing, run Phase 1 first`.
+      (3) The new warning breaks existing tests whose definitions have no goal. Known suspects: the `def` and `underSplitDef` helpers in tests/policy.test.ts (they build `{ key: 'k', nodes }`), the warnings count of 5 in tests/shape.test.ts, and the FAN_IN and COMPLIANT definitions in tests/runtime.test.ts (warnings.length 4 and an empty warnings list). Run the whole suite, then repair every failure: prefer giving the fixture a `goal` so the test keeps asserting what it asserted before; change an expected count only where the test is about the warning list of a goal-less definition. Keep every other assertion. If another tests/*.test.ts file fails because of the new warning, make the same minimal fix and name that file in ## Output. The upstream node protocol-flag has already finished; keep its edits in tests/policy.test.ts.
+      In ## Output give: the exact warning text, the tests you added, every existing test you repaired (file and test name, one line each), and the pass count of the plugin test run.
+      SCOPE: Read the repository. Write ONLY hooks/engine/lint.ts, tests/lint.test.ts, tests/policy.test.ts, tests/runtime.test.ts and tests/shape.test.ts, plus any other tests/*.test.ts named in point (3). OUT of scope: hooks/register.ts, hooks/engine/policy.ts, eval/, skills/, README.md. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .`: exit code 0 and 0 failing tests. Run `bun eval/check-definition.ts eval/fixtures/valid-definition.yaml`: prints OK (the fixture has a goal). Write a copy of that fixture without its `goal:` line to a temporary file outside the project (mktemp), run `bun eval/check-definition.ts <that file>`: it must print FAIL with the line `warning: the definition has no goal`; delete the temporary file. Run `bunx -p typescript@5 tsc -p . --noEmit`: exit code 0 (a cold start can take over a minute).
+      STOP WHEN: the plugin test run is green, both checker runs behave as stated and the temporary file is gone.
+
+  - id: readme
+    label: Document the skills and the non-interactive behaviour
+    category: writing
+    dependsOn:
+      - protocol-flag
+      - eval-ask-count
+      - goal-lint
+      - skill-interview
+      - skill-pm
+      - planning-alignment
+    writes:
+      - README.md
+    verify:
+      - kind: file
+        path: README.md
+        contains: "/dag-workflow:dag-interview"
+      - kind: file
+        path: README.md
+        contains: "/dag-workflow:dag-pm"
+      - kind: file
+        path: README.md
+        contains: 비대화형
+      - kind: file
+        path: README.md
+        contains: AskUserQuestion calls
+      - kind: file
+        path: README.md
+        contains: goal 누락
+    prompt: |
+      TASK: Document the Phase 3 changes in README.md, in Korean, in the style of the neighbouring sections.
+      DELIVERABLE: Edits to README.md only, based on what the files now say (Read hooks/engine/policy.ts, hooks/engine/lint.ts, eval/run.ts, skills/dag-interview/SKILL.md, skills/dag-pm/SKILL.md and skills/dag-planning/SKILL.md; the upstream outputs are only a guide). Make these edits:
+      (1) Section `## 강제`, item 2 (프로토콜 주입): add one sentence that in a non-interactive session (`isInteractive` false, for example `claude -p`) one more line is appended telling the model not to ask the user and to write its assumptions into the goal and the node prompts. The Korean text must contain the word 비대화형.
+      (2) Section `## 계획 스킬`: add a bullet for the new `## Alignment` step of SKILL.md (one question round only when deliverable kind, scope or acceptance criteria is really ambiguous; skipped when non-interactive). In the sentence that lists the `start` warnings, add the new warning for a definition without a goal, written with the literal words `goal 누락`.
+      (3) Directly after the `## 계획 스킬` section content, add a subsection `### 정렬 스킬: 인터뷰와 PM` describing `/dag-workflow:dag-interview` and `/dag-workflow:dag-pm` (both literal): user-invoked only (`disable-model-invocation`), run in the main conversation under strict enforcement with AskUserQuestion, Read and read-only Bash only. For dag-interview: design-tree rounds with numbered questions and recommended answers (at most 4 per AskUserQuestion call), the four ambiguity tracks, facts versus decisions, the Refine and Restate gates, and the hand-off to dag-planning (goal into `definition.goal`, acceptance criteria into `verify`). For dag-pm: the three question classes (product decision, technical decision, unknown), and that the PRD file is written by a one-node `write-prd` DAG whose verify checks for `## Open items`.
+      (4) Section `## DAG 형태 평가`: document the new eval column named literally `AskUserQuestion calls` (the number of AskUserQuestion tool calls in the main conversation of each scenario; the expected value with the non-interactive protocol is 0), and add that interviews cannot be measured with `claude -p`.
+      Keep every other line of README.md, including edits other phases made, exactly as it is. In ## Output list the sections you changed.
+      SCOPE: Read the repository. Write ONLY README.md. OUT of scope: every other file. Never commit, push, install or reload plugins.
+      VERIFY: Run `grep -n "dag-interview\|dag-pm\|비대화형\|AskUserQuestion calls\|goal 누락" README.md` and confirm that each of the five strings appears. Read each edited passage back and compare it with the code or skill file it describes.
+      STOP WHEN: the four edits exist and all five strings appear in README.md.
+
+  - id: final-audit
+    label: Final audit of Phase 3
+    category: unspecified-low
+    dependsOn:
+      - protocol-flag
+      - eval-ask-count
+      - goal-lint
+      - skill-interview
+      - skill-pm
+      - planning-alignment
+      - readme
+    writes:
+      - flows/improvement/p3-audit-notes.md
+    verify:
+      - kind: file
+        path: flows/improvement/p3-audit-notes.md
+        contains: "Audit: PASS"
+      - kind: file
+        path: flows/improvement/p3-audit-notes.md
+        contains: "Manual tmux interview check: OPEN"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Independently audit Phase 3 (items 3a-3e of docs/improvement-plan.md) against the repository and write the verdict to flows/improvement/p3-audit-notes.md.
+      DELIVERABLE: flows/improvement/p3-audit-notes.md with one verdict line per item below, each with the evidence you saw (command and result, or file and line), followed by the lines `Eval 8 scenarios AskUserQuestion=0 check: NOT RUN (it spends account usage and takes 10-20 minutes)`, `Manual tmux interview check: OPEN` and a final verdict line. Write the exact string `Audit: PASS` ONLY as the final verdict line and only when every item passes; otherwise write `Audit: FAIL` and end your report with `DAG_NODE_STATUS: failed: <what failed>`. The line `Manual tmux interview check: OPEN` is always written, because that check (a vague request, then a question round, then goal confirmation, then start, in a tmux session) is a manual step outside this run.
+      Items and their binary observables (trust the files, not the upstream reports):
+      1. 3a protocol: hooks/engine/policy.ts declares `protocolFor(level: Enforcement, interactive` and hooks/register.ts calls `protocolFor(enforcement, interactive)`. Run `bun -e "import {protocolFor} from './hooks/engine/policy.ts'; console.log(protocolFor('strict', false).includes('Non-interactive session: do not ask the user'), protocolFor('strict').includes('Non-interactive'), protocolFor('strict') === protocolFor('strict', true))"`: it must print `true false true`. tests/policy.test.ts asserts both directions.
+      2. 3a eval metric: eval/run.ts counts `tool_use` blocks named AskUserQuestion on main-conversation rows, carries askUserQuestions in TranscriptReport and in all three return statements of readTranscript, and has the column `AskUserQuestion calls` in the header, the separator and the row template with equal cell counts. `bun eval/run.ts --list` exits 0.
+      3. 3b goal lint: write a temporary copy of eval/fixtures/valid-definition.yaml without its `goal:` line outside the project (mktemp) and run `bun eval/check-definition.ts <copy>`: it must print FAIL with `warning: the definition has no goal`; the original fixture must print OK; delete the copy. tests/lint.test.ts has a positive and a negative test for it.
+      4. 3c skills/dag-interview/SKILL.md: frontmatter has `disable-model-invocation: true`; the headings Design-tree rounds, Ambiguity tracks, Facts and decisions, Refine, Restate gate exist; it names AskUserQuestion with the limit of 4 questions per call, the user-stated versus reading split, the 3-answers-in-a-row rule, and the hand-off to dag-planning (goal to definition.goal, criteria to verify). Run `grep -n -i -E "agent|write|edit" skills/dag-interview/SKILL.md` and confirm every hit forbids those tools for the main conversation or belongs to the one-node DAG, never instructs the main conversation to use them. Run `grep -n -i -E "ouroboros_|fanout|submit_|lane|seed" skills/dag-interview/SKILL.md` and confirm the only hits are in the attribution line.
+      5. 3d skills/dag-pm/SKILL.md: frontmatter has `disable-model-invocation: true`; the three question classes (product decision asked, technical decision deferred, unknown recorded as open item) exist; the PRD is written by a one-node DAG with id write-prd whose verify checks for `## Open items`; the main conversation is never told to Write or spawn an Agent. Apply the same two greps as in item 4.
+      6. 3e skills/dag-planning/SKILL.md: a `## Alignment` section sits before `## The shape`, limits the step to one round and only when deliverable kind, scope or acceptance criteria is really ambiguous, skips it when non-interactive, and points to both user-invoked skills.
+      7. README.md names `/dag-workflow:dag-interview` and `/dag-workflow:dag-pm`, the non-interactive behaviour (비대화형), the eval column `AskUserQuestion calls` and the warning `goal 누락`, and each description matches the file it describes.
+      8. Whole result: `command claude plugin test .` exits 0 with 0 failing tests (record the pass count); `command claude plugin validate .` exits 0; `bunx -p typescript@5 tsc -p . --noEmit` exits 0 (a cold start can take over a minute). Also paste the output of `git status --short` into the notes for the record; it is not a verdict criterion, because the working tree holds uncommitted work from earlier phases.
+      In ## Output give: the verdict per item (PASS or FAIL with a one-line reason), the plugin test pass count, and the tsc and validate results, so the next node can copy a one-line result.
+      SCOPE: Read the whole repository and run the commands above. Write ONLY flows/improvement/p3-audit-notes.md. Do not fix anything you find: report it as FAIL. Never commit, push, install or reload plugins.
+      VERIFY: Re-read the notes file and confirm it holds one verdict per item 1-8 and that `Audit: PASS` appears only if every verdict is PASS.
+      STOP WHEN: the notes file is written and every item has a verdict backed by evidence you ran yourself.
+
+  - id: progress-log
+    label: Update the P3 progress row
+    category: quick
+    dependsOn:
+      - final-audit
+    writes:
+      - docs/improvement-plan.md
+    verify:
+      - kind: file
+        path: docs/improvement-plan.md
+        contains: "| P3 | 완료 |"
+      - kind: file
+        path: docs/improvement-plan.md
+        contains: tmux 수동 점검 미완료
+      - kind: command
+        argv: [grep, -F, "| P3 | 완료 | 20", docs/improvement-plan.md]
+    prompt: |
+      TASK: Update only the P3 row of the table under `## 진행 기록` in docs/improvement-plan.md.
+      DELIVERABLE: Replace the row that starts with `| P3 |` (today `| P3 | 대기 | | |`) by one row of this shape: `| P3 | 완료 | <date> | <run id>: <one-line result>; tmux 수동 점검 미완료 |`. The date is the output of `date +%F`. The run id is the id that starts with `dag_` in the first line of your own instructions ("run dag_..."), or, if you cannot find it, the name of the newest folder in .claude/dag/runs/ (read-only `ls -t .claude/dag/runs | head -1`). The one-line result is copied from the upstream final-audit Output (for example the plugin test pass count and that items 3a-3e passed). The memo must not contain a pipe character, because it would break the table. The rows P0, P1 and P2 and everything else in the file stay exactly as they are.
+      SCOPE: Read docs/improvement-plan.md and the upstream output. Write ONLY the P3 row of docs/improvement-plan.md. Never commit, push, install or reload plugins.
+      VERIFY: Run `grep -n "^| P" docs/improvement-plan.md` and confirm that the P3 row has the shape above, that its date is today's `date +%F`, and that the P0, P1 and P2 rows are unchanged from before your edit.
+      STOP WHEN: the P3 row holds 완료, the date, the run id, the one-line result and the phrase `tmux 수동 점검 미완료`. In ## Output give the new row.

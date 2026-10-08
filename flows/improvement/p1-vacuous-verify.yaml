@@ -1,0 +1,227 @@
+# Implements "Phase 1 - 빈 검증 lint" (rules V1-V3) of docs/improvement-plan.md.
+# Assumed decision D2: the new lint only warns; it never refuses a definition.
+# Run it with:  /dag run flows/improvement/p1-vacuous-verify.yaml
+# Re-running after a run has settled needs a new key (for example improve-p1-vacuous-verify-2):
+# the same key with the same definition returns the existing run and schedules nothing.
+# Run Phase 0 first (docs/improvement-plan.md, section "순서"). Do not /reload-plugins while this run is active (decision D1):
+# the installed plugin reads this folder directly, so the nodes edit hooks/engine/lint.ts under a live plugin.
+# The plan's acceptance 'compare the eval warnings column with the baseline' happens in the eval re-run after Phase 2 (p0-eval-baseline.yaml under a new key), not in this run.
+#
+# Shape: lint-rules -> (readme-doc, planning-doc in parallel) -> final-audit -> progress-log.
+# lint-rules is one node because the change and its tests are one deliverable. The two doc lanes quote its rules, so they follow it.
+# Every verify below already satisfies V1-V3: file checks carry contains, commands are real programs.
+key: improve-p1-vacuous-verify-1
+name: Improvement P1 - vacuous verify lint
+goal: hooks/engine/lint.ts warns once per node about vacuous verify checks (rules V1-V3 of docs/improvement-plan.md Phase 1), tests/lint.test.ts covers each rule with a positive and a negative test, README.md and the dag-planning reference document the rules, and an independent audit confirms all of it against the code.
+nodes:
+  - id: lint-rules
+    label: Implement lint rules V1-V3
+    category: unspecified-low
+    writes:
+      - hooks/engine/lint.ts
+      - tests/lint.test.ts
+      - tests/policy.test.ts
+      - tests/runtime.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/lint.ts
+        contains: vacuous verify
+      - kind: file
+        path: tests/lint.test.ts
+        contains: vacuous verify
+      - kind: command
+        argv:
+          - bun
+          - "-e"
+          - "import { parseDefinition } from './hooks/engine/definition.ts'; import { lintDefinition } from './hooks/engine/lint.ts'; const p = 'TASK: x. DELIVERABLE: y. SCOPE: z. VERIFY: w. STOP WHEN: done.'; const lint = verify => { const r = parseDefinition({ key: 'k', nodes: [{ id: 'n', prompt: p, verify }] }); if (!r.ok) throw new Error(r.error.message); return lintDefinition(r.value) }; const f = (path, contains) => ({ kind: 'file', path, ...(contains ? { contains } : {}) }); const c = (...argv) => ({ kind: 'command', argv }); const bad = lint([f('a.md'), c('true'), f('b.md', 'x'), c('/bin/echo', 'ok'), c('test', '-f', 'a.md'), c('ls', '.'), c('[', '-e', 'a.md', ']')]); const good = lint([f('a.md', 'x'), c('bun', 'test'), c('test', '-n', 'x')]); const need = ['vacuous verify', 'check 1', 'check 2', 'check 4', 'check 5', 'check 6', 'check 7']; const ok = bad.length === 1 && need.every(t => bad[0].includes(t)) && !bad[0].includes('check 3') && good.length === 0; if (!ok) { console.error(JSON.stringify({ bad, good })); process.exit(1) }"
+      - kind: command
+        argv:
+          - claude
+          - plugin
+          - test
+          - .
+      - kind: command
+        argv:
+          - bun
+          - eval/check-definition.ts
+          - flows/improvement/p1-vacuous-verify.yaml
+          - eval/fixtures/valid-definition.yaml
+    prompt: |
+      TASK: Implement the vacuous-verify lint rules V1-V3 as warnings in hooks/engine/lint.ts and cover each rule with a positive and a negative test in the new file tests/lint.test.ts.
+
+      DELIVERABLE:
+      (1) hooks/engine/lint.ts. lintDefinition gains a loop that emits ONE warning per node whose verify list holds at least one vacuous check. Put the loop after the loop that reports host-blocked report names and before the producer under-split warnings. Number a node's checks from 1 by their position in node.verify. A check is vacuous when:
+      - V1: it is a file check without contains. It proves only that the file exists, and touch passes it.
+      - V2: it is a command check whose argv[0], reduced to its basename (the text after the last / or backslash), is exactly one of: true, :, echo, printf, exit, yes, sleep. It always passes.
+      - V3: it is a command check whose argv[0] basename is test or [ and whose arguments that start with a dash are all among -e, -f, -d, -s with at least one such flag present (a bare existence test; any other operator such as -n, -r, -z, -a, or no dash flag at all, makes it NOT vacuous). Also V3: its argv[0] basename is ls, stat or cat (these only prove a path exists, whatever the arguments).
+      Out of scope and NOT to be built: looking inside shell wrappers such as sh -c '...', changing what parseChecks accepts, refusing any definition. Decision D2 of the plan: warnings only.
+      MESSAGE CONTRACT: all vacuous checks of one node go into one warning string. It starts with `node "<id>": vacuous verify - `, then one clause per offending check in check order, joined with `; `. Each clause begins with `check <n>` (the 1-based number) and then the reason: V1 `is a file check without contains, so it only proves the file exists (touch passes it)`, V2 `runs <program>, which always passes` (<program> is the basename), V3 `only tests that a path exists`. The warning ends with ` - declare a file check with nonempty contains text, or a command that exits nonzero when the deliverable is wrong.` Example for a node "build" whose checks 1 and 3 are vacuous: node "build": vacuous verify - check 1 is a file check without contains, so it only proves the file exists (touch passes it); check 3 runs true, which always passes - declare a file check with nonempty contains text, or a command that exits nonzero when the deliverable is wrong.
+      Match the plain lower-case ASCII style of the existing warnings in that file. Keep the rule logic in small named helpers with a short comment naming V1, V2 and V3.
+      (2) tests/lint.test.ts, a NEW file. Import expect and test from 'claude-code/testing', parseDefinition from '../hooks/engine/definition.ts', lintDefinition from '../hooks/engine/lint.ts' and verificationProblem from '../hooks/engine/verification.ts'. Follow the style of the lintDefinition tests in tests/policy.test.ts: a def(nodes) helper that parses and throws on error, a `full` constant holding a prompt with all five contract markers, single-node definitions, top-level test() blocks with no describe nesting (a later phase appends more lint tests to this file, so keep helpers at the top level). Write at least these tests, named so the rule is visible: V1 positive (a file check without contains gives exactly one warning containing `node "x"`, `vacuous verify` and `check 1`), V1 negative (the same check with contains gives []), V2 positive (each of the seven programs plus /bin/true is flagged and the warning names its check number), V2 negative (argv ['bun','test'] and ['git','diff','--check'] give []), V3 positive (test with -e, -f, -d and -s, the bracket form [ -f x ], ls, stat, cat are flagged), V3 negative (['test','-n','x'], ['test','-r','x'], ['grep','-q','x','a.md'] give []). Add one collection test: a node with vacuous checks 1 and 3 and a sound check 2 yields exactly one warning that names check 1 and check 3 but not check 2, a second sound node adds no warning, and verificationProblem(definition) is undefined (warnings only, nothing is refused).
+      (3) Existing fixtures. A prototype showed that the new rules turn exactly these 7 existing tests red because their fixtures use vacuous checks: in tests/policy.test.ts 'the lint warns about verify paths and writes the host refuses for subagents', 'a change with its own tests and docs stays one node without an under-split warning', 'the lint warns when one producer owns several independent files', 'the lint warns when the only producer writes several named sections', 'the under-split lints stay silent on every expected scenario shape'; in tests/runtime.test.ts 'guide mode and the user's /dag run start without the skill; guide reminds through a warning' and 'start audits the node prompt contract and asks for a verification node'. Fix the FIXTURES only: in policy.test.ts add a contains value to the fileCheck helper and to the two inline file checks (REPORT.md and notes/docs-audit.md), so those tests keep exercising only the lint they were written for; in runtime.test.ts replace the argv of the VERIFY constant on line 6 (test -d /work is a V3 check) with a command that is not vacuous, for example ['check-control']. Never change an assertion's expected value or intent. After your change run the whole suite and fix any other red test the same way.
+      (4) Your ## Output must carry, compactly: the implemented conditions of V1, V2, V3 exactly as coded (program sets, flag set, basename rule, how [ is handled); the real warning string printed for the example node "build" above (capture it with a throwaway bun -e snippet, no file written); the names of the new helpers in hooks/engine/lint.ts; the names and count of the tests in tests/lint.test.ts; each existing fixture you changed (file and what changed); the pass count of claude plugin test; any deviation from this prompt.
+
+      SCOPE: Read anything in the repository. Write ONLY hooks/engine/lint.ts, tests/lint.test.ts (new), tests/policy.test.ts and tests/runtime.test.ts (fixture lines only). OUT of scope: README.md and skills/dag-planning/references/planning.md (sibling nodes document the rules after you from your Output), hooks/register.ts, hooks/engine/verification.ts, eval/, docs/, flows/, .claude/. The working tree already holds uncommitted edits by the user in several of these files: never revert or reformat them, and change only the lines you need. NEVER commit, push, install or reload plugins (no git commit, no git push, no claude plugin install, no /reload-plugins).
+
+      VERIFY: run each command from the project root and report its result.
+      1. command claude plugin test .  expects 0 failures. Use `command claude` so a shell alias cannot inject flags.
+      2. bunx -p typescript@5 tsc -p . --noEmit  expects exit 0. It can take more than 30 seconds when cold, so allow up to 5 minutes.
+      3. command claude plugin validate .  expects exit 0.
+      4. bun eval/check-definition.ts flows/improvement/p1-vacuous-verify.yaml eval/fixtures/valid-definition.yaml  expects OK for both files and exit 0: the new lint must not flag definitions that already satisfy V1-V3.
+      5. Print the real warning for the example node "build" and compare it with the example in this prompt.
+
+      STOP WHEN: the three rules emit the warning from the message contract, tests/lint.test.ts holds the positive and negative tests and passes, the whole suite is green, tsc is clean, the checker prints OK, and ## Output holds the facts listed in (4). Report failed with the failing command if any of these does not hold.
+
+  - id: readme-doc
+    label: Document the lint in README
+    category: writing
+    dependsOn:
+      - lint-rules
+    writes:
+      - README.md
+    verify:
+      - kind: file
+        path: README.md
+        contains: vacuous verify
+      - kind: file
+        path: README.md
+        contains: touch
+      - kind: file
+        path: README.md
+        contains: sleep
+      - kind: file
+        path: README.md
+        contains: sh -c
+    prompt: |
+      TASK: Document the new vacuous-verify lint in the '## 검증' section of README.md, in Korean.
+
+      DELIVERABLE: Inside the '## 검증' section only (from that heading to the next '## ' heading), keep the existing intro, table and bullets and add after them a compact subsection (a '### 빈 검증 경고' heading is fine) that states, from the lint-rules Output that the plugin pastes into this prompt (re-read hooks/engine/lint.ts and confirm every fact against the code before you write it):
+      - What it is: a lint warning whose text starts with `node "<id>": vacuous verify`, returned in the `warnings` of `start` and `amend` and shown by `/dag run`. Warnings only: the run is not refused. One warning per node, listing the offending checks by number (their 1-based position in `verify`).
+      - The three conditions as a small Markdown table (규칙 | 조건 | 이유) with the exact programs and flags from the code: a file check without `contains` (only proves the file exists; `touch` passes it); a command whose program (basename) is `true`, `:`, `echo`, `printf`, `exit`, `yes` or `sleep` (always passes); `test` or `[` that uses only `-e`, `-f`, `-d`, `-s`, or `ls`, `stat`, `cat` (only proves a path exists).
+      - What to write instead: a file check with nonempty `contains`, or a command that exits nonzero when the deliverable is wrong, such as a test command.
+      - The limit: shell wrappers such as `sh -c '...'` are not analyzed, so the lint does not see inside them.
+      Write Korean prose, put identifiers and commands in backticks, match the table style already used in that section, use no emojis. Keep the added text short; it supports the existing bullet that says empty checks like `true` must not be used.
+      Your ## Output: the line numbers of the '## 검증' and '## 자동 복구' headings after your edit, and a three-line English summary of what you added.
+
+      SCOPE: Read hooks/engine/lint.ts, hooks/register.ts and README.md. Write ONLY README.md, and inside it ONLY the '## 검증' section. Every other section stays byte-identical, including the uncommitted user edits elsewhere in README.md. OUT of scope: skills/dag-planning/references/planning.md (the planning-doc node owns it), all code and tests. NEVER commit, push, install or reload plugins (no git commit, no git push, no claude plugin install, no /reload-plugins).
+
+      VERIFY: (a) run  rg -n '^## ' README.md  and confirm that all 18 headings are still there, in order: 불러오기, 사용법, 실제 사용 예, 강제, 계획 스킬, 결과 전달, 정의 형식, Jev 를 활용한 자동 판단, 검증, 자동 복구, 컨텍스트 보존, 판단 기록, 세션과 인계, 실행 규칙, DAG 패널, 설정, DAG 형태 평가, 개발. (b) run  rg -n 'vacuous verify|touch|sleep|sh -c' README.md  and confirm that every hit lies between the '## 검증' and '## 자동 복구' headings. (c) Compare each program and flag you wrote with hooks/engine/lint.ts.
+
+      STOP WHEN: the '## 검증' section documents the warning, the three conditions, the alternative and the limit, and checks (a)-(c) pass.
+
+  - id: planning-doc
+    label: Document the lint in the planning reference
+    category: writing
+    dependsOn:
+      - lint-rules
+    writes:
+      - skills/dag-planning/references/planning.md
+    verify:
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: vacuous verify
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: sleep
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: printf
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: sh -c
+    prompt: |
+      TASK: Document the new vacuous-verify lint in the '## The `verify` contract' section of skills/dag-planning/references/planning.md, in English.
+
+      DELIVERABLE: Inside that section only (from its heading to the next '## ' heading), keep every existing bullet and add, next to the existing bullet that tells planners to choose checks that FAIL, one or two bullets in the same terse style that state, from the lint-rules Output that the plugin pastes into this prompt (re-read hooks/engine/lint.ts and confirm every fact against the code before you write it):
+      - `start` and `amend` return a `vacuous verify` warning, one per node, naming the offending checks by their 1-based number in `verify`. It is a warning only: the run still starts, and a planner treats it as a defect to fix with `amend` or a new key.
+      - What counts as vacuous, with the exact lists from the code: a file check without `contains` (it only proves the file exists; `touch` passes it); a command whose program basename is `true`, `:`, `echo`, `printf`, `exit`, `yes` or `sleep` (always passes); `test` or `[` that uses only `-e`, `-f`, `-d`, `-s`, or `ls`, `stat`, `cat` (only proves a path exists).
+      - What to declare instead: a file check with nonempty `contains` text the consumers parse, or a command that exits nonzero when the deliverable is wrong.
+      - The limit: a shell wrapper such as `sh -c '...'` is not analyzed, so the lint cannot see inside it; do not use one to hide a vacuous check.
+      Do not touch the paragraph in '## Node prompt contract' that lists the other start warnings. Use no emojis.
+      Your ## Output: the line numbers of the '## The `verify` contract' and '## Verification wave' headings after your edit, and a three-line summary of what you added.
+
+      SCOPE: Read hooks/engine/lint.ts and skills/dag-planning/references/planning.md. Write ONLY skills/dag-planning/references/planning.md, and inside it ONLY the '## The `verify` contract' section. Every other section stays byte-identical, including the uncommitted user edits elsewhere in the file. OUT of scope: README.md (the readme-doc node owns it), skills/dag-planning/SKILL.md, all code and tests. NEVER commit, push, install or reload plugins (no git commit, no git push, no claude plugin install, no /reload-plugins).
+
+      VERIFY: (a) run  rg -n '^## ' skills/dag-planning/references/planning.md  and confirm that all 8 headings are still there, in order: Decomposition doctrine, Category routing, Edges, data and write scopes (one heading), Composing runs, Node prompt contract, The `verify` contract, Verification wave, Failure playbook. (b) run  rg -n 'vacuous verify|sleep|printf|sh -c' skills/dag-planning/references/planning.md  and confirm that every hit lies between the '## The `verify` contract' and '## Verification wave' headings. (c) Compare each program and flag you wrote with hooks/engine/lint.ts.
+
+      STOP WHEN: the section documents the warning, what counts as vacuous, the alternative and the limit, and checks (a)-(c) pass.
+
+  - id: final-audit
+    label: Final audit of the lint and its docs
+    category: unspecified-low
+    dependsOn:
+      - lint-rules
+      - readme-doc
+      - planning-doc
+    writes:
+      - flows/improvement/p1-audit-notes.md
+    verify:
+      - kind: file
+        path: flows/improvement/p1-audit-notes.md
+        contains: "P1 audit: PASS"
+      - kind: command
+        argv:
+          - claude
+          - plugin
+          - test
+          - .
+      - kind: command
+        argv:
+          - claude
+          - plugin
+          - validate
+          - .
+    prompt: |
+      TASK: Independently falsify the Phase 1 result against the repository: rules V1-V3 in hooks/engine/lint.ts, their tests, and their documentation in README.md and skills/dag-planning/references/planning.md.
+
+      DELIVERABLE: flows/improvement/p1-audit-notes.md with these sections: `## Commands` (captured result of each command below), `## Probes` (one row per probe: definition under test, expected result, actual result), `## Docs` (what README.md and planning.md say versus the code), `## Verdict` ending with the line `P1 audit: PASS` only if every item below holds, else `P1 audit: FAIL` and the list of failures. The Output section repeats the verdict, the test pass count and any mismatch.
+      The Plan table you audit (docs/improvement-plan.md, Phase 1): V1 a file check without contains; V2 a command whose argv[0] basename is true, :, echo, printf, exit, yes or sleep; V3 test or [ using only -e/-f/-d/-s, or ls, stat, cat as the program. One warning per node, check numbers collected, English messages, warnings only, shell wrappers out of scope.
+      Items:
+      1. Run  command claude plugin test .  (expect 0 failures) and  command claude plugin validate .  (expect exit 0); record the pass count.
+      2. Probe each rule against the code with probe definitions you write yourself into a directory made by  mktemp -d  OUTSIDE the project; run  bun eval/check-definition.ts <probe.yaml>  from the project root and delete the directory when done. A probe is a single-node definition like this (YAML subset: block mappings only, quote program names such as ":" and "["; the prompt is one line holding all five contract markers):
+         key: probe
+         nodes:
+           - id: n
+             prompt: "TASK: x. DELIVERABLE: y. SCOPE: z. VERIFY: w. STOP WHEN: done."
+             verify:
+               - kind: file
+                 path: a.md
+         Expected outcomes (FAIL = exit 1 and a line starting with warning: node "n": vacuous verify; OK = exit 0):
+         - V1 positive: the file check above (no contains) is FAIL and names check 1. V1 negative: the same check with contains: x is OK.
+         - V2 positive: one probe with command checks for true, ":", echo, printf, exit, yes, sleep and /bin/true is FAIL with ONE warning naming checks 1-8. V2 negative: ["bun","test"] and ["git","diff","--check"] are OK.
+         - V3 positive: test with -e, -f, -d and -s each, the bracket form ["[","-f","a.md","]"], ls, stat and cat are FAIL, one warning naming every check number. V3 negative: ["test","-n","x"], ["test","-r","x"], ["grep","-q","x","a.md"] are OK.
+         - Collection: a node whose checks 1 and 3 are vacuous and check 2 is sound gives exactly ONE warning naming check 1 and check 3 and not check 2; two vacuous nodes give two warnings (one per node).
+         - Warnings only: every FAIL above comes from a warning line, never from an error code such as verification_required or invalid_verification.
+         - No false positives: bun eval/check-definition.ts eval/fixtures/valid-definition.yaml flows/improvement/p1-vacuous-verify.yaml prints OK for both. Also run it on every other file in flows/improvement/*.yaml that exists and record the result; a warning there is a finding to report (do NOT edit those files).
+      3. Read hooks/engine/lint.ts and tests/lint.test.ts. Confirm: every rule has a positive and a negative test (at least 6 test blocks), tests/policy.test.ts holds no V1-V3 rule tests (rg -n 'vacuous' tests/policy.test.ts finds nothing), and the pre-existing warnings (missing TASK or STOP WHEN, host-blocked report names, under-split producers, missing verification node, quick final audit) are still produced by the code.
+      4. Docs: README.md '## 검증' and planning.md '## The `verify` contract' each state the warning-only behaviour, one warning per node with check numbers, the exact program and flag lists of V1-V3 as coded, the file-check-without-contains rule, what to write instead, and the sh -c limit, with no statement that contradicts the code. README.md still has all 18 '## ' headings and planning.md all 8 listed in rg -n '^## ' output (extra headings may exist).
+      Report any mismatch between the code, the tests, the docs and the plan table as a failure. Do not fix anything.
+
+      SCOPE: Read the whole repository and run the commands above. Write ONLY flows/improvement/p1-audit-notes.md; probe files live in the mktemp directory outside the project and are deleted afterwards. Do not edit code, tests, docs or the flows. NEVER commit, push, install or reload plugins (no git commit, no git push, no claude plugin install, no /reload-plugins).
+
+      VERIFY: the machine checks of this node re-run claude plugin test . and claude plugin validate . and require the line `P1 audit: PASS` in the notes file. Before you write that line, confirm that every probe produced its expected result and that you re-read the final files rather than trusting the upstream Outputs.
+
+      STOP WHEN: the notes file ends with a verdict line and the Output repeats it. When any item fails, write `P1 audit: FAIL`, list what failed, and finish with DAG_NODE_STATUS: failed.
+
+  - id: progress-log
+    label: Record P1 in the plan
+    category: quick
+    dependsOn:
+      - final-audit
+    writes:
+      - docs/improvement-plan.md
+    verify:
+      - kind: file
+        path: docs/improvement-plan.md
+        contains: "| P1 | 완료 | 20"
+    prompt: |
+      TASK: Update ONLY the P1 row of the table under '## 진행 기록' in docs/improvement-plan.md to record that Phase 1 is done.
+
+      DELIVERABLE: The P1 row becomes exactly  | P1 | 완료 | <date> | <memo> |  with single spaces around every pipe. <date> is the output of  date +%F  (run it with Bash). <memo> is this run's id, then ` - `, then a one-line result such as `V1-V3 경고 lint, tests/lint.test.ts, 감사 통과`, using the test pass count from the final-audit Output that the plugin pastes into this prompt. Take the run id from the line at the top of your prompt that names this run (it looks like dag_...); if it is missing, use  ls -t .claude/dag/runs | head -1  to read the newest run folder name, read only. The memo is at most 160 characters and holds no pipe character. The 상태 cell is 완료 only if the final-audit Output reports `P1 audit: PASS`; if it does not, change nothing and report failed.
+      Before editing, print the whole table; after editing, print it again. The P0, P2 and P3 rows, the table header, every Phase heading and every link another node added must be identical before and after.
+
+      SCOPE: Read docs/improvement-plan.md. Write ONLY docs/improvement-plan.md, and inside it ONLY the P1 row of the 진행 기록 table. Read-only access to .claude/dag is allowed for the run id fallback; never edit anything there. NEVER commit, push, install or reload plugins (no git commit, no git push, no claude plugin install, no /reload-plugins).
+
+      VERIFY: run  rg -n '^\| P1 \|' docs/improvement-plan.md  and confirm that exactly one row prints, that it starts with `| P1 | 완료 | 20`, that its date equals the output of  date +%F , and that the other three rows match their printed 'before' versions.
+
+      STOP WHEN: the P1 row holds 완료, the date and the memo, and the rest of the table is unchanged. In ## Output give the final P1 row.

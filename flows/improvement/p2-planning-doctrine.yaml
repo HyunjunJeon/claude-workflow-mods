@@ -1,0 +1,568 @@
+# Implements docs/improvement-plan.md, "Phase 2 - 계획 지침", items 2a-2e: the planning doctrine in
+# skills/dag-planning/references/planning.md (2a two-axis review, 2b safe-but-wrong audit checklist, 2c vertical slices and
+# wide refactors, 2d debug chain), the three vendored node skills (2e) and THIRD_PARTY_NOTICES.md.
+#
+# Assumed decisions (docs/improvement-plan.md, "먼저 정할 것"):
+#   D3 option (a): the debug chain is a diagnosis run and a fix run, two runs, because verify is fixed when a run starts.
+#   D4 option (b): extracts of the mattpocock skills are vendored as dag-workflow skills (skills/dag-node-*), not installed.
+#   D5: the two review nodes are both end nodes of the graph; there is no aggregator node.
+#
+# Run:   /dag run flows/improvement/p2-planning-doctrine.yaml
+# Check: bun eval/check-definition.ts flows/improvement/p2-planning-doctrine.yaml
+#
+# Re-running after this run has settled needs a NEW key (for example improve-p2-planning-doctrine-2): the same key with the
+# same definition returns the old run and schedules nothing, and the same key with a changed definition is refused.
+# The eval re-run that follows P2 (docs/improvement-plan.md, "순서") reuses flows/improvement/p0-eval-baseline.yaml under a
+# new key; it is not a node of this file.
+#
+# Not part of this run: confirming that load_skills: ["dag-workflow:dag-node-debugging"] resolves inside a node. The installed
+# plugin reads this folder directly, so it needs /reload-plugins first (never while a run is active, decision D1) and then
+# a one-node run that loads the skill.
+#
+# Order: run P0 and P1 first and let them settle. P1 edits the verification paragraph of planning.md, which the synthesis node
+# here edits too, and every phase's progress-log node edits docs/improvement-plan.md, so the phase runs must not overlap.
+# The lane drafts notes/p2-*.md and the review notes stay on disk as the audit trail.
+#
+# Shape: draft-2a..draft-2d (parallel lanes) -> synthesize-planning. In the same first wave, skill-debugging,
+# skill-review-standards, skill-testing and third-party-notices write their own files (8 nodes, the default max_concurrent).
+# review-spec and review-standards (the two end nodes of the verification wave, decision D5) depend on synthesize-planning
+# and those four file writers; they judge the final files, so they do not depend on the draft lanes, whose content reaches
+# them through synthesize-planning. progress-log depends on both reviews.
+# review-standards reads skills/dag-node-review-standards/SKILL.md with Read instead of load_skills: a skill directory
+# created during a run does not resolve until /reload-plugins, which must not run while a run is active.
+#
+# Categories: quick for the mechanical notices file and the progress row. writing for the doctrine drafts and the three
+# skills (documentation prose). unspecified-low for synthesize-planning (judgment: merge four drafts into an existing
+# doctrine without contradicting it) and for both reviews (the standing final-audit exception: judgment, not a command).
+key: improve-p2-planning-doctrine-1
+name: Improvement P2 - planning doctrine
+goal: "skills/dag-planning/references/planning.md carries plan items 2a-2d (two-axis review template, safe-but-wrong audit checklist, vertical-slice and expand-migrate-contract decomposition, two-run debug chain), the plugin has the node skills dag-node-debugging, dag-node-review-standards and dag-node-testing plus THIRD_PARTY_NOTICES.md with the MIT notices of mattpocock/skills and Q00/ouroboros, an independent spec review and an independent standards review both pass, and the P2 row of docs/improvement-plan.md records the outcome."
+nodes:
+  # ---- Wave 1a: doctrine drafts, one lane per plan item, each in its own notes file ----
+  - id: draft-2a
+    label: Draft 2a two-axis review template
+    category: writing
+    writes:
+      - notes/p2-2a-two-axis-wave.md
+    verify:
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "### Two-axis review (code-changing runs)"
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "review-spec"
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "review-standards"
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "Spec verdict: PASS"
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "Standards verdict: PASS"
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "unspecified-low"
+      - kind: file
+        path: notes/p2-2a-two-axis-wave.md
+        contains: "dag-workflow:dag-node-review-standards"
+    prompt: |
+      TASK: Write the draft of plan item 2a, the two-axis template for the verification wave of code-changing runs, as notes/p2-2a-two-axis-wave.md.
+      Background: this repository is the dag-workflow Claude Code plugin. skills/dag-planning/references/planning.md is its planning doctrine, and a later node integrates your draft into it. Plan item 2a (docs/improvement-plan.md, section "Phase 2", item 2a) asks for:
+      - a `review-spec` node that judges the result against the goal and the request for (a) missing or partial implementation, (b) behavior nobody requested (scope creep), (c) things that are implemented but look wrong, each finding quoting the request sentence it rests on;
+      - a `review-standards` node that judges against the repository's rule files (CONTRIBUTING, CLAUDE.md and similar) plus the Fowler code-smell baseline, where smells are always labelled judgment calls and a documented repository rule overrides the baseline;
+      - the template applies only to runs that change code; documentation and research runs keep the existing single verification node, because the two-node wave costs extra nodes and time;
+      - decision D5: both review nodes are end nodes of the graph and there is no aggregator node, because the axes are deliberately not merged or re-ranked and the run-settled summary already shows every node output side by side.
+
+      DELIVERABLE: notes/p2-2a-two-axis-wave.md with three parts.
+      Part 1: the literal line `Target heading: ### Two-axis review (code-changing runs)`, then the ready-to-paste doctrine text of that subsection (English, in the style of planning.md, at most 60 lines). It covers: when the template applies and when the single verification node stays; the shape (both nodes depend on ALL producer nodes, nothing depends on them, no aggregator, both run on `unspecified-low` or higher under the standing final-audit rule); what each node judges, as listed above; the fixed verdict lines `Spec verdict: PASS` / `Spec verdict: FAIL` and `Standards verdict: PASS` / `Standards verdict: FAIL`, with the rule that a FAIL verdict ends the node with `DAG_NODE_STATUS: failed: <what failed>`; the rule that each reviewer declares a `verify` file check whose `contains` is its own PASS verdict line, so a FAIL verdict fails the node; and the rule that the main conversation reads the two reports side by side and never merges or ranks findings across axes.
+      Part 2: a ready-to-paste prompt skeleton for `review-spec` and one for `review-standards`. Each skeleton carries the five markers TASK:, DELIVERABLE:, SCOPE:, VERIFY:, STOP WHEN, has the reviewer write its own notes file (a name that does not start with REPORT, SUMMARY, FINDINGS or ANALYSIS), keeps the reviewer read-only on everything it reviews, and names its verdict line. The review-standards skeleton tells the planner to give that node `load_skills: ["dag-workflow:dag-node-review-standards"]`.
+      Part 3: a line `Placement: under "## Verification wave"` and a `Conflicts` section listing every sentence of the current planning.md that this draft contradicts or that needs rewording (write `none` when there is none).
+      In ## Output give the file path, the target heading, and the conflicts.
+
+      SCOPE: Read skills/dag-planning/references/planning.md IN FULL, skills/dag-planning/SKILL.md, hooks/engine/lint.ts, and the Phase 2 section of docs/improvement-plan.md. Fetch the mattpocock source with `gh api repos/mattpocock/skills/contents/skills/engineering/code-review/SKILL.md --jq .content | base64 -d` and read it (MIT licensed: paraphrase it, do not paste long passages; in a DAG the reviewer cannot spawn sub-agents and cannot ask the user anything). Write ONLY notes/p2-2a-two-axis-wave.md. Do not edit planning.md or any other file; the 2b, 2c and 2d drafts, the skill nodes and the integration node belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm it contains each of these literal strings: `### Two-axis review (code-changing runs)`, `review-spec`, `review-standards`, `Spec verdict: PASS`, `Standards verdict: PASS`, `unspecified-low`, `dag-workflow:dag-node-review-standards`. The runtime checks the same strings after you report.
+      STOP WHEN: the file exists with all three parts and every literal string above is present. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the code-review source`.
+
+  - id: draft-2b
+    label: Draft 2b safe-but-wrong audit checklist
+    category: writing
+    writes:
+      - notes/p2-2b-wrong-output-checklist.md
+    verify:
+      - kind: file
+        path: notes/p2-2b-wrong-output-checklist.md
+        contains: "### Safe-but-wrong audit checklist"
+      - kind: file
+        path: notes/p2-2b-wrong-output-checklist.md
+        contains: "Audit prompt block"
+      - kind: file
+        path: notes/p2-2b-wrong-output-checklist.md
+        contains: "partial/supporting-output"
+      - kind: file
+        path: notes/p2-2b-wrong-output-checklist.md
+        contains: "DAG_NODE_STATUS: failed: partial/supporting-output"
+      - kind: file
+        path: notes/p2-2b-wrong-output-checklist.md
+        contains: "safe-but-wrong"
+    prompt: |
+      TASK: Write the draft of plan item 2b, the "safe-but-wrong output" checklist that becomes a required part of the final audit prompt, as notes/p2-2b-wrong-output-checklist.md.
+      Background: a run can be safe, non-destructive and even useful while still being wrong for what the user asked; the Q00/ouroboros guide docs/guides/safe-but-wrong-output.md names this failure mode. Plan item 2b (docs/improvement-plan.md, section "Phase 2", item 2b) requires the final audit prompt to carry these five items:
+      1. the produced artifact is the same kind as the requested one (a CLI was requested, so documents alone do not count);
+      2. the deliverable can be run again with new input;
+      3. missing data is not displayed as OK, 0 or an empty value;
+      4. the verification proved the behavior, not just that a file exists;
+      5. on a shortfall the audit reports `partial/supporting-output`, not "complete".
+
+      DELIVERABLE: notes/p2-2b-wrong-output-checklist.md with three parts.
+      Part 1: the literal line `Target heading: ### Safe-but-wrong audit checklist`, then the ready-to-paste doctrine text of that subsection (English, in the style of planning.md, at most 50 lines): the failure mode in two sentences; the five items as a numbered list of questions that the final audit answers with evidence (command output, a file excerpt) instead of assertion; the rule that these five items are REQUIRED content of the final audit node's prompt (the node that nothing depends on and that judges two or more inputs); how a shortfall is reported: the audit writes `Status: partial/supporting-output` in its ## Output naming the missing artifact kind or behavior and ends with `DAG_NODE_STATUS: failed: partial/supporting-output - <what is missing>`, because the status line only knows completed and failed and the run must not be declared complete; and one sentence that a conservative default for a local, reversible gap is fine while a default that changes what kind of artifact is delivered is not.
+      Part 2: a paste-ready block labelled `Audit prompt block` that a planner appends to a final audit prompt: the five items in imperative form, at most 12 lines.
+      Part 3: a line `Placement: under "## Verification wave"` and a `Conflicts` section listing every sentence of the current planning.md that this draft contradicts or that needs rewording (write `none` when there is none).
+      In ## Output give the file path, the target heading, and the conflicts.
+
+      SCOPE: Read skills/dag-planning/references/planning.md IN FULL, skills/dag-planning/SKILL.md, hooks/engine/node-prompt.ts (the status line grammar) and the Phase 2 section of docs/improvement-plan.md. Fetch the source with `gh api repos/Q00/ouroboros/contents/docs/guides/safe-but-wrong-output.md --jq .content | base64 -d` and read it (MIT licensed: paraphrase it, do not paste long passages). Write ONLY notes/p2-2b-wrong-output-checklist.md. Do not edit planning.md or any other file; the 2a, 2c and 2d drafts, the skill nodes and the integration node belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm it contains each of these literal strings: `### Safe-but-wrong audit checklist`, `Audit prompt block`, `partial/supporting-output`, `DAG_NODE_STATUS: failed: partial/supporting-output`, `safe-but-wrong`. The runtime checks the same strings after you report.
+      STOP WHEN: the file exists with all three parts and every literal string above is present. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the safe-but-wrong-output guide`.
+
+  - id: draft-2c
+    label: Draft 2c decomposition rules
+    category: writing
+    writes:
+      - notes/p2-2c-decomposition.md
+    verify:
+      - kind: file
+        path: notes/p2-2c-decomposition.md
+        contains: "### Vertical slices and wide refactors"
+      - kind: file
+        path: notes/p2-2c-decomposition.md
+        contains: "vertical slice"
+      - kind: file
+        path: notes/p2-2c-decomposition.md
+        contains: "blast radius"
+      - kind: file
+        path: notes/p2-2c-decomposition.md
+        contains: "`expand`"
+      - kind: file
+        path: notes/p2-2c-decomposition.md
+        contains: "`migrate`"
+      - kind: file
+        path: notes/p2-2c-decomposition.md
+        contains: "`contract`"
+    prompt: |
+      TASK: Write the draft of plan item 2c, the decomposition rules for feature work and wide refactors, as notes/p2-2c-decomposition.md.
+      Background: this repository is the dag-workflow Claude Code plugin; a later node integrates your draft into skills/dag-planning/references/planning.md. Plan item 2c (docs/improvement-plan.md, section "Phase 2", item 2c) says: keep the existing split by deliverable unit unchanged; define the unit of FEATURE work as a vertical slice that cuts a narrow but complete path through every layer (a tracer bullet), not a horizontal slice of one layer; sequence a wide refactor (one mechanical change whose blast radius fans across the codebase, so no single slice can land green) as an `expand` node, then `migrate` batches sized by blast radius, then a `contract` node, as a chain of nodes. The source is the mattpocock to-tickets skill.
+
+      DELIVERABLE: notes/p2-2c-decomposition.md with two parts.
+      Part 1: the literal line `Target heading: ### Vertical slices and wide refactors`, then the ready-to-paste doctrine text of that subsection (English, in the style of planning.md, at most 60 lines). It covers:
+      - the unit of feature work is a vertical slice: it is demoable or verifiable on its own, sized to fit one node's context, and prefactoring (make the change easy first) is its own earlier node; one node owns the slice AND its tests, consistent with the existing rule "Split implementation from its test? No"; splitting one feature into a node per layer (schema, API, UI) is a horizontal slice and is wrong;
+      - the wide-refactor chain, using the literal words `expand`, `migrate` and `contract` in backticks: an `expand` node adds the new form beside the old so nothing breaks; `migrate` nodes, one per batch sized by blast radius (per package or per directory), run in parallel ONLY when their write scopes are disjoint and otherwise chain; a `contract` node depends on EVERY `migrate` node and deletes the old form once no caller remains; give the node ids and the `dependsOn` edges of this chain as a small example list;
+      - why a wide refactor is not forced into slices, and the plain limit of this plugin: there is no integration branch, per-node worktree isolation is backlog item B3 and out of scope, so batches that cannot stay green alone are merged into fewer nodes or serialized;
+      - how this interacts with the existing "By file domain" split and the "Do not split when" list: deliverable-unit splitting stays for independent files, sections and reports, and slicing is for feature work.
+      Do not carry over the source's steps that quiz the user or publish tickets to a tracker.
+      Part 2: a line `Placement: under "## Decomposition doctrine"` and a `Conflicts` section listing every sentence of the current planning.md that this draft contradicts or that needs rewording (write `none` when there is none).
+      In ## Output give the file path, the target heading, and the conflicts.
+
+      SCOPE: Read skills/dag-planning/references/planning.md IN FULL, skills/dag-planning/SKILL.md and the Phase 2 section of docs/improvement-plan.md. Fetch the source with `gh api repos/mattpocock/skills/contents/skills/engineering/to-tickets/SKILL.md --jq .content | base64 -d` and read it (MIT licensed: paraphrase it, do not paste long passages). Write ONLY notes/p2-2c-decomposition.md. Do not edit planning.md or any other file; the 2a, 2b and 2d drafts, the skill nodes and the integration node belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm it contains each of these literal strings: `### Vertical slices and wide refactors`, `vertical slice`, `blast radius`, and the three words `expand`, `migrate`, `contract` each in backticks. The runtime checks the same strings after you report.
+      STOP WHEN: the file exists with both parts and every literal string above is present. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the to-tickets source`.
+
+  - id: draft-2d
+    label: Draft 2d debug chain
+    category: writing
+    writes:
+      - notes/p2-2d-debug-chain.md
+    verify:
+      - kind: file
+        path: notes/p2-2d-debug-chain.md
+        contains: "### Debug chain (diagnose run, then fix run)"
+      - kind: file
+        path: notes/p2-2d-debug-chain.md
+        contains: "Reproduction command:"
+      - kind: file
+        path: notes/p2-2d-debug-chain.md
+        contains: "Hypotheses:"
+      - kind: file
+        path: notes/p2-2d-debug-chain.md
+        contains: "[DEBUG-"
+      - kind: file
+        path: notes/p2-2d-debug-chain.md
+        contains: "dag-workflow:dag-node-debugging"
+      - kind: file
+        path: notes/p2-2d-debug-chain.md
+        contains: "B2"
+    prompt: |
+      TASK: Write the draft of plan item 2d, the debug chain, as notes/p2-2d-debug-chain.md.
+      Background: plan item 2d (docs/improvement-plan.md, section "Phase 2", item 2d) with decision D3 option (a): a bug with an unknown cause is handled by TWO runs, because a node's `verify` is fixed when its run starts and cannot reference a reproduction command that does not exist yet ("one run = one phase").
+      - The diagnosis run's final Output holds (i) exactly ONE reproduction command that was already run once and failed: fast, deterministic, and confirming the user's symptom itself rather than a nearby failure; and (ii) 3 to 5 falsifiable hypotheses, each stated as "If X is the cause, changing Y will make the bug disappear or worse".
+      - The fix run (started later under a NEW key, with those facts pasted into its prompts) puts that command into the fix node's `verify` as a command check, so the node passes only when the command exits 0.
+      - Debug logging uses a unique tag such as `[DEBUG-a4f2]` so cleanup is one search. Confirming that tagged logs were removed cannot be expressed in the current verify schema, because "no match" is a non-zero exit of the usual search commands; that is backlog item B2 (an expected-exit option for command checks). The draft must say so and give the interim rule: the fix node's prompt requires the removal and its Output reports the search result for the tag, and the final audit repeats that search.
+      The source is the mattpocock diagnosing-bugs skill.
+
+      DELIVERABLE: notes/p2-2d-debug-chain.md with two parts.
+      Part 1: the literal line `Target heading: ### Debug chain (diagnose run, then fix run)`, then the ready-to-paste doctrine text of that subsection (English, in the style of planning.md, at most 70 lines). It covers:
+      - when to use it: the cause is unknown and a reproduction can be built; and how it relates to the existing in-run rule "Unknown cause: investigate, then fix" (the in-run form stays right when the fix node's verify can be an existing test command; the two-run form applies when the verify must be the reproduction command);
+      - the diagnose run: read-only investigation lanes, then ONE diagnosis node with `load_skills: ["dag-workflow:dag-node-debugging"]` whose ## Output has the fields `Reproduction command:`, `Observed failure:` (exit code and the symptom line), `Hypotheses:` (3 to 5, ranked, each falsifiable) and `Root cause:` (file and line, or "not yet determined");
+      - how the main conversation carries the command into the fix run: pasted into the fix prompt AND into the fix node's `verify` as an argv command check (it runs from the project root without a shell with a 30-second limit, so a slower loop must be narrowed first);
+      - the red-capable rule: a command that already exits 0 before the fix proves nothing, so the diagnosis node must have seen it fail;
+      - when no loop can be built: the diagnosis node ends with `DAG_NODE_STATUS: failed: clarification: <what is needed>` and the main conversation asks the user;
+      - secrets are redacted in every command and output that is shown;
+      - the debug-log tag and the interim cleanup rule above.
+      Part 2: a line `Placement: next to "Unknown cause: investigate, then fix" under "## Decomposition doctrine", plus a one-sentence pointer under "## Composing runs"` and a `Conflicts` section listing every sentence of the current planning.md that this draft contradicts or that needs rewording (write `none` when there is none).
+      In ## Output give the file path, the target heading, and the conflicts.
+
+      SCOPE: Read skills/dag-planning/references/planning.md IN FULL, skills/dag-planning/SKILL.md, hooks/engine/verification.ts and the Phase 2 and backlog sections of docs/improvement-plan.md. Fetch the source with `gh api repos/mattpocock/skills/contents/skills/engineering/diagnosing-bugs/SKILL.md --jq .content | base64 -d` and read it (MIT licensed: paraphrase it, do not paste long passages). Write ONLY notes/p2-2d-debug-chain.md. Do not edit planning.md or any other file; the 2a, 2b and 2c drafts, the skill nodes and the integration node belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm it contains each of these literal strings: `### Debug chain (diagnose run, then fix run)`, `Reproduction command:`, `Hypotheses:`, `[DEBUG-`, `dag-workflow:dag-node-debugging`, `B2`. The runtime checks the same strings after you report.
+      STOP WHEN: the file exists with both parts and every literal string above is present. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the diagnosing-bugs source`.
+
+  # ---- Wave 1b: vendored node skills (2e, D4 option b) and the MIT notices ----
+  - id: skill-debugging
+    label: Vendor the node debugging skill
+    category: writing
+    writes:
+      - skills/dag-node-debugging/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-node-debugging/SKILL.md
+        contains: "---\nname: dag-node-debugging\ndescription: "
+      - kind: file
+        path: skills/dag-node-debugging/SKILL.md
+        contains: "DAG_NODE_STATUS: failed: clarification:"
+      - kind: file
+        path: skills/dag-node-debugging/SKILL.md
+        contains: "[DEBUG-"
+      - kind: file
+        path: skills/dag-node-debugging/SKILL.md
+        contains: "Reproduction command:"
+      - kind: file
+        path: skills/dag-node-debugging/SKILL.md
+        contains: "THIRD_PARTY_NOTICES.md"
+      - kind: command
+        argv:
+          - bun
+          - "-e"
+          - |-
+            const text = require('fs').readFileSync('skills/dag-node-debugging/SKILL.md', 'utf8').toLowerCase()
+            const banned = ['hitl', 'show the ranked list to the user', 'ask the user for', 'setup-matt-pocock', 'glossary.md']
+            const left = banned.filter(phrase => text.includes(phrase))
+            if (left.length > 0) {
+              console.error('source phrases that wait for a user are still in the skill: ' + left.join(', '))
+              process.exit(1)
+            }
+    prompt: |
+      TASK: Write the plugin skill skills/dag-node-debugging/SKILL.md, an adaptation of the mattpocock diagnosing-bugs skill for DAG node workers (plan item 2e, decision D4 option b: vendor the extract as a dag-workflow skill, loaded by nodes with `load_skills: ["dag-workflow:dag-node-debugging"]`).
+      Background: a DAG node worker cannot ask the user anything and nothing waits for an answer. Wherever the source would ask the user, wait for the user or show something to the user, the skill instead tells the worker to put the content in its ## Output or, when only the user can supply the missing information, to end the final report with `DAG_NODE_STATUS: failed: clarification: <question>`.
+
+      DELIVERABLE: skills/dag-node-debugging/SKILL.md, English, at most 200 lines.
+      - Frontmatter exactly in this shape (and nothing else in it): a line `---`, `name: dag-node-debugging`, `description: <one sentence: discipline for DAG nodes that diagnose or fix a failing behavior, loaded through load_skills>`, `when_to_use: <one sentence>`, a line `---`. Look at the frontmatter of skills/dag-planning/SKILL.md for the plugin's shape.
+      - Body, in this order: a short intro naming the two node roles (the diagnosis node runs phases 1 to 4 and edits no tracked source file except temporary tagged instrumentation inside its declared write scope; the fix node runs phases 5 and 6 using the reproduction command its prompt provides); a Redact section (write `<REDACTED>` for every secret, quote only the signal lines of captured artifacts, and when redacted output is not enough end with a clarification failure); Phase 1 build a feedback loop (keep the full ordered list of ways to construct one, but drop the human-in-the-loop script option, which needs a person; tighten it; non-deterministic bugs aim for a higher reproduction rate; when no loop can be built the worker lists what it tried and ends with `DAG_NODE_STATUS: failed: clarification: <what environment access, redacted artifact or permission is needed>`; the completion criterion is ONE command that was already run at least once, red-capable, deterministic, fast and runnable unattended, and no hypothesis before it exists); Phase 2 reproduce and minimise; Phase 3 hypothesise (3 to 5 ranked, falsifiable, each as "If X is the cause, changing Y will make the bug disappear or worse"; the ranked list goes into ## Output, it is not shown to anyone first); Phase 4 instrument (one variable at a time; every debug log carries a unique tag such as `[DEBUG-a4f2]`; the performance branch); Phase 5 fix and regression test (the worker itself judges whether a correct seam exists; if none exists it records that as a finding in ## Output); Phase 6 cleanup (re-run the loop, the tagged logs are gone by a search for the tag, throwaway files deleted, the correct hypothesis stated in ## Output).
+      - An `## Output template` section for the diagnosis node with the fields `Reproduction command:` (the exact argv line), `Observed failure:` (exit code and the symptom line), `Hypotheses:` (3 to 5, ranked, falsifiable) and `Root cause:` (file and line, or "not yet determined").
+      - A final line of attribution: `Adapted from mattpocock/skills (MIT), skills/engineering/diagnosing-bugs; see THIRD_PARTY_NOTICES.md at the repository root.`
+      - These source phrases must NOT appear in your file in any casing: `hitl`, `show the ranked list to the user`, `ask the user for`, `setup-matt-pocock`, `glossary.md`.
+      In ## Output give the file path, the frontmatter name, and the line count.
+
+      SCOPE: Read skills/dag-planning/SKILL.md (frontmatter shape only) and fetch the source with `gh api repos/mattpocock/skills/contents/skills/engineering/diagnosing-bugs/SKILL.md --jq .content | base64 -d` (MIT licensed: rewrite for the DAG context, do not paste the source whole). Write ONLY skills/dag-node-debugging/SKILL.md. Do not create other files; THIRD_PARTY_NOTICES.md, the other node skills and planning.md belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm the frontmatter has exactly the fields above, that the literal strings `DAG_NODE_STATUS: failed: clarification:`, `[DEBUG-`, `Reproduction command:` and `THIRD_PARTY_NOTICES.md` are present, and that none of the banned phrases appears in any casing (search the file for each). The runtime checks the same things after you report.
+      STOP WHEN: the file exists and passes the checks above. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the diagnosing-bugs source`.
+
+  - id: skill-review-standards
+    label: Vendor the standards review skill
+    category: writing
+    writes:
+      - skills/dag-node-review-standards/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-node-review-standards/SKILL.md
+        contains: "---\nname: dag-node-review-standards\ndescription: "
+      - kind: file
+        path: skills/dag-node-review-standards/SKILL.md
+        contains: "Mysterious Name"
+      - kind: file
+        path: skills/dag-node-review-standards/SKILL.md
+        contains: "Refused Bequest"
+      - kind: file
+        path: skills/dag-node-review-standards/SKILL.md
+        contains: "Standards verdict: PASS"
+      - kind: file
+        path: skills/dag-node-review-standards/SKILL.md
+        contains: "DAG_NODE_STATUS: failed: clarification:"
+      - kind: file
+        path: skills/dag-node-review-standards/SKILL.md
+        contains: "THIRD_PARTY_NOTICES.md"
+      - kind: command
+        argv:
+          - bun
+          - "-e"
+          - |-
+            const text = require('fs').readFileSync('skills/dag-node-review-standards/SKILL.md', 'utf8').toLowerCase()
+            const banned = ['setup-matt-pocock', 'sub-agent', 'tell the user to run', 'ask the user where']
+            const left = banned.filter(phrase => text.includes(phrase))
+            if (left.length > 0) {
+              console.error('source phrases that spawn agents or wait for a user are still in the skill: ' + left.join(', '))
+              process.exit(1)
+            }
+    prompt: |
+      TASK: Write the plugin skill skills/dag-node-review-standards/SKILL.md, an adaptation of the Standards axis and the Fowler smell baseline of the mattpocock code-review skill for DAG node workers (plan item 2e, decision D4 option b: vendor the extract as a dag-workflow skill, loaded by a `review-standards` node with `load_skills: ["dag-workflow:dag-node-review-standards"]`).
+      Background: the source reviews along two axes, Standards and Spec, by delegating each axis to a parallel helper. In this plugin the Spec axis is another node's job (`review-spec`), so this skill covers ONLY the Standards axis, and the worker is itself the reviewer: it delegates nothing and does the whole review itself. A DAG node worker cannot ask the user anything and nothing waits for an answer; wherever the source would ask, the skill tells the worker to end with `DAG_NODE_STATUS: failed: missing-input: <what is missing>` (an unresolved ref, an empty diff) or `DAG_NODE_STATUS: failed: clarification: <question>` (only the user can decide).
+
+      DELIVERABLE: skills/dag-node-review-standards/SKILL.md, English, at most 160 lines.
+      - Frontmatter exactly in this shape (and nothing else in it): a line `---`, `name: dag-node-review-standards`, `description: <one sentence: Standards-axis review discipline for DAG review nodes, loaded through load_skills>`, `when_to_use: <one sentence>`, a line `---`. Look at the frontmatter of skills/dag-planning/SKILL.md for the plugin's shape.
+      - Body, in this order: an intro saying this is the Standards axis only and the Spec axis belongs to another node; Step 1 pin the diff (use the diff command the node prompt gives; when it gives none, use `git status --short` and `git diff HEAD` and read the untracked files it lists; record the command in the report; an unresolved ref or an empty diff ends with the missing-input failure line); Step 2 find the standards sources (every file that documents how code is written, for example CONTRIBUTING.md, CODING_STANDARDS.md, CLAUDE.md, AGENTS.md, convention sections of README.md; when CODING_STANDARDS.md or CONTRIBUTING.md exists it MUST be on the list; skip anything tooling already enforces; list the files in the report); Step 3 the smell baseline with all twelve smells in this order, each as one line "what it is, then how to fix it": Mysterious Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession, Repeated Switches, Shotgun Surgery, Divergent Change, Speculative Generality, Message Chains, Middle Man, Refused Bequest. Two rules bind the baseline: a documented repository standard always wins, and every smell is a labelled judgment call ("possible Feature Envy"), never a hard violation. Step 4 the report: a `## Standards` section with (a) documented-standard violations, each citing the file and the rule, and (b) possible smells, each naming the smell and quoting the hunk; a one-line summary with the count per kind and the worst issue; at most 400 words; no judgment about the spec; the reviewer edits nothing except the notes file its prompt names. Verdict: the literal line `Standards verdict: PASS` when there is no documented-standard violation, otherwise `Standards verdict: FAIL (<n> documented-standard violations)` followed by the final line `DAG_NODE_STATUS: failed: <n> documented-standard violations`; smells alone never fail the node.
+      - A final line of attribution: `Adapted from mattpocock/skills (MIT), skills/engineering/code-review (Standards axis and smell baseline; the smells are from Fowler, Refactoring, ch. 3); see THIRD_PARTY_NOTICES.md at the repository root.`
+      - These source phrases must NOT appear in your file in any casing: `setup-matt-pocock`, `sub-agent`, `tell the user to run`, `ask the user where`.
+      In ## Output give the file path, the frontmatter name, and the line count.
+
+      SCOPE: Read skills/dag-planning/SKILL.md (frontmatter shape only) and fetch the source with `gh api repos/mattpocock/skills/contents/skills/engineering/code-review/SKILL.md --jq .content | base64 -d` (MIT licensed: rewrite for the DAG context, do not paste the source whole). Write ONLY skills/dag-node-review-standards/SKILL.md. Do not create other files; THIRD_PARTY_NOTICES.md, the other node skills and planning.md belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm the frontmatter has exactly the fields above, that all twelve smell names are present, that the literal strings `Standards verdict: PASS`, `DAG_NODE_STATUS: failed: clarification:` and `THIRD_PARTY_NOTICES.md` are present, and that none of the banned phrases appears in any casing (search the file for each). The runtime checks the same things after you report.
+      STOP WHEN: the file exists and passes the checks above. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the code-review source`.
+
+  - id: skill-testing
+    label: Vendor the node testing skill
+    category: writing
+    writes:
+      - skills/dag-node-testing/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-node-testing/SKILL.md
+        contains: "---\nname: dag-node-testing\ndescription: "
+      - kind: file
+        path: skills/dag-node-testing/SKILL.md
+        contains: "Tautological"
+      - kind: file
+        path: skills/dag-node-testing/SKILL.md
+        contains: "Horizontal slicing"
+      - kind: file
+        path: skills/dag-node-testing/SKILL.md
+        contains: "DAG_NODE_STATUS: failed: clarification:"
+      - kind: file
+        path: skills/dag-node-testing/SKILL.md
+        contains: "THIRD_PARTY_NOTICES.md"
+      - kind: command
+        argv:
+          - bun
+          - "-e"
+          - |-
+            const text = require('fs').readFileSync('skills/dag-node-testing/SKILL.md', 'utf8').toLowerCase()
+            const banned = ['pre-agreed', 'confirm them with the user', 'which seams should we test', 'codebase-design', 'glossary.md']
+            const left = banned.filter(phrase => text.includes(phrase))
+            if (left.length > 0) {
+              console.error('source phrases that wait for a user are still in the skill: ' + left.join(', '))
+              process.exit(1)
+            }
+    prompt: |
+      TASK: Write the plugin skill skills/dag-node-testing/SKILL.md, an adaptation of the mattpocock tdd skill (with its tests.md and mocking.md) for DAG node workers that write code and its tests, WITHOUT the source's step of confirming the seams with the user (plan item 2e, decision D4 option b: vendor the extract as a dag-workflow skill, loaded by nodes with `load_skills: ["dag-workflow:dag-node-testing"]`).
+      Background: a DAG node worker cannot ask the user anything and nothing waits for an answer. Where the source requires agreeing the test seams with the user before any test is written, the worker instead chooses the seams itself from the public interface its node prompt names, and states them in its ## Output (one line per seam: what it catches and what it misses). When no public interface can be identified, the worker ends with `DAG_NODE_STATUS: failed: clarification: <which interface should be tested>`.
+
+      DELIVERABLE: skills/dag-node-testing/SKILL.md, English, at most 170 lines (fold the content of tests.md and mocking.md into sections of this one file).
+      - Frontmatter exactly in this shape (and nothing else in it): a line `---`, `name: dag-node-testing`, `description: <one sentence: how DAG nodes write tests worth keeping, loaded through load_skills>`, `when_to_use: <one sentence>`, a line `---`. Look at the frontmatter of skills/dag-planning/SKILL.md for the plugin's shape.
+      - Body, in this order: what a good test is (behavior through public interfaces, reads like a specification, survives refactors) with one short good and one short bad example in plain TypeScript that does not depend on a particular test runner import (tell the worker to follow the runner and conventions it finds in the repository's existing tests); seams (where tests go, chosen by the worker and stated in ## Output as described above); the three anti-patterns with these exact names: Implementation-coupled, Tautological (expected values come from an independent source of truth, never recomputed the way the code computes them), Horizontal slicing (all tests first, then all code; work in vertical slices, one test then one implementation, each a tracer bullet); rules of the loop (red before green: run the new test and see it fail for the right reason before implementing, record the failing output; one slice at a time; refactoring is not part of the loop); mocking (mock at system boundaries only: external APIs, time and randomness, sometimes the database or the file system; never your own modules; dependency injection; SDK-style interfaces over generic fetchers); one closing paragraph tying it to the DAG: the node owns its change AND its proof, the node's declared `verify` should run the test command that covers the change, and a test that cannot fail verifies nothing.
+      - A final line of attribution: `Adapted from mattpocock/skills (MIT), skills/engineering/tdd (SKILL.md, tests.md, mocking.md); see THIRD_PARTY_NOTICES.md at the repository root.`
+      - These source phrases must NOT appear in your file in any casing: `pre-agreed`, `confirm them with the user`, `which seams should we test`, `codebase-design`, `glossary.md`.
+      In ## Output give the file path, the frontmatter name, and the line count.
+
+      SCOPE: Read skills/dag-planning/SKILL.md (frontmatter shape only) and fetch the sources with `gh api repos/mattpocock/skills/contents/skills/engineering/tdd/SKILL.md --jq .content | base64 -d`, `gh api repos/mattpocock/skills/contents/skills/engineering/tdd/tests.md --jq .content | base64 -d` and `gh api repos/mattpocock/skills/contents/skills/engineering/tdd/mocking.md --jq .content | base64 -d` (MIT licensed: rewrite for the DAG context, do not paste the sources whole). Write ONLY skills/dag-node-testing/SKILL.md. Do not create other files; THIRD_PARTY_NOTICES.md, the other node skills and planning.md belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read your file and confirm the frontmatter has exactly the fields above, that the literal strings `Tautological`, `Horizontal slicing`, `DAG_NODE_STATUS: failed: clarification:` and `THIRD_PARTY_NOTICES.md` are present, and that none of the banned phrases appears in any casing (search the file for each). The runtime checks the same things after you report.
+      STOP WHEN: the file exists and passes the checks above. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the tdd sources`.
+
+  - id: third-party-notices
+    label: Write the third-party MIT notices
+    category: quick
+    writes:
+      - THIRD_PARTY_NOTICES.md
+    verify:
+      - kind: file
+        path: THIRD_PARTY_NOTICES.md
+        contains: "mattpocock/skills"
+      - kind: file
+        path: THIRD_PARTY_NOTICES.md
+        contains: "Q00/ouroboros"
+      - kind: file
+        path: THIRD_PARTY_NOTICES.md
+        contains: "Matt Pocock"
+      - kind: file
+        path: THIRD_PARTY_NOTICES.md
+        contains: "Permission is hereby granted, free of charge"
+      - kind: file
+        path: THIRD_PARTY_NOTICES.md
+        contains: "skills/dag-node-testing/SKILL.md"
+    prompt: |
+      TASK: Write THIRD_PARTY_NOTICES.md at the repository root with the MIT license notices of mattpocock/skills and Q00/ouroboros, the two projects whose material the Phase 2 work of docs/improvement-plan.md adapts.
+      Background: the plugin vendors adapted extracts (rewritten and shortened, not copied whole). MIT requires that the copyright notice and the permission notice accompany the adapted material.
+
+      DELIVERABLE: THIRD_PARTY_NOTICES.md with an intro paragraph and two sections.
+      - `## mattpocock/skills`: the URL https://github.com/mattpocock/skills, the license name MIT, the full license text exactly as fetched inside a fenced block, and the list of what is adapted from it: skills/dag-node-debugging/SKILL.md (from skills/engineering/diagnosing-bugs), skills/dag-node-review-standards/SKILL.md (from skills/engineering/code-review, Standards axis and smell baseline), skills/dag-node-testing/SKILL.md (from skills/engineering/tdd with tests.md and mocking.md), and the guidance in skills/dag-planning/references/planning.md on the two-axis review (from code-review), vertical slices and wide refactors (from to-tickets) and the debug chain (from diagnosing-bugs).
+      - `## Q00/ouroboros`: the URL https://github.com/Q00/ouroboros, the license name MIT, the full license text exactly as fetched inside a fenced block, and the list of what is adapted from it: the safe-but-wrong audit checklist in skills/dag-planning/references/planning.md (from docs/guides/safe-but-wrong-output.md).
+      In ## Output give the file path and the two copyright lines you copied.
+
+      SCOPE: Fetch the license texts with `gh api repos/mattpocock/skills/license --jq .content | base64 -d` and `gh api repos/Q00/ouroboros/license --jq .content | base64 -d`. Write ONLY THIRD_PARTY_NOTICES.md. Do not edit any other file; the skills and planning.md are written by other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Re-read the file and confirm that each license text is present in full, starting at its `MIT License` line and ending at the last line of the fetched text, and that every path listed above appears. The runtime checks for both project names, the copyright holder `Matt Pocock`, the sentence `Permission is hereby granted, free of charge` and the path skills/dag-node-testing/SKILL.md.
+      STOP WHEN: the file exists with both license texts and both adaptation lists. If `gh api` fails, do not write the license from memory: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch a license`.
+
+  # ---- Wave 2: integrate the doctrine drafts into planning.md and point SKILL.md at them ----
+  - id: synthesize-planning
+    label: Integrate the drafts into planning.md
+    category: unspecified-low
+    dependsOn:
+      - draft-2a
+      - draft-2b
+      - draft-2c
+      - draft-2d
+    writes:
+      - skills/dag-planning/references/planning.md
+      - skills/dag-planning/SKILL.md
+    verify:
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "### Two-axis review (code-changing runs)"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "### Safe-but-wrong audit checklist"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "### Vertical slices and wide refactors"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "### Debug chain (diagnose run, then fix run)"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "partial/supporting-output"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "Standards verdict: PASS"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "dag-workflow:dag-node-debugging"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "dag-workflow:dag-node-review-standards"
+      - kind: file
+        path: skills/dag-planning/references/planning.md
+        contains: "dag-workflow:dag-node-testing"
+      - kind: file
+        path: skills/dag-planning/SKILL.md
+        contains: "debug chain"
+      - kind: file
+        path: skills/dag-planning/SKILL.md
+        contains: "dag-workflow:dag-node-debugging"
+      - kind: command
+        argv: [git, diff, --check, --, skills/dag-planning]
+    prompt: |
+      TASK: Integrate the four lane drafts (plan items 2a to 2d) into skills/dag-planning/references/planning.md, and add pointers to the new material in skills/dag-planning/SKILL.md only where they must be.
+      Background: you receive the four draft nodes' ## Output above; the drafts themselves are the files notes/p2-2a-two-axis-wave.md, notes/p2-2b-wrong-output-checklist.md, notes/p2-2c-decomposition.md and notes/p2-2d-debug-chain.md. Each holds a `Target heading:` line, ready-to-paste text, a `Placement:` line and a `Conflicts` section. The plugin ships three node skills that other nodes write in this same run: dag-workflow:dag-node-debugging (diagnosis and fix nodes), dag-workflow:dag-node-review-standards (the review-standards node) and dag-workflow:dag-node-testing (nodes that write code and tests). Their names are fixed.
+
+      DELIVERABLE:
+      1. planning.md gains EXACTLY these four new `###` subsections with these exact heading lines: `### Two-axis review (code-changing runs)` and `### Safe-but-wrong audit checklist`, both inside "## Verification wave"; `### Vertical slices and wide refactors` and `### Debug chain (diagnose run, then fix run)`, both inside "## Decomposition doctrine" (the debug chain right after the paragraph "Unknown cause: investigate, then fix"). Add one pointer sentence about the two-run debug chain in "## Composing runs". Use the drafts' text, tightened where the drafts overlap; keep the planning.md style (short bold lead-ins, bullets, no emojis). Keep these literal strings in the new text: `Spec verdict: PASS` and `Standards verdict: PASS` in the two-axis review, and `partial/supporting-output` in the safe-but-wrong checklist.
+      2. Reconcile every conflict the drafts list by changing the minimum number of existing words, so the doctrine reads consistently. Keep every existing rule; do not delete or weaken one. The file already carries uncommitted edits from earlier work (final-audit rule, Jev routing, and possibly the verification paragraph): edit in place, never rewrite wholesale, never revert anything.
+      3. planning.md names the node skills by their exact names: `dag-workflow:dag-node-debugging` in the debug chain, `dag-workflow:dag-node-review-standards` in the two-axis review and `dag-workflow:dag-node-testing` where it describes nodes that write code and their tests; it says they are plugin skills loaded through the node field `load_skills`.
+      4. SKILL.md: edit ONLY (a) the sentence that lists what planning.md carries, so that it mentions the two-axis review template, the safe-but-wrong audit checklist, vertical-slice and expand-migrate-contract decomposition and the debug chain (use the literal words "debug chain"), and (b) the sentence that lists the optional per-node extras, so that it names the three node skills with their exact names after `load_skills`. No other SKILL.md change and no reformatting.
+      5. Out of scope, do not add: interview, product-management or alignment steps (Phase 3), lint rules (Phase 1), README text.
+      In ## Output give the four headings with the line numbers where they now start, the conflicts you reconciled (quote the changed sentence before and after), and the SKILL.md lines you changed.
+
+      SCOPE: Read the four draft files, skills/dag-planning/references/planning.md IN FULL and skills/dag-planning/SKILL.md. Write ONLY skills/dag-planning/references/planning.md and skills/dag-planning/SKILL.md. Do not edit the drafts, the skills under skills/dag-node-*, THIRD_PARTY_NOTICES.md, README.md or any code. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: Before integrating, confirm each draft file exists and contains its target heading (the upstream outputs are claims until you check). After editing, run `git diff --check -- skills/dag-planning` and expect exit code 0, grep planning.md for the four exact heading lines, and confirm the three node skill names and `partial/supporting-output` are present in planning.md and `debug chain` is present in SKILL.md. The runtime checks the same things after you report.
+      STOP WHEN: all four subsections exist in planning.md, the SKILL.md pointers exist, and the whitespace check exits 0. If a draft file is missing or lacks its target heading, end with `DAG_NODE_STATUS: failed: missing-input: <which draft>`.
+
+  # ---- Wave 3: verification wave (D5), two independent end nodes, no aggregator ----
+  - id: review-spec
+    label: Spec review of the Phase 2 deliverables
+    category: unspecified-low
+    dependsOn:
+      - synthesize-planning
+      - skill-debugging
+      - skill-review-standards
+      - skill-testing
+      - third-party-notices
+    writes:
+      - notes/p2-review-spec.md
+    verify:
+      - kind: file
+        path: notes/p2-review-spec.md
+        contains: "Spec verdict: PASS"
+      - kind: file
+        path: notes/p2-review-spec.md
+        contains: "Plan item 2a: PASS"
+      - kind: file
+        path: notes/p2-review-spec.md
+        contains: "Plan item 2e: PASS"
+    prompt: |
+      TASK: Independently judge whether the Phase 2 deliverables match plan items 2a to 2e of docs/improvement-plan.md, with nothing missing and nothing extra, and write the verdict to notes/p2-review-spec.md.
+      Background: this is the Spec axis of a two-axis review; a sibling node judges the Standards axis separately. Judge the REPOSITORY FILES, not the producers' reports: the upstream outputs above are claims until you check them. The spec is the "Phase 2" section of docs/improvement-plan.md (read it in Korean, in full, plus the decision table D3 to D5 and the backlog table).
+
+      DELIVERABLE: notes/p2-review-spec.md with one line per plan item in the form `Plan item <id>: PASS` or `Plan item <id>: FAIL - <reason>` followed by the evidence (file path and line, plus the quoted plan sentence the finding rests on), then an `Extras` section, then a final line `Spec verdict: PASS` (only when every plan item is PASS and Extras reports nothing) or `Spec verdict: FAIL`. Judge these items:
+      - Plan item 2a: skills/dag-planning/references/planning.md has the subsection `### Two-axis review (code-changing runs)` with a `review-spec` node (missing or partial implementation, unrequested behavior, implemented but looks wrong, each finding quoting the request sentence) and a `review-standards` node (repository rule files plus the Fowler smell baseline, smells always judgment calls, repository rules win), applied only to runs that change code with documentation and research runs keeping the single verification node, and per D5 both review nodes are end nodes with no aggregator.
+      - Plan item 2b: the subsection `### Safe-but-wrong audit checklist` makes these REQUIRED content of the final audit prompt: the artifact kind equals the requested kind, the deliverable can be re-run with new input, missing data is not shown as OK, 0 or empty, the verification proved behavior and not only file existence, and a shortfall is reported as `partial/supporting-output` and not as complete.
+      - Plan item 2c: the subsection `### Vertical slices and wide refactors` keeps the split by deliverable unit, defines the unit of feature work as an end-to-end vertical slice, and sequences wide refactors as `expand`, then `migrate` batches by blast radius, then `contract`, as a chain.
+      - Plan item 2d: the subsection `### Debug chain (diagnose run, then fix run)` follows D3 option (a), two runs; the diagnosis run leaves ONE already-failed reproduction command plus 3 to 5 falsifiable hypotheses in its Output; the fix run puts the command into `verify`; debug logs use a `[DEBUG-xxxx]` tag; the removal check is stated as not expressible in the current schema (backlog B2).
+      - Plan item 2e: skills/dag-node-debugging/SKILL.md (from diagnosing-bugs), skills/dag-node-review-standards/SKILL.md (standards axis and Fowler smell baseline of code-review) and skills/dag-node-testing/SKILL.md (from tdd WITHOUT the confirm-seams-with-the-user step) exist per D4 option (b); in each, no step waits for a user answer and the places where the source would ask end with `DAG_NODE_STATUS: failed: clarification: <question>` (or a missing-input failure); THIRD_PARTY_NOTICES.md at the repository root holds the MIT notices of mattpocock/skills and Q00/ouroboros. The check that `load_skills` resolves inside a node is explicitly NOT part of this run; do not fail for its absence.
+      - Extras: report anything the plan did not ask for, such as Phase 3 material (interview, product-management or alignment steps, AskUserQuestion, non-interactive flags) in planning.md or SKILL.md, a skill directory beyond the three above, a root file other than THIRD_PARTY_NOTICES.md created by this run, or doctrine text that traces to none of 2a to 2e. Earlier phases legitimately changed other files (Phase 1 edits hooks/engine/lint.ts, tests, README.md and the verification paragraph of planning.md; Phase 0 edits docs/improvement-plan.md, eval/baselines and flows/); do not count those as extras. The files notes/p2-*.md are expected.
+      In ## Output give the per-item verdicts in one line each and the Extras result.
+
+      SCOPE: READ-ONLY on everything except notes/p2-review-spec.md. Read docs/improvement-plan.md, skills/dag-planning/references/planning.md IN FULL, skills/dag-planning/SKILL.md, skills/dag-node-debugging/SKILL.md, skills/dag-node-review-standards/SKILL.md, skills/dag-node-testing/SKILL.md, THIRD_PARTY_NOTICES.md, and run `git status --short` and `git diff -- skills/dag-planning` to separate this run's changes from earlier work. The Standards axis (consistency with existing doctrine, README.md, lint and runtime rules) belongs to the review-standards node: do not judge it here. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: for every plan item quote the exact line of the repository file that satisfies it; write PASS only for an item whose evidence you read in the file. The runtime checks that the notes file contains `Spec verdict: PASS`, `Plan item 2a: PASS` and `Plan item 2e: PASS`, so a FAIL verdict fails this node.
+      STOP WHEN: every item has a supported verdict and the file is written. When any item is FAIL or Extras is not empty, write `Spec verdict: FAIL` and end with `DAG_NODE_STATUS: failed: <which items failed>`.
+
+  - id: review-standards
+    label: Standards review of the Phase 2 deliverables
+    category: unspecified-low
+    dependsOn:
+      - synthesize-planning
+      - skill-debugging
+      - skill-review-standards
+      - skill-testing
+      - third-party-notices
+    writes:
+      - notes/p2-review-standards.md
+    verify:
+      - kind: file
+        path: notes/p2-review-standards.md
+        contains: "Standards verdict: PASS"
+      - kind: file
+        path: notes/p2-review-standards.md
+        contains: "## Standards"
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Independently judge whether the Phase 2 deliverables are consistent with the existing doctrine, README.md and the plugin's lint and runtime rules, with no contradictions, and write the verdict to notes/p2-review-standards.md.
+      Background: this is the Standards axis of a two-axis review; a sibling node judges the Spec axis separately, so do not judge whether the plan items are all present. The deliverables are: the four new subsections of skills/dag-planning/references/planning.md (`### Two-axis review (code-changing runs)`, `### Safe-but-wrong audit checklist`, `### Vertical slices and wide refactors`, `### Debug chain (diagnose run, then fix run)`), the pointers in skills/dag-planning/SKILL.md, the three skills skills/dag-node-debugging/SKILL.md, skills/dag-node-review-standards/SKILL.md and skills/dag-node-testing/SKILL.md, and THIRD_PARTY_NOTICES.md. The upstream outputs above are claims until you check them against the files. Read skills/dag-node-review-standards/SKILL.md first (written earlier in this same run; read it with the Read tool, it is not preloaded) and follow its report shape; where it and this prompt differ, this prompt wins.
+
+      DELIVERABLE: notes/p2-review-standards.md with a `## Standards` section holding (a) documented-standard violations (hard, each citing the file and the rule) and (b) possible smells (judgment calls, each named "possible <Smell>" with the quoted passage), a one-line summary with the count per kind and the worst issue, and a final line `Standards verdict: PASS` (only when there is no documented-standard violation and no contradiction) or `Standards verdict: FAIL (<n> violations)`. Check these rules:
+      - Existing doctrine in planning.md: no new text contradicts the sections "Decomposition doctrine" (including "Split implementation from its test? No", "Unknown cause: investigate, then fix", "Do not split when" and the one-deliverable-per-node rule), "Category routing" (the final audit never runs on quick; the two review nodes must be routed unspecified-low or higher), "Edges, data and write scopes", "Node prompt contract" (five markers TASK:, DELIVERABLE:, SCOPE:, VERIFY:, STOP WHEN in any prompt skeleton), "The verify contract" (checks that can fail; no deliverable named REPORT*, SUMMARY*, FINDINGS* or ANALYSIS*) and "Failure playbook". Every example node, edge and `verify` in the new text must itself satisfy these rules.
+      - Plugin rules against code: compare the new text with hooks/engine/lint.ts (what `lintDefinition` warns about, including any vacuous-verify rules that earlier phases added), hooks/engine/node-prompt.ts (the `DAG_NODE_STATUS:` grammar, `## Output`, `load_skills`, the category table), hooks/engine/definition.ts and hooks/engine/verification.ts (verify and writes limits). A statement in the doctrine that the code contradicts is a violation.
+      - README.md: the sections "계획 스킬", "정의 형식", "검증" and "자동 복구" must not be contradicted. README staleness that is not a contradiction (for example the content list of planning.md being less detailed than the new text) is a possible smell, never a violation, and you do not edit README.md.
+      - The three skills: the frontmatter has the same shape as skills/dag-planning/SKILL.md (name equals the directory name, description, when_to_use); no step waits for a user answer; no step tells the worker to commit, push, install or reload plugins; the attribution line points at THIRD_PARTY_NOTICES.md; the Standards skill states the verdict-line grammar the planning.md subsection uses (`Standards verdict: PASS`).
+      - THIRD_PARTY_NOTICES.md: each notice has its MIT license text and its adapted-file list, and the listed files exist.
+      - Smell baseline, as judgment calls only: duplicated doctrine text between planning.md, SKILL.md and the skills, and abstractions or rules added for needs nobody stated (Speculative Generality).
+      In ## Output give the verdict, the counts per kind, and the worst issue.
+
+      SCOPE: READ-ONLY on everything except notes/p2-review-standards.md. Read skills/dag-node-review-standards/SKILL.md, the deliverables above, skills/dag-planning/references/planning.md IN FULL, README.md, hooks/engine/lint.ts, hooks/engine/node-prompt.ts, hooks/engine/definition.ts, hooks/engine/verification.ts, and run `git diff -- skills/dag-planning` to see this run's changes. Run `claude plugin validate .` yourself and read its output for warnings that name the new skills. The Spec axis (is every plan item present, anything extra) belongs to the review-spec node: do not judge it here. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: run `claude plugin validate .` and expect exit code 0 with no warning that names one of the three new skills; record the result in the notes file. The runtime runs the same command and checks that the notes file contains `## Standards` and `Standards verdict: PASS`, so a FAIL verdict fails this node.
+      STOP WHEN: the checks above are done and the file is written. When any documented-standard violation or contradiction exists, write `Standards verdict: FAIL (<n> violations)` and end with `DAG_NODE_STATUS: failed: <n> documented-standard violations`.
+
+  # ---- Last: record the outcome in the progress table ----
+  - id: progress-log
+    label: Record P2 in the progress table
+    category: quick
+    dependsOn:
+      - review-spec
+      - review-standards
+    writes:
+      - docs/improvement-plan.md
+    verify:
+      - kind: file
+        path: docs/improvement-plan.md
+        contains: "| P2 | 완료 | 20"
+      - kind: file
+        path: docs/improvement-plan.md
+        contains: "| P3 | 대기 | | |"
+    prompt: |
+      TASK: Update ONLY the P2 row of the progress table under the heading "## 진행 기록" in docs/improvement-plan.md to record that this run finished.
+      Background: both review outputs above must report a PASS verdict (`Spec verdict: PASS` and `Standards verdict: PASS`). If either output reports FAIL or lacks its verdict line, change nothing and end with `DAG_NODE_STATUS: failed: review verdict is not PASS`.
+
+      DELIVERABLE: the row that now reads `| P2 | 대기 | | |` becomes `| P2 | 완료 | <date> | <memo> |` where
+      - `<date>` is the output of the command `date +%F` (run it; do not guess the date);
+      - `<memo>` is one line in Korean, with no `|` character, that starts with this run's id (the `run dag_...` id in the first sentence of your instructions), followed by a colon, a short result (what was added to planning.md, the three node skills, THIRD_PARTY_NOTICES.md, both reviews passed) and the words "eval 재실행은 별도".
+      Every other line of the file stays byte for byte as it was, including the P0, P1 and P3 rows and the rest of the table.
+      In ## Output give the final text of the P2 row.
+
+      SCOPE: Edit ONLY the P2 row of docs/improvement-plan.md. Do not touch any other row, section or file. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
+      VERIFY: read the P2 row back, and run `git diff -- docs/improvement-plan.md` to confirm that no line other than the P2 row of the progress table was changed by you (earlier phases may have changed other lines before this run; leave them alone). The runtime checks that the file contains `| P2 | 완료 | 20` and still contains `| P3 | 대기 | | |`.
+      STOP WHEN: the P2 row shows the 완료 status, the date and the memo, and no other row changed.
