@@ -24,7 +24,7 @@ function askGate(on: On, $: Engine) {
 // A `claude -p` session: no surface, nobody to answer an ask.
 async function bootHeadless($: Engine) {
   await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
 }
 
 function agentOf(h: ReturnType<typeof harness>, runId: string): string {

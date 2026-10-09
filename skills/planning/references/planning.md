@@ -1,4 +1,4 @@
-# dag-planning reference
+# planning reference
 
 Read this file in full before defining any graph.
 Without it, runs can collapse into one or three large nodes without verification.
@@ -72,9 +72,9 @@ Load the plugin's working instructions through `load_skills`:
 
 | Node task | Skill |
 | --- | --- |
-| Write code and tests | `dag-workflow:dag-node-testing` |
-| Diagnose or fix a bug (see Debug chain) | `dag-workflow:dag-node-debugging` |
-| `review-standards` | `dag-workflow:dag-node-review-standards` |
+| Write code and tests | `dag-workflow:testing` |
+| Diagnose or fix a bug (see Debug chain) | `dag-workflow:debugging` |
+| `review-standards` | `dag-workflow:review-standards` |
 
 **Unknown cause: investigate, then fix.** If the request says "find out why" or "figure out the cause", use a diagnosis node.
 This in-run approach applies when an existing command can verify the fix.
@@ -107,7 +107,7 @@ The reproduction file supports run 2; it is not a code change.
 Thus `verify-repro` is run 1's whole verification wave. The two-axis review belongs to run 2.
 
 - Start read-only investigation lanes: one `quick` node per independent area, such as the failing path, recent changes, configuration and inputs. Skip these lanes if the suspect area fits in one file. Each lane writes only `notes/<bug>-<lane>-notes.md` and never edits the investigated code.
-- Use one diagnosis node that depends on all lanes. Select `unspecified-low`, or `deep-low` for difficult or cross-module debugging. Set `load_skills: ["dag-workflow:dag-node-debugging"]`. Declare `writes` for `notes/<bug>-diagnosis.md` and any reproduction file to create. Use `verify` file checks for the field names below in the diagnosis notes.
+- Use one diagnosis node that depends on all lanes. Select `unspecified-low`, or `deep-low` for difficult or cross-module debugging. Set `load_skills: ["dag-workflow:debugging"]`. Declare `writes` for `notes/<bug>-diagnosis.md` and any reproduction file to create. Use `verify` file checks for the field names below in the diagnosis notes.
 - Quote the user's symptom verbatim in the prompt. The `## Output` and notes file contain exactly these fields:
   - `Reproduction command:` One command in argv form, run from the project root without a shell.
   - `Observed failure:` Exit code and symptom line, with secrets redacted.
@@ -123,7 +123,7 @@ Show the user the ranked hypotheses; users often re-rank them, but do not wait f
 Then `start` under a new key.
 Paste the facts into the prompts because nothing crosses runs automatically.
 
-- The fix node uses `load_skills: ["dag-workflow:dag-node-debugging"]`. Its prompt contains the verbatim command, observed failure, hypotheses and root cause. Never summarize the command. Its `verify` uses that same command as `{"kind": "command", "argv": [...]}` and passes only on exit 0. Put pipelines, redirects or environment setup in a script named in argv, such as `["bash", "scripts/repro-a4f2.sh"]`. The script must propagate failure exit codes.
+- The fix node uses `load_skills: ["dag-workflow:debugging"]`. Its prompt contains the verbatim command, observed failure, hypotheses and root cause. Never summarize the command. Its `verify` uses that same command as `{"kind": "command", "argv": [...]}` and passes only on exit 0. Put pipelines, redirects or environment setup in a script named in argv, such as `["bash", "scripts/repro-a4f2.sh"]`. The script must propagate failure exit codes.
 - Order the prompt's work: run the command and report its exit code, fix the root cause, then rerun the command. If the first run exits 0, end with `DAG_NODE_STATUS: failed: missing-input: reproduction no longer fails`. Keep the reproduction file, fixtures and helpers, including indirect dependencies of regression tests and `verify`. The runtime and final audit need them after the report.
 - If the command still fails, the node fails. `retry` with the original prompt plus what the attempt ruled out, so the next hypothesis moves up. `retry` replaces the prompt; it does not append to it.
 - `Root cause: not yet determined` is allowed. In that case, start run 2 with an investigation node. It tests hypotheses in rank order, one change at a time. The fix node depends on it and still uses the reproduction command as `verify`.
@@ -154,7 +154,7 @@ The following rules define feature units and wide refactor structure.
 **A feature is cut into vertical slices, never into layers.**
 A vertical slice is a small, complete path through all affected layers: schema, API, UI and tests.
 It must be demonstrable or verifiable on its own.
-One node owns the slice and its tests, with `load_skills: ["dag-workflow:dag-node-testing"]`.
+One node owns the slice and its tests, with `load_skills: ["dag-workflow:testing"]`.
 This applies "Split implementation from its test? No." to features.
 
 Separate `schema`, `api` and `ui` nodes for one feature are wrong horizontal slices.
@@ -389,7 +389,7 @@ Replace the single verification node with two end nodes: `review-spec` and `revi
 - **When it applies.** At least one producer adds or edits code: source, tests, configuration or build files. Documentation, research and data runs keep one verification node to avoid extra review time. A one-node run (see "One-step tasks are one-node DAGs") stays one node with its VERIFY step.
 - **Shape.** Both reviewers depend on all producers, have no dependents and use no aggregator. Do not merge or re-rank the axes. The settled summary already shows outputs side by side. Keep `review` in both ids so the plugin recognizes them. Use `unspecified-low` or higher because they judge the result. The plugin enforces this only with two or more inputs. With one producer, leaving `quick` produces no warning.
 - **`review-spec` judges the result against the goal and the request.** Report (a) missing or partial implementation, (b) unrequested behavior (scope creep), and (c) implemented but wrong-looking behavior. Each finding quotes its request sentence and cites evidence as file:line. For (b), quote the nearest sentence it exceeds, or state that no sentence covers it. The spec is the run's `goal` plus request text pasted into the prompt. "See the goal" is not a quote. Rerun the producers' real check from `verify`; record its exit code as evidence for (c). Use `## Request sentences`, `## Findings`, and `## Real check` in the notes file. Under Findings, include groups (a), (b), (c), each `none` when empty. Include the Safe-but-wrong audit checklist below in the prompt.
-- **`review-standards` judges the result against the repository's rule files** and the Fowler code-smell baseline. Name known files, such as CONTRIBUTING and CLAUDE.md, in the prompt; the node searches for more. Load the baseline with `load_skills: ["dag-workflow:dag-node-review-standards"]`, using skill `dag-workflow:dag-node-review-standards`. `load_skills` is outside the fingerprint; adding it through `amend` re-runs nothing. Quote the rule for every documented breach. Label smells as judgment calls, never hard violations. Repository rules override the baseline. Skip what a linter or compiler already enforces. Use `## Rule sources`, `## Rule breaches`, and `## Judgment calls` in the notes file, each `none` when empty. If no rule files exist, say so and use only the baseline. If the baseline is missing from context, write "baseline unavailable" and judge only documented rules.
+- **`review-standards` judges the result against the repository's rule files** and the Fowler code-smell baseline. Name known files, such as CONTRIBUTING and CLAUDE.md, in the prompt; the node searches for more. Load the baseline with `load_skills: ["dag-workflow:review-standards"]`, using skill `dag-workflow:review-standards`. `load_skills` is outside the fingerprint; adding it through `amend` re-runs nothing. Quote the rule for every documented breach. Label smells as judgment calls, never hard violations. Repository rules override the baseline. Skip what a linter or compiler already enforces. Use `## Rule sources`, `## Rule breaches`, and `## Judgment calls` in the notes file, each `none` when empty. If no rule files exist, say so and use only the baseline. If the baseline is missing from context, write "baseline unavailable" and judge only documented rules.
 - **Verdict lines.** Write each notes file once, in full, with exactly one final verdict line. Use `Spec verdict: PASS` or `Spec verdict: FAIL`, and `Standards verdict: PASS` or `Standards verdict: FAIL`. Spec passes only when (a), (b), (c) are empty, the real check exits 0, and the checklist holds. Standards fails only for documented-rule breaches; judgment calls alone pass. On FAIL, end the node with `DAG_NODE_STATUS: failed: <what failed>`.
 - **The verdict is machine-checked.** Each reviewer declares a `verify` file check with `contains` set to its PASS line: `Spec verdict: PASS` or `Standards verdict: PASS`. Add a check for its findings heading: `## Findings` or `## Rule breaches`. Thus a FAIL report fails verification even if the node claims completion. Tell the node to put PASS text only on the final line. Quoting PASS elsewhere in a FAIL report would satisfy the check.
 - **Self-contained prompts.** Reviewers cannot spawn sub-agents or ask questions. Before `start`, pin the fixed point: `git rev-parse HEAD` for uncommitted work, or the base commit. Paste it, the goal and the request text verbatim into both prompts. Missing input ends with `DAG_NODE_STATUS: failed: missing-input: <what>`, never a question. Reviewers read their targets and write only their own notes files. Use names such as `<node-id>-notes.md`, never names starting with REPORT, SUMMARY, FINDINGS or ANALYSIS. Each prompt marks the other axis out of scope.

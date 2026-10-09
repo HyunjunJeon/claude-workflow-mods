@@ -8,7 +8,7 @@ export type {}
 declare module 'claude-code' {
   interface PluginState {
     'dag-workflow': {
-      // True once the dag-workflow:dag-planning skill was loaded in this conversation. A /clear writes false.
+      // True once the dag-workflow:planning skill was loaded in this conversation. A /clear writes false.
       planningLoaded: boolean
     }
   }

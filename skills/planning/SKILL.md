@@ -1,11 +1,11 @@
 ---
-name: dag-planning
+name: planning
 description: Mandatory planning doctrine for dag-workflow. Load it BEFORE the first mcp__dag-workflow__dag start or amend in a session - the plugin refuses that start until this skill is loaded. Covers turning a task into a dependency-ordered DAG of subagent nodes, how results flow along dependsOn, the node prompt contract, the verification wave, and recovering runs.
 when_to_use: Any task in a session where dag-workflow enforces DAG orchestration - planning a DAG, writing node prompts, reading a run-settled summary, retrying or amending a run, chaining a follow-up run.
 argument-hint: "[task]"
 ---
 
-# dag-planning
+# planning
 
 Use `mcp__dag-workflow__dag` to run every task as a DAG of subagent nodes.
 The main conversation plans, reads, orchestrates and verifies.
@@ -65,7 +65,7 @@ Put the round in a single AskUserQuestion call with at most 4 numbered questions
 Give each question a recommended answer as its first option, so a plain yes accepts it.
 If the injected protocol marks the session non-interactive, skip the round and decide.
 Write every assumption into `definition.goal` and the node prompts.
-When the request is large and vague, suggest `/dag-workflow:dag-interview` (multi-round interview) or `/dag-workflow:dag-pm` (PRD interview).
+When the request is large and vague, suggest `/dag-workflow:interview` (multi-round interview) or `/dag-workflow:pm` (PRD interview).
 Those skills are user-invoked only; never invoke them.
 After the answers, write the confirmed goal into `definition.goal` and the acceptance criteria into `verify`.
 
@@ -103,9 +103,9 @@ Optional extras are `agent`, `label`, `task_summary`, `description` and `load_sk
 `agent` selects a subagent type, such as `Explore`.
 `load_skills` names plugin skills to load first:
 
-- `dag-workflow:dag-node-debugging` for diagnosis and fix nodes.
-- `dag-workflow:dag-node-review-standards` for the review-standards node.
-- `dag-workflow:dag-node-testing` for nodes that write code and tests.
+- `dag-workflow:debugging` for diagnosis and fix nodes.
+- `dag-workflow:review-standards` for the review-standards node.
+- `dag-workflow:testing` for nodes that write code and tests.
 
 `dependsOn` controls order and passes data.
 When a node starts, the plugin adds its direct dependencies' outputs to its prompt.

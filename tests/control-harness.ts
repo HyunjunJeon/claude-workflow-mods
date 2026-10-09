@@ -124,7 +124,7 @@ export function harness(on: On) {
 
 export async function boot($: Engine) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
 }
 
 export async function dag($: Engine, input: Record<string, unknown>): Promise<Record<string, unknown>> {

@@ -4,10 +4,13 @@ import type { EngineError } from './types.ts'
 export type Enforcement = 'strict' | 'guide' | 'off'
 
 export const DAG_TOOL = 'mcp__dag-workflow__dag'
-export const PLANNING_SKILL = 'dag-workflow:dag-planning'
+export const PLANNING_SKILL = 'dag-workflow:planning'
 
+// Only this plugin's skill or its bare name opens the strict gate; `planning` is short enough that another plugin's `x:planning` must not.
 export function isPlanningSkill(name: unknown): boolean {
-  return typeof name === 'string' && /(^|:)dag-planning$/.test(name.trim().replace(/^\//, ''))
+  if (typeof name !== 'string') return false
+  const skill = name.trim().replace(/^\//, '')
+  return skill === PLANNING_SKILL || skill === 'planning'
 }
 
 export function planningRequired(): EngineError {

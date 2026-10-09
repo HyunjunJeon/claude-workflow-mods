@@ -518,7 +518,7 @@ test('start {path} is refused until the planning skill is loaded, like start {de
   expect(await dag($, { action: 'start', definition: FLOW_OBJECT })).toMatchObject({ error: { code: 'planning_skill_required' } })
   expect(h.reads).toHaveLength(readsBefore)
   expect(h.spawns).toHaveLength(0)
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
   expect(await dag($, { action: 'start', path: 'flow.yaml' })).toMatchObject({ reused: false })
   expect(h.spawns).toHaveLength(1)
 })

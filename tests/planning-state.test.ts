@@ -2,7 +2,7 @@ import { expect, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { dag, harness } from './control-harness.ts'
 
-const SKILL = 'dag-workflow:dag-planning'
+const SKILL = 'dag-workflow:planning'
 const FLOW = {
   key: 'planning-state',
   nodes: [{ id: 'a', prompt: 'TASK: Make a.txt. DELIVERABLE: a.txt. SCOPE: a.txt only. VERIFY: cat a.txt. STOP WHEN: it exists.', verify: [{ kind: 'command', argv: ['check-control'] }] }],

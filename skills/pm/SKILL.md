@@ -1,13 +1,13 @@
 ---
-name: dag-pm
+name: pm
 description: User-invoked only; interviews the user as product owner, sorts every question into product decision, technical decision or unknown, and has a one-node DAG write the PRD.
 disable-model-invocation: true
 argument-hint: "[product idea]"
 ---
 
-# dag-pm
+# pm
 
-The user starts this skill with `/dag-workflow:dag-pm [idea]`.
+The user starts this skill with `/dag-workflow:pm [idea]`.
 The model never invokes it on its own.
 The user is the product owner, so the questions ask what and why, never how.
 
@@ -18,7 +18,7 @@ If a fact about the existing product or code matters, find it by reading.
 Do not ask the user for facts you can read.
 If no idea was given, ask for it in the first round.
 
-Run the rounds the way `/dag-workflow:dag-interview` does:
+Run the rounds the way `/dag-workflow:interview` does:
 
 - Number every question.
 - Give each question a recommended answer as its first option.
@@ -59,14 +59,14 @@ Write nothing before the user confirms.
 ## Writing the PRD
 
 The main conversation cannot write files, so a one-node DAG writes the PRD.
-Load the `dag-workflow:dag-planning` skill first, because `start` is refused until you do.
+Load the `dag-workflow:planning` skill first, because `start` is refused until you do.
 Follow its planning step.
 Then start a definition with a one-sentence goal and ONE node:
 
 - `id`: `write-prd`.
 - `category`: `writing`.
 - `writes`: `docs/prd/<slug>.md`. Prefer a short kebab-case slug from the product name.
-- `prompt`: self-contained, in the node prompt contract of dag-planning. Paste every confirmed answer into it.
+- `prompt`: self-contained, in the node prompt contract of the planning skill. Paste every confirmed answer into it.
 - `verify`: two file checks on that path, one containing `## Open items` and one containing `## Goals`.
 
 If the user wants another path, ask for it before `start` and use it in `writes` and `verify`.
@@ -89,7 +89,7 @@ Do not write the PRD yourself.
 Do not try to spawn an agent.
 When the run settles, Read the PRD file.
 Show the user its path and its open items.
-If the run failed, recover it with the rules of dag-planning.
-Suggest `/dag-workflow:dag-interview` or normal planning as the next step.
+If the run failed, recover it with the rules of the planning skill.
+Suggest `/dag-workflow:interview` or normal planning as the next step.
 
 Doctrine adapted from the pm skill of Q00/ouroboros (MIT): the three question classes and the open-items list. No MCP tooling is used.

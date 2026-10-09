@@ -1,10 +1,10 @@
 ---
-name: dag-node-testing
+name: testing
 description: How DAG nodes prove code changes through public interfaces - red before green for new behavior and bug fixes, preservation checks for refactors, and mocks at system boundaries - loaded through load_skills.
 when_to_use: A DAG node writes or changes code and has to prove the change with tests, so its prompt lists this skill in load_skills.
 ---
 
-# dag-node-testing
+# testing
 
 A node that changes code also owns its proof.
 This skill covers useful tests, test boundaries, anti-patterns, test loops and mocking.

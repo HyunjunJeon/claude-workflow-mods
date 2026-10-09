@@ -1,10 +1,10 @@
 ---
-name: dag-node-debugging
+name: debugging
 description: Discipline for DAG nodes that diagnose or fix a failing behavior, loaded through load_skills.
 when_to_use: A node prompt asks the worker to find the cause of a bug, a failing test or a performance regression, or to fix one using a reproduction command produced by an earlier node.
 ---
 
-# dag-node-debugging
+# debugging
 
 Use this skill for difficult bugs inside a DAG node.
 A node worker cannot ask anyone questions or wait for answers.

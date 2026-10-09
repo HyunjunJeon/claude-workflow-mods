@@ -71,7 +71,7 @@ function definition(timing: Timing, successor: boolean) {
 async function session($: Engine, on: On, timing: Timing, successor: boolean) {
   const h = harness(on)
   await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
   const runId = await start($, definition(timing, successor))
   expect(h.spawns.length).toBe(1)
 
@@ -151,13 +151,13 @@ function stop($: Engine, agent: number) {
 
 async function headless($: Engine) {
   await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
 }
 
 test('keep-alive: an interactive session never submits the keep-alive prompt', { plugins: [LATENCY] }, async ($, on) => {
   const h = harness(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
   const runId = await start($, { key: 'ka-interactive', nodes: [{ id: 'a', prompt: 'A', verify: CHECK }, { id: 'b', prompt: 'B', dependsOn: ['a'], verify: CHECK }] })
   await $.turn.complete({ turnId: 'main', answer: 'started', durationMs: 1, isAborted: false, reason: 'answer' })
   await h.clock.advance(HOST_TURN_LIMIT_MS + 1_000)

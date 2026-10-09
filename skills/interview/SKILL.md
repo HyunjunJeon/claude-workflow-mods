@@ -1,13 +1,13 @@
 ---
-name: dag-interview
+name: interview
 description: User-invoked only; aligns on a vague request through rounds of numbered questions with recommended answers before a DAG is planned, and ends with a confirmed goal and acceptance criteria.
 disable-model-invocation: true
 argument-hint: "[topic or request]"
 ---
 
-# dag-interview
+# interview
 
-The user starts this skill with `/dag-workflow:dag-interview [topic]`.
+The user starts this skill with `/dag-workflow:interview [topic]`.
 Never invoke it on your own.
 It runs in the main conversation before any DAG is planned.
 
@@ -21,7 +21,7 @@ It may never use Agent, Write, Edit or mutating Bash.
 Ask through `AskUserQuestion`, find facts by reading, and write no file.
 
 If the request is already clear, say so in one sentence.
-Then go straight to the `dag-workflow:dag-planning` skill.
+Then go straight to the `dag-workflow:planning` skill.
 In a non-interactive session this skill does not apply.
 
 ## Design-tree rounds
@@ -72,7 +72,7 @@ Use Read, LSP and read-only Bash such as `rg`, `ls` and `git log`.
 When a fact is too big to read yourself, run a one-node read-only DAG.
 Examples are a survey of many files or a long history.
 
-1. Load `dag-workflow:dag-planning` first. `start` is refused until you do.
+1. Load `dag-workflow:planning` first. `start` is refused until you do.
 2. Start one node that only reads and reports its findings in `## Output`.
 3. Let that node write nothing but one notes file, such as `notes/<topic>-facts.md`.
 4. Give the node a `verify` check that the file contains "## Facts".
@@ -114,7 +114,7 @@ Ask for confirmation with `AskUserQuestion`.
 Offer "Yes, plan it", "Adjust wording" and "Missing scope".
 Send any correction through Refine again.
 
-Only after "Yes", load `dag-workflow:dag-planning` and hand off:
+Only after "Yes", load `dag-workflow:planning` and hand off:
 
 - The goal sentence becomes `definition.goal`.
 - Every acceptance criterion becomes a `verify` candidate: a file check with `contains`, or a command that can fail.

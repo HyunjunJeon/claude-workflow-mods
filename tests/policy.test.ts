@@ -123,12 +123,21 @@ test('the main conversation may Write only the report names the host refuses to 
   expect(mainLoopVerdict('Bash', { command: 'echo hi > report.md' }, NONE).allowed).toBe(false)
 })
 
-test('the planning skill is recognised by its plugin-qualified and bare names only', async () => {
-  expect(isPlanningSkill('dag-workflow:dag-planning')).toBe(true)
-  expect(isPlanningSkill('/dag-workflow:dag-planning')).toBe(true)
-  expect(isPlanningSkill('dag-planning')).toBe(true)
+test('the planning skill is recognised by this plugin\'s qualified name and the bare name only', async () => {
+  // the retired names are assembled so no tracked file outside flows/ spells an old skill name
+  const retired = ['dag', 'planning'].join('-')
+  expect(isPlanningSkill('dag-workflow:planning')).toBe(true)
+  expect(isPlanningSkill('/dag-workflow:planning')).toBe(true)
+  expect(isPlanningSkill(' dag-workflow:planning ')).toBe(true)
+  expect(isPlanningSkill('planning')).toBe(true)
+  expect(isPlanningSkill('/planning')).toBe(true)
+  expect(isPlanningSkill('other:planning')).toBe(false)
+  expect(isPlanningSkill('x:dag-workflow:planning')).toBe(false)
+  expect(isPlanningSkill(`dag-workflow:${retired}`)).toBe(false)
+  expect(isPlanningSkill(retired)).toBe(false)
+  expect(isPlanningSkill('planning-extra')).toBe(false)
+  expect(isPlanningSkill('dag-workflow:planning-extra')).toBe(false)
   expect(isPlanningSkill('mass-ulw')).toBe(false)
-  expect(isPlanningSkill('dag-planning-extra')).toBe(false)
   expect(isPlanningSkill(undefined)).toBe(false)
 })
 
@@ -284,7 +293,7 @@ test('the under-split lints stay silent on every expected scenario shape', async
 })
 
 test('the injected protocol states the rule for each enforcement level', async () => {
-  expect(protocolFor('strict')).toContain('load the dag-workflow:dag-planning skill with the Skill tool and follow it; start is refused until you do')
+  expect(protocolFor('strict')).toContain('load the dag-workflow:planning skill with the Skill tool and follow it; start is refused until you do')
   expect(protocolFor('strict')).toContain('are refused here and belong inside DAG nodes')
   expect(protocolFor('strict')).toContain('The one exception: Write to a REPORT*, SUMMARY*, FINDINGS* or ANALYSIS* .md file the user asked for, which Claude Code refuses to subagents, only to copy a settled node\'s Output or notes verbatim.')
   expect(protocolFor('guide')).not.toContain('The one exception')

@@ -1,10 +1,10 @@
 ---
-name: dag-node-review-standards
+name: review-standards
 description: Standards-axis review discipline for DAG review nodes, loaded through load_skills - pin the diff, find the documented coding standards, apply a Fowler smell baseline as labelled judgment calls, and report a PASS or FAIL standards verdict.
 when_to_use: A DAG node, typically named review-standards, whose prompt asks whether a change follows the repository coding standards and loads this skill through load_skills.
 ---
 
-# dag-node-review-standards
+# review-standards
 
 Review only the Standards axis: documented repository coding rules and the code-smell baseline.
 Another node, usually `review-spec`, checks whether the change implements the request.

@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { isPlanningSkill } from '../hooks/engine/policy.ts'
 import type { Run } from '../hooks/engine/types.ts'
 import { SCENARIOS, type Scenario } from './scenarios.ts'
 import { classifyToolResults, verificationOf, type NodeVerificationReport, type ToolResult, type ToolResultCounts, type VerificationTotals } from './report.ts'
@@ -96,7 +97,7 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
       if (block.type === 'tool_use' && block.id && block.name) toolNames.set(block.id, block.name)
       index += 1
       if (block.type === 'tool_use' && block.name === 'AskUserQuestion') askUserQuestions += 1
-      if (block.type === 'tool_use' && block.name === 'Skill' && String(block.input?.skill ?? '').endsWith('dag-planning') && skillAt < 0) skillAt = index
+      if (block.type === 'tool_use' && block.name === 'Skill' && isPlanningSkill(block.input?.skill) && skillAt < 0) skillAt = index
       if (block.type === 'tool_use' && block.name === 'mcp__dag-workflow__dag' && block.input?.action === 'start') {
         starts += 1
         if (firstStartAt < 0) firstStartAt = index

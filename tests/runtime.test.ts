@@ -121,7 +121,7 @@ const PANE = {
 
 async function boot($: any, withPlanningSkill = true) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  if (withPlanningSkill) await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' })
+  if (withPlanningSkill) await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
 }
 
 async function callDag($: any, input: Record<string, unknown>) {
@@ -194,7 +194,7 @@ test('a fan-in DAG runs in waves, checkpoints every change and announces when it
 test('a surface without the DAG pane gets text progress instead of ui.open', async ($, on) => {
   const h = harness(on)
   await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
 
   const started = await callDag($, { action: 'start', definition: FAN_IN })
   expect(h.opened.length).toBe(0)
@@ -548,25 +548,25 @@ const COMPLIANT = {
   ],
 }
 
-test('strict mode refuses the first plan until the dag-planning skill is loaded, and /clear resets it', async ($, on) => {
+test('strict mode refuses the first plan until the planning skill is loaded, and /clear resets it', async ($, on) => {
   const h = harness(on)
   await boot($, false)
   const refused = await callDag($, { action: 'start', definition: CHAIN })
   expect(refused.isError).toBe(true)
   expect(refused.value.error.code).toBe('planning_skill_required')
-  expect(refused.value.error.message).toContain('dag-workflow:dag-planning')
+  expect(refused.value.error.message).toContain('dag-workflow:planning')
   expect((await callDag($, { action: 'amend', run_id: 'dag_x', definition: CHAIN })).value.error.code).toBe('planning_skill_required')
   expect((await callDag($, { action: 'list' })).isError).toBe(undefined)
   expect(h.spawns.length).toBe(0)
 
-  await $.tool.call({ tool: 'Skill', skill: 'dag-workflow:dag-planning' } as any)
+  await $.tool.call({ tool: 'Skill', skill: 'dag-workflow:planning' } as any)
   const started = await callDag($, { action: 'start', definition: CHAIN })
   expect(started.isError).toBe(undefined)
   expect(h.spawns.length).toBe(1)
 
   await $.classic.SessionStart({ source: 'clear' } as any)
   expect((await callDag($, { action: 'start', definition: FAN_IN })).value.error.code).toBe('planning_skill_required')
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' } as any)
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' } as any)
   expect((await callDag($, { action: 'start', definition: FAN_IN })).isError).toBe(undefined)
 })
 
@@ -580,7 +580,7 @@ test('guide mode and the user\'s /dag run start without the skill; guide reminds
   await $.command.run({ command: 'dag', args: 'enforce guide', ...COMMAND_CONTEXT })
   const started = await callDag($, { action: 'start', definition: { ...COMPLIANT, key: 'guided' } })
   expect(started.isError).toBe(undefined)
-  expect(started.value.warnings).toEqual(['the dag-workflow:dag-planning skill is not loaded in this session - load it and follow its node prompt contract.'])
+  expect(started.value.warnings).toEqual(['the dag-workflow:planning skill is not loaded in this session - load it and follow its node prompt contract.'])
 })
 
 test('start audits the node prompt contract and asks for a verification node', async ($, on) => {
@@ -597,7 +597,7 @@ test('start audits the node prompt contract and asks for a verification node', a
 test('a non-interactive session tries to hold its turn open while a run is active', async ($, on) => {
   const h = harness(on)
   await $.session.start({ surface: null, isInteractive: false, cwd: '/work' } as any)
-  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# dag-planning' } as any)
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' } as any)
   await callDag($, { action: 'start', definition: CHAIN })
   await $.turn.complete({ turnId: 'main', answer: 'started', durationMs: 1, isAborted: false, reason: 'answer', usage: null } as any)
   expect(h.ran.filter(argv => argv[0] === 'sleep').length).toBe(1)
