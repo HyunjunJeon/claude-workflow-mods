@@ -74,6 +74,27 @@ test('loops, version probes, uv pip reads and printing sed pass; their writing f
   for (const [command, problem] of writing) expect(readOnlyBashProblem(command)).toBe(problem)
 })
 
+test('a leading command builtin is skipped and the command after it is still checked', async () => {
+  const readOnly = [
+    'command claude --version',
+    'command git status',
+    'command ls -la',
+    'if command git diff --quiet; then echo x; fi',
+  ]
+  for (const command of readOnly) expect(`${command} => ${readOnlyBashProblem(command) ?? 'ok'}`).toBe(`${command} => ok`)
+
+  const writing: [string, string][] = [
+    ['command rm -rf x', 'rm is not on the read-only command list'],
+    ['command git commit -m x', 'git commit is not a read-only git command'],
+    ['command claude plugin test .', 'claude is not on the read-only command list'],
+    ['command -v claude', 'command is not on the read-only command list'],
+    ['command -p rm x', 'command is not on the read-only command list'],
+    ['command command rm x', 'rm is not on the read-only command list'],
+    ['ls && command touch x', 'touch is not on the read-only command list'],
+  ]
+  for (const [command, problem] of writing) expect(readOnlyBashProblem(command)).toBe(problem)
+})
+
 test('the main conversation keeps read and orchestration tools only', async () => {
   for (const tool of ['mcp__dag-workflow__dag', 'Read', 'LSP', 'WebFetch', 'AskUserQuestion', 'ExitPlanMode', 'TaskStop']) {
     expect(mainLoopVerdict(tool, {}, NONE)).toEqual({ allowed: true })

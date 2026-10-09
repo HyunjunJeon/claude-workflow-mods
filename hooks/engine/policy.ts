@@ -62,6 +62,15 @@ const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
 // checked like any other, and a bare closing word carries no command at all.
 const SHELL_LEADERS: ReadonlySet<string> = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!'])
 const SHELL_CLOSERS: ReadonlySet<string> = new Set(['done', 'fi'])
+// `command NAME ...` only skips aliases and functions (AGENTS.md tells everyone to type `command claude`), so it is
+// skipped like a leader and NAME is still checked. `command -v`/`-p` stay put as the head, which is not on the list.
+const COMMAND_BUILTIN = 'command'
+
+function isLeaderToken(tokens: readonly string[]): boolean {
+  const first = tokens[0] as string
+  if (SHELL_LEADERS.has(first) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return true
+  return first === COMMAND_BUILTIN && !(tokens[1] ?? '').startsWith('-')
+}
 const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-V', '--help', '-h'])
 const UV_PIP_READ_ONLY: ReadonlySet<string> = new Set(['list', 'freeze', 'show', 'check'])
 const SED_FLAGS = /^-[nEru]+$|^--(quiet|silent|regexp-extended|unbuffered)$/
@@ -221,7 +230,7 @@ export function readOnlyBashProblem(command: string): string | undefined {
   if (/>/.test(outsideSingle.replace(/"[^"]*"/g, '""'))) return 'output redirection writes files'
   for (const segment of splitSegments(text)) {
     const tokens = tokenize(segment).filter((token, k, all) => !/^\d?<$/.test(token) && !/^\d?<[^<(]/.test(token) && !/^\d?<$/.test(all[k - 1] ?? ''))
-    while (tokens.length > 0 && (SHELL_LEADERS.has(tokens[0] as string) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] as string))) tokens.shift()
+    while (tokens.length > 0 && isLeaderToken(tokens)) tokens.shift()
     const head = tokens[0]
     if (!head) continue
     if (SHELL_CLOSERS.has(head) && tokens.length === 1) continue
