@@ -2,7 +2,7 @@ import type { Definition, NodeDef, VerificationCheck } from './types.ts'
 
 const VERIFICATION_WORDS = /verif|validat|check|test|review|audit/i
 
-// Claude Code 2.1.288 refuses subagent Write calls to Markdown files with these basenames.
+// Claude Code refuses subagent Write calls to Markdown files with these basenames (seen on 2.1.288, re-checked on 2.1.295 with --safe-mode).
 export const HOST_BLOCKED_REPORT_NAME = /^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i
 
 export function isBlockedReportPath(path: string): boolean {
@@ -83,7 +83,7 @@ export function lintDefinition(definition: Definition): string[] {
     ]
     for (const path of paths) {
       if (isBlockedReportPath(path)) {
-        warnings.push(`node "${node.id}": "${path}" is named like a report, and Claude Code 2.1.288 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${node.id}-notes.md or return the text in ## Output.`)
+        warnings.push(`node "${node.id}": "${path}" is named like a report, and Claude Code 2.1.295 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${node.id}-notes.md or return the text in ## Output; if the user requires this exact name, the main conversation writes the file after the run settles.`)
       }
     }
   }

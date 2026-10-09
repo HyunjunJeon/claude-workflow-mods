@@ -86,6 +86,22 @@ test('the main conversation keeps read and orchestration tools only', async () =
   expect(mainLoopVerdict('mcp__github__create_issue', {}, new Set(['mcp__github__create_issue']))).toEqual({ allowed: true })
 })
 
+test('the main conversation may Write only the report names the host refuses to subagents', async () => {
+  for (const file_path of ['report.md', 'docs/REPORT-final.md', 'Summary.MD', '/work/out/findings_2026.md', 'analysis.md']) {
+    expect(`${file_path} => ${mainLoopVerdict('Write', { file_path }, NONE).allowed}`).toBe(`${file_path} => true`)
+  }
+  for (const file_path of ['report.ts', 'notes/x.md', 'docs/report/index.md', 'my-report.md', 'report.md.bak', '']) {
+    expect(`${file_path} => ${mainLoopVerdict('Write', { file_path }, NONE).allowed}`).toBe(`${file_path} => false`)
+  }
+  expect(mainLoopVerdict('Write', {}, NONE).allowed).toBe(false)
+  expect(mainLoopVerdict('Write', { file_path: 42 }, NONE).allowed).toBe(false)
+  for (const tool of ['Edit', 'MultiEdit', 'NotebookEdit']) {
+    expect(mainLoopVerdict(tool, { file_path: 'report.md', notebook_path: 'report.md' }, NONE).allowed).toBe(false)
+  }
+  expect(mainLoopVerdict('Bash', { command: 'mv notes.md report.md' }, NONE).allowed).toBe(false)
+  expect(mainLoopVerdict('Bash', { command: 'echo hi > report.md' }, NONE).allowed).toBe(false)
+})
+
 test('the planning skill is recognised by its plugin-qualified and bare names only', async () => {
   expect(isPlanningSkill('dag-workflow:dag-planning')).toBe(true)
   expect(isPlanningSkill('/dag-workflow:dag-planning')).toBe(true)
@@ -143,7 +159,10 @@ test('the lint warns about verify paths and writes the host refuses for subagent
   const blocked = lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'REPORT.md', contains: 'ok' }] }]))
   expect(blocked).toHaveLength(1)
   expect(blocked[0]).toContain('node "one"')
-  expect(blocked[0]).toContain('"REPORT.md"')
+  expect(blocked[0]).toContain('"REPORT.md" is named like a report')
+  expect(blocked[0]).toContain('Claude Code 2.1.295')
+  expect(blocked[0]).toContain('one-notes.md')
+  expect(blocked[0]).toContain('main conversation writes the file after the run settles')
   expect(lintDefinition(def([{ id: 'one', prompt: full, verify: [{ kind: 'file', path: 'notes/docs-audit.md', contains: 'ok' }] }]))).toEqual([])
   const written = lintDefinition(def([{ id: 'one', prompt: full, writes: ['out/summary-final.md'] }]))
   expect(written).toHaveLength(1)
@@ -245,6 +264,8 @@ test('the under-split lints stay silent on every expected scenario shape', async
 test('the injected protocol states the rule for each enforcement level', async () => {
   expect(protocolFor('strict')).toContain('load the dag-workflow:dag-planning skill with the Skill tool and follow it; start is refused until you do')
   expect(protocolFor('strict')).toContain('are refused here and belong inside DAG nodes')
+  expect(protocolFor('strict')).toContain('The one exception: Write to a REPORT*, SUMMARY*, FINDINGS* or ANALYSIS* .md file the user asked for, which Claude Code refuses to subagents, only to copy a settled node\'s Output or notes verbatim.')
+  expect(protocolFor('guide')).not.toContain('The one exception')
   expect(protocolFor('guide')).toContain('Prefer doing all work inside DAG nodes')
   expect(protocolFor('strict')).toContain('mcp__dag-workflow__dag')
 })

@@ -1,3 +1,4 @@
+import { isBlockedReportPath } from './lint.ts'
 import type { EngineError } from './types.ts'
 
 export type Enforcement = 'strict' | 'guide' | 'off'
@@ -261,6 +262,8 @@ export function mainLoopVerdict(tool: string, input: Readonly<Record<string, unk
     const problem = readOnlyBashProblem(typeof input.command === 'string' ? input.command : '')
     return problem ? { allowed: false, reason: `this Bash command is not read-only (${problem})` } : { allowed: true }
   }
+  // Claude Code refuses these names to subagents, so a report the user requires can only be written here; Edit and Bash stay refused.
+  if (tool === 'Write' && typeof input.file_path === 'string' && isBlockedReportPath(input.file_path)) return { allowed: true }
   return { allowed: false, reason: `${tool} changes state or delegates work` }
 }
 
@@ -275,7 +278,7 @@ export function denyMessage(tool: string, reason: string): string {
 
 export function protocolFor(level: Enforcement, interactive = true): string {
   const rule = level === 'strict'
-    ? 'In this main conversation you only plan, read (Read, LSP, read-only Bash, web), ask, orchestrate and verify; Edit, Write, mutating Bash, Agent, Workflow, TodoWrite and other tools are refused here and belong inside DAG nodes.'
+    ? 'In this main conversation you only plan, read (Read, LSP, read-only Bash, web), ask, orchestrate and verify; Edit, Write, mutating Bash, Agent, Workflow, TodoWrite and other tools are refused here and belong inside DAG nodes. The one exception: Write to a REPORT*, SUMMARY*, FINDINGS* or ANALYSIS* .md file the user asked for, which Claude Code refuses to subagents, only to copy a settled node\'s Output or notes verbatim.'
     : 'Prefer doing all work inside DAG nodes; this main conversation should plan, orchestrate and verify.'
   const lines = [
     '[dag-workflow] DAG orchestration is mandatory for this task.',

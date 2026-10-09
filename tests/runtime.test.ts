@@ -450,9 +450,27 @@ test('a node agent cannot Write report-named Markdown the host refuses for subag
   await boot($)
   await callDag($, { action: 'start', definition: CHAIN })
   const blocked = await $.tool.call({ tool: 'Write', agentId: 'agent-1', file_path: '/work/out/report.md', content: 'x' } as any)
+  expect(blocked.deny).toContain('Subagents should return findings as text, not write report files')
+  expect(blocked.deny).toContain('## Output')
   expect(blocked.deny).toContain('a-notes.md')
+  expect(blocked.deny).toContain('main conversation writes the requested file after the run settles')
+  expect(blocked.deny).toContain('Bash, mv or a rename is no way around it')
   const allowed = await $.tool.call({ tool: 'Write', agentId: 'agent-1', file_path: '/work/out/result.md', content: 'x' } as any)
   expect(allowed.deny).toBe(undefined)
+})
+
+test('strict enforcement lets the main conversation Write a host-blocked report name and nothing else', async ($, on) => {
+  harness(on)
+  await boot($)
+
+  const report = await $.tool.call({ tool: 'Write', file_path: '/work/report.md', content: 'x' } as any)
+  expect(report.deny).toBe(undefined)
+  const nested = await $.tool.call({ tool: 'Write', file_path: '/work/docs/Summary-final.md', content: 'x' } as any)
+  expect(nested.deny).toBe(undefined)
+  const other = await $.tool.call({ tool: 'Write', file_path: '/work/other.md', content: 'x' } as any)
+  expect(other.deny).toContain('dag-workflow refused Write in the main conversation')
+  const edit = await $.tool.call({ tool: 'Edit', file_path: '/work/report.md', old_string: 'a', new_string: 'b' } as any)
+  expect(edit.deny).toContain('dag-workflow refused Edit in the main conversation')
 })
 
 test('a failing strict gate hook denies gated main-loop calls with the gate-failed message', async ($, on) => {

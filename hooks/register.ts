@@ -1826,7 +1826,7 @@ export function register(on: On, options: PluginOptions) {
       }
       const target = (e as { file_path?: unknown }).file_path
       if (owner && e.tool === 'Write' && typeof target === 'string' && isBlockedReportPath(target)) {
-        return { deny: `Claude Code refuses subagent writes to report-named Markdown files (REPORT*, SUMMARY*, FINDINGS*, ANALYSIS*). Write ${owner.nodeId}-notes.md instead, or return the text in ## Output.` }
+        return { deny: `Claude Code refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files ("Subagents should return findings as text, not write report files"). Put the full file text in ## Output (or write ${owner.nodeId}-notes.md); the main conversation writes the requested file after the run settles. Bash, mv or a rename is no way around it.` }
       }
       activity.set(agentId, toolStarted(e.tool, Date.now()))
       try {
