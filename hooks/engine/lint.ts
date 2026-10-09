@@ -24,13 +24,19 @@ const MIN_SPLIT_SECTIONS = 3
 // A change and its own tests are one deliverable (the doctrine keeps them in one node), so tests do not count.
 const TEST_PATH = /(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[^/]+$/
 
+// ./src/, src//a.ts, src/./a.ts and src\a.ts name the same place as src and src/a.ts, so every path is spelled one way before it is compared.
+// The definition gate (projectPath) already rejects absolute paths, .. and .claude segments, so only separators and . segments are left to fold. The project root itself stays as ".".
+function normalizePath(path: string): string {
+  return path.replaceAll('\\', '/').split('/').filter(part => part !== '' && part !== '.').join('/') || '.'
+}
+
 // A declared folder and the files checked inside it are one deliverable, so only the most specific paths count.
 function deliverablePaths(node: NodeDef): string[] {
   const paths = [
     ...(node.writes ?? []),
     ...(node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : [])),
   ]
-  const unique = [...new Set(paths.map(path => path.replace(/\/+$/, '')))].filter(path => !TEST_PATH.test(path))
+  const unique = [...new Set(paths.map(normalizePath))].filter(path => !TEST_PATH.test(path))
   return unique.filter(path => !unique.some(other => other.startsWith(`${path}/`)))
 }
 

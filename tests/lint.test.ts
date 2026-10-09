@@ -146,3 +146,20 @@ test('under-split lint does not treat a shared name prefix as a folder', async (
   expect(warnings).toHaveLength(1)
   expect(warnings[0]).toContain('node "x": one producer owns 3 files (src, src2/x.ts, z.md)')
 })
+
+test('under-split lint counts a folder spelled ./src/ and a file inside it as one deliverable', async () => {
+  expect(underSplit({ writes: ['./src/', 'src/a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint counts one file once whatever its spelling', async () => {
+  expect(underSplit({
+    writes: ['src//a.ts', './src/a.ts', 'src\\a.ts', 'src/./a.ts', 'b.md'],
+    verify: [fileCheck('src/a.ts')],
+  })).toEqual([])
+})
+
+test('under-split lint lists the normalized spelling of each path it counts', async () => {
+  const warnings = underSplit({ writes: ['./a.md', 'b//c.md', 'd\\e.md'] })
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "x": one producer owns 3 files (a.md, b/c.md, d/e.md)')
+})
