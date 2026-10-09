@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Dependency-ordered DAG workflows of Claude Code subagents, with a live DAG pane",
   "author": { "name": "jhj" },
+  "types": "./types/index.d.ts",
   "userConfig": {
     "auto_recovery": {
       "type": "boolean",

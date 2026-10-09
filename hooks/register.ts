@@ -73,6 +73,30 @@ function debug($: EngineInterface, text: string): void {
   $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
 }
 
+// The strict gate must outlive /reload-plugins: a reload re-runs register() and starts every module variable over, while
+// the conversation still holds the planning skill (B10, hit twice in real use). The host keeps $.state across a reload,
+// so the flag is written there too; `planningLoaded` stays the fast in-process copy. The ref is declared in types/index.d.ts.
+const PLANNING_FLAG = { plugin: 'dag-workflow', key: 'planningLoaded' } as const
+
+// A failed state call is logged and leaves the module variable as it is: a closed gate stays closed, an open one stays open.
+async function setPlanningLoaded($: EngineInterface, loaded: boolean): Promise<void> {
+  planningLoaded = loaded
+  try {
+    await $.state.set(PLANNING_FLAG, loaded)
+  } catch (error) {
+    debug($, `could not store the planning-skill flag: ${message(error)}`)
+  }
+}
+
+// Only a stored true opens the gate here; a missing or unreadable flag keeps it closed, as a fresh session has it.
+async function restorePlanningLoaded($: EngineInterface): Promise<void> {
+  try {
+    if ((await $.state.get(PLANNING_FLAG)).value === true) planningLoaded = true
+  } catch (error) {
+    debug($, `could not read the planning-skill flag: ${message(error)}`)
+  }
+}
+
 type ToolInput = Readonly<Record<string, unknown>>
 type RenderEvent = RenderInput<'Pane'>
 type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
@@ -1623,6 +1647,7 @@ export function register(on: On, options: PluginOptions) {
     paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
     keepAliveQueued = false
+    await restorePlanningLoaded($)
     if (jevEnabled) {
       try {
         jevApiKey = await $.env.get('TYPESAFE_API_KEY')
@@ -1699,7 +1724,7 @@ export function register(on: On, options: PluginOptions) {
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
     const previousContext = workflowContext
     if (e.source === 'clear') {
-      planningLoaded = false
+      await setPlanningLoaded($, false)
       userRequest = ''
     }
     const previous = sessionId
@@ -1781,7 +1806,7 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('skill.prompt', async ($, e, next) => {
-    if (isPlanningSkill(e.skill)) planningLoaded = true
+    if (isPlanningSkill(e.skill)) await setPlanningLoaded($, true)
     return next(e)
   })
 
@@ -1849,7 +1874,7 @@ export function register(on: On, options: PluginOptions) {
     if (agentId && owner) openCalls.set(e.tool_use_id, { agentId, tool: e.tool })
     try {
       if (!agentId) {
-        if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) planningLoaded = true
+        if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) await setPlanningLoaded($, true)
         if (enforcement !== 'strict' || next.origin.plugin !== 'engine') return await next(e)
         const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
         if (verdict.allowed) return await next(e)
