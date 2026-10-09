@@ -253,6 +253,7 @@ Under strict enforcement, the main conversation can use:
 
 Read-only Bash includes `ls`, `cat`, `rg`, and `find` without `-exec`/`-delete`.
 It also includes `git status|log|diff|show|...`, `<tool> --version`, `uv pip list|freeze|show|check`, and printing `sed -n`.
+A leading `command` is accepted (as in `command claude --version`), and the command after it is still checked.
 `for`/`if`/`while` loops are allowed if every command is read-only.
 
 Other tools are refused with an instruction to move the work into a node.

@@ -105,7 +105,7 @@ that prints OK when run with python3 test_app.py.
 
 1. **도구 게이트**: 메인 대화에서 모델이 호출하는 도구 중 다음을 제외한 모든 도구를 거부합니다. 거부할 때는 "이 작업을 DAG 노드로 옮겨 `start`나 `amend`하라"는 안내를 돌려줍니다.
    - 허용: dag 도구, Read, LSP, WebFetch/WebSearch, AskUserQuestion, 계획 모드, 작업 조회·중단(TaskList/TaskGet/TaskStop), 읽기 전용 Bash, 호스트가 막는 보고서 이름에 한정한 Write 예외(아래)
-   - 읽기 전용 Bash: `ls`, `cat`, `rg`, `find`(‐exec/‐delete 제외), `git status/log/diff/show/...`, 인자가 `--version`/`--help` 하나뿐인 명령, `uv pip list/freeze/show/check`, 출력만 하는 `sed`(`-i`·`-f`·`w`·`e` 제외) 등. 명령이 모두 읽기 전용이면 `for`/`if`/`while` 구조와 입력 리다이렉트(`< 파일`)도 허용합니다. 출력 리다이렉트(`>`), 명령 치환(`$(...)`), 프로세스 치환(`<(...)`), 목록에 없는 명령이 하나라도 있으면 거부합니다.
+   - 읽기 전용 Bash: `ls`, `cat`, `rg`, `find`(‐exec/‐delete 제외), `git status/log/diff/show/...`, 인자가 `--version`/`--help` 하나뿐인 명령, 맨 앞의 `command` 내장 명령(`command claude --version`, `command git status`처럼 뒤따르는 명령은 그대로 검사하며 `command -v`·`command -p`는 거부), `uv pip list/freeze/show/check`, 출력만 하는 `sed`(`-i`·`-f`·`w`·`e` 제외) 등. 명령이 모두 읽기 전용이면 `for`/`if`/`while` 구조와 입력 리다이렉트(`< 파일`)도 허용합니다. 출력 리다이렉트(`>`), 명령 치환(`$(...)`), 프로세스 치환(`<(...)`), 목록에 없는 명령이 하나라도 있으면 거부합니다.
    - Write 예외: 파일 이름(basename)이 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*`로 시작하는 Markdown(`^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$`, 대소문자 무시)은 메인 대화의 Write를 허용합니다. Claude Code가 서브에이전트의 이 이름 쓰기를 `Subagents should return findings as text, not write report files`로 직접 거부하므로 노드로는 `report.md` 같은 파일을 만들 수 없기 때문입니다. 정착한 노드의 `## Output`이나 노트를 그대로 옮겨 쓰는 용도로만 허용하며, Edit과 쓰기 Bash, 다른 이름의 Write는 계속 거부합니다.
    - 거부: Edit, Write(위 예외 제외), NotebookEdit, Agent, Workflow, TodoWrite/TaskCreate(계획은 DAG로만), 쓰기 Bash, 그 밖의 MCP 도구
    - DAG 노드 에이전트와 플러그인 자신의 호출(노드 spawn, TaskStop)은 제한하지 않습니다.
@@ -125,7 +125,7 @@ that prints OK when run with python3 test_app.py.
 - 노드용 스킬 `skills/dag-node-debugging/`, `skills/dag-node-review-standards/`, `skills/dag-node-testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:dag-node-debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 테스트)입니다. 
 
 mod는 이 스킬을 강제로 연결합니다.  
-프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/check/test/review/audit가 있고 다른 노드에 의존)가 없거나, 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
+프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/check/test/review/audit가 있고 다른 노드에 의존)가 없거나, 한 노드가 파일 셋 이상을 혼자 만들거나(`writes`와 파일 검사 `verify`의 경로를 세며 테스트 경로는 제외하고, 선언한 폴더와 그 안의 파일은 한 번만 세어 `writes: ['skills/x/']`에 그 안의 파일 둘을 검사하면 둘로 셉니다), 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
 
 ### 정렬 스킬: 인터뷰와 PM
 
