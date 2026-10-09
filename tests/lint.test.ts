@@ -113,3 +113,36 @@ test('the same definition with a goal gets no goal warning', async () => {
   expect(withGoal.some(warning => warning.includes('the definition has no goal'))).toBe(false)
   expect(lintDefinition(build([{ id: 'x', prompt: full }], 'One sentence naming the deliverable and when it is done.'))).toEqual([])
 })
+
+const fileCheck = (path: string) => ({ kind: 'file', path, contains: 'ok' })
+const underSplit = (node: Record<string, unknown>) =>
+  lintDefinition(def([{ id: 'x', prompt: full, ...node }])).filter(warning => warning.includes('one producer owns'))
+
+test('under-split lint counts the files inside a declared folder, not the folder itself', async () => {
+  expect(underSplit({
+    writes: ['skills/x/'],
+    verify: [fileCheck('skills/x/A.md'), fileCheck('skills/x/sub/B.md')],
+  })).toEqual([])
+})
+
+test('under-split lint names the three files of a folder and not the folder', async () => {
+  const warnings = underSplit({
+    writes: ['src/'],
+    verify: [fileCheck('src/a.ts'), fileCheck('src/b.ts'), fileCheck('src/c.ts')],
+  })
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "x": one producer owns 3 files (src/a.ts, src/b.ts, src/c.ts)')
+  expect(warnings[0]).not.toContain('(src,')
+})
+
+test('under-split lint still warns on three paths that are not nested', async () => {
+  const warnings = underSplit({ writes: ['a/', 'b/', 'c.md'] })
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "x": one producer owns 3 files (a, b, c.md)')
+})
+
+test('under-split lint does not treat a shared name prefix as a folder', async () => {
+  const warnings = underSplit({ writes: ['src', 'src2/x.ts', 'z.md'] })
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "x": one producer owns 3 files (src, src2/x.ts, z.md)')
+})

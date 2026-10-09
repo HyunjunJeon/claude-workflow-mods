@@ -24,12 +24,14 @@ const MIN_SPLIT_SECTIONS = 3
 // A change and its own tests are one deliverable (the doctrine keeps them in one node), so tests do not count.
 const TEST_PATH = /(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[^/]+$/
 
+// A declared folder and the files checked inside it are one deliverable, so only the most specific paths count.
 function deliverablePaths(node: NodeDef): string[] {
   const paths = [
     ...(node.writes ?? []),
     ...(node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : [])),
   ]
-  return [...new Set(paths.map(path => path.replace(/\/+$/, '')))].filter(path => !TEST_PATH.test(path))
+  const unique = [...new Set(paths.map(path => path.replace(/\/+$/, '')))].filter(path => !TEST_PATH.test(path))
+  return unique.filter(path => !unique.some(other => other.startsWith(`${path}/`)))
 }
 
 function namedSections(prompt: string): string[] {
