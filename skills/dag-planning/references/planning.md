@@ -182,7 +182,7 @@ Example chain for retyping a shared `userId` as `accountId`:
 - `contract` - dependsOn: [`migrate-api`, `migrate-web`, `migrate-jobs`]
 - `review-spec` and `review-standards` - each dependsOn: [`expand`, `migrate-api`, `migrate-web`, `migrate-jobs`, `contract`]; the refactor changes code, so the two-axis review applies (see Two-axis review), and `review-spec` reads every batch's Output and reruns the build and tests
 
-**The limit of this plugin.** There is no integration branch: every node writes into the one working tree as it finishes, and per-node worktree isolation is not available (backlog item B3 in docs/improvement-plan.md). When `migrate` batches cannot stay green alone even with the old form kept, do not launch them as parallel lanes that each promise green. Merge them into fewer nodes (in the limit one `migrate` node) or serialize them with `dependsOn`, and put the green check on the last node of the stage. The order `expand`, `migrate`, `contract` never changes.
+**The limit of this plugin.** There is no integration branch: every node writes into the one working tree as it finishes, and per-node worktree isolation is not available. When `migrate` batches cannot stay green alone even with the old form kept, do not launch them as parallel lanes that each promise green. Merge them into fewer nodes (in the limit one `migrate` node) or serialize them with `dependsOn`, and put the green check on the last node of the stage. The order `expand`, `migrate`, `contract` never changes.
 
 **How this meets the existing rules.** "By file domain" still splits independent file sets.
 A `migrate` stage adds two conditions: keep the old form, and chain batches that share files.
@@ -338,7 +338,7 @@ A failed check or missing evidence fails the node and blocks its dependents.
 
 ### Checks for absence or expected failure
 
-The schema has no native expected-exit field (backlog item B2).
+The schema has no native expected-exit field.
 A `command` check can explicitly invoke a shell or script.
 The wrapper must exit 0 only when the expected condition holds.
 Command and input errors must fail.
