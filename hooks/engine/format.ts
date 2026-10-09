@@ -75,10 +75,20 @@ export function keepAliveMessage(run: Run, nodeId: string): string {
   ].join('\n')
 }
 
-export function settleMessage(run: Run, toolName: string): string {
+// Node id -> the tools, in first-seen order, whose calls were left at ask in a non-interactive session during that
+// node's current attempt. The log line for such a call may never reach a `claude -p` user, but this message reaches
+// the main model, which can relay the fix.
+export type SettleAsks = ReadonlyMap<string, readonly string[]>
+
+function approvalHint(tools: readonly string[] | undefined): string {
+  if (!tools || tools.length === 0) return ''
+  return `; needed approval this non-interactive session cannot give: ${tools.join(', ')} (allow them up front with --allowedTools)`
+}
+
+export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map()): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {
-    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}`
+    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}${approvalHint(asked.get(n.id))}`
     if (!n.output || budget <= 0) return head
     const excerpt = truncate(n.output, Math.min(SETTLE_OUTPUT_CHARS, budget))
     budget -= excerpt.length

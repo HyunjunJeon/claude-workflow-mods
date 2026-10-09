@@ -142,8 +142,9 @@ const toolContexts = new Map<string, JevContext>()
 // Node workers' calls in flight (tool_use_id -> agent) and the workers waiting for a permission answer, in memory only.
 const openCalls = new Map<string, { agentId: string; tool: string }>()
 const waiting = new Map<string, { tool: string; toolUseId?: string; since: number }>()
-// Run, node, attempt and tool already explained in a non-interactive session, so a retried call adds no second line.
-const explainedAsks = new Set<string>()
+// Per run and node, the tools already explained in a non-interactive session for the node's current attempt, in
+// first-seen order: a retried call adds no second line, and the settle summary lists them. A new attempt starts over.
+const askedTools = new Map<string, Map<string, { attempt: number; tools: string[] }>>()
 let userRequest = ''
 let jevEnabled = true
 let jevConfidence = 0.9
@@ -687,7 +688,7 @@ async function announce($: EngineInterface, run: Run): Promise<void> {
   if (!isSettled(run) || run.settledNotified || settleSubmits.has(run.runId)) return
   settleSubmits.add(run.runId)
   // Plugin submissions run once idle; never await them in the queue.
-  $.prompt.submit({ text: settleMessage(run, TOOL_NAME) }).then(result => {
+  $.prompt.submit({ text: settleMessage(run, TOOL_NAME, settleAsks(run)) }).then(result => {
     if ('drop' in result) throw new Error(result.drop)
     return serialized(async () => {
       const current = runs.get(run.runId)
@@ -1323,6 +1324,31 @@ function ownNodeOfAgent(agentId: string | undefined): { run: Run; nodeId: string
   return { ...owner, attempt: owner.run.nodes.find(n => n.id === owner.nodeId)?.attempt ?? 0 }
 }
 
+// Records that a tool was left at ask for this node attempt; true the first time, so the caller logs once.
+function noteAsk(runId: string, nodeId: string, attempt: number, tool: string): boolean {
+  let nodes = askedTools.get(runId)
+  if (!nodes) askedTools.set(runId, nodes = new Map())
+  const entry = nodes.get(nodeId)
+  if (!entry || entry.attempt !== attempt) {
+    nodes.set(nodeId, { attempt, tools: [tool] })
+    return true
+  }
+  if (entry.tools.includes(tool)) return false
+  entry.tools.push(tool)
+  return true
+}
+
+// Only the node's current attempt counts: an earlier attempt's asks say nothing about why this result is as it is.
+function settleAsks(run: Run): Map<string, string[]> {
+  const asked = new Map<string, string[]>()
+  const nodes = askedTools.get(run.runId)
+  for (const node of run.nodes) {
+    const entry = nodes?.get(node.id)
+    if (entry && entry.attempt === node.attempt) asked.set(node.id, [...entry.tools])
+  }
+  return asked
+}
+
 // claude -p cannot put an ask to anyone, so the host refuses the call; this says why it was left at ask.
 function headlessAskNote(tool: string, why: string): string {
   return `${tool} needs approval that this non-interactive session cannot ask for (${why}); allow it up front with --allowedTools ${tool} or a --permission-mode that covers it`
@@ -1853,12 +1879,8 @@ export function register(on: On, options: PluginOptions) {
     // The answer stays with the person: mark the node worker that will wait for it.
     const asked = async (why: string) => {
       if (call && e.tool_use_id) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
-      if (!interactive && worker) {
-        const key = `${worker.run.runId}/${worker.nodeId}/${worker.attempt}/${e.tool}`
-        if (!explainedAsks.has(key)) {
-          explainedAsks.add(key)
-          $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
-        }
+      if (!interactive && worker && noteAsk(worker.run.runId, worker.nodeId, worker.attempt, e.tool)) {
+        $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
       }
       return decided
     }
