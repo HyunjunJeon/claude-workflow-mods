@@ -142,6 +142,8 @@ const toolContexts = new Map<string, JevContext>()
 // Node workers' calls in flight (tool_use_id -> agent) and the workers waiting for a permission answer, in memory only.
 const openCalls = new Map<string, { agentId: string; tool: string }>()
 const waiting = new Map<string, { tool: string; toolUseId?: string; since: number }>()
+// Run, node, attempt and tool already explained in a non-interactive session, so a retried call adds no second line.
+const explainedAsks = new Set<string>()
 let userRequest = ''
 let jevEnabled = true
 let jevConfidence = 0.9
@@ -1314,6 +1316,18 @@ function nodeOfAgent(agentId: string): { run: Run; nodeId: string } | undefined 
   return undefined
 }
 
+// A worker of a run this session owns; a run loaded from another session never gets an explanation from here.
+function ownNodeOfAgent(agentId: string | undefined): { run: Run; nodeId: string; attempt: number } | undefined {
+  const owner = agentId ? nodeOfAgent(agentId) : undefined
+  if (!owner || owner.run.sessionId !== sessionId) return undefined
+  return { ...owner, attempt: owner.run.nodes.find(n => n.id === owner.nodeId)?.attempt ?? 0 }
+}
+
+// claude -p cannot put an ask to anyone, so the host refuses the call; this says why it was left at ask.
+function headlessAskNote(tool: string, why: string): string {
+  return `${tool} needs approval that this non-interactive session cannot ask for (${why}); allow it up front with --allowedTools ${tool} or a --permission-mode that covers it`
+}
+
 async function pollTranscripts($: EngineInterface): Promise<void> {
   for (const run of runs.values()) {
     if (run.sessionId !== sessionId) continue
@@ -1834,26 +1848,38 @@ export function register(on: On, options: PluginOptions) {
     const decided = await next(e)
     if (decided.decision !== 'ask') return decided
     const call = e.tool_use_id ? openCalls.get(e.tool_use_id) : undefined
+    // The host sets agentId on a real call in a subagent loop; openCalls only knows calls whose tool.call reached this plugin.
+    const worker = ownNodeOfAgent(e.agentId ?? call?.agentId)
     // The answer stays with the person: mark the node worker that will wait for it.
-    const asked = async () => {
+    const asked = async (why: string) => {
       if (call && e.tool_use_id) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+      if (!interactive && worker) {
+        const key = `${worker.run.runId}/${worker.nodeId}/${worker.attempt}/${e.tool}`
+        if (!explainedAsks.has(key)) {
+          explainedAsks.add(key)
+          $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
+        }
+      }
       return decided
     }
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
-    if (jevPermissionScope === 'dag' && context?.task === undefined) return asked()
+    if (jevPermissionScope === 'dag' && context?.task === undefined) return asked('Jev not asked: jev_permission_scope is dag and the call carries no node task')
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })
     const evaluation = await evaluateJev($, request, next.signal)
     const choice = evaluation.choices.get('permission')
     const outcome = decisionOutcome(evaluation, choice, 'permission')
     const applied = outcome === 'applied' && choice && (choice.choice === 'allow' || choice.choice === 'deny')
+    const why = choice ? `Jev ${outcome}: ${choice.choice} at ${choice.confidence}, jev_confidence ${jevConfidence}` : `Jev ${outcome}`
     await persistDecisions($, [decisionRecord({
       at: await $.clock.now(), kind: 'permission', subject: e.tool,
       proposed: decided.decision, selected: applied ? choice.choice : decided.decision,
       source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
       stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
+      ...(worker ? { runId: worker.run.runId, nodeId: worker.nodeId } : {}),
+      ...(worker && !applied && !interactive ? { note: headlessAskNote(e.tool, why) } : {}),
     }, evaluation)])
-    if (!applied) return asked()
+    if (!applied) return asked(why)
     debug($, `Jev permission ${e.tool}: ${choice.choice} (${choice.confidence})`)
     return { decision: choice.choice, reason: `Jev ${choice.choice} (${choice.confidence})` }
   })

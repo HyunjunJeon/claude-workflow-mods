@@ -26,6 +26,8 @@ export type DecisionRecord = {
   readonly probabilities?: Readonly<Record<string, number>>
   readonly runId?: string
   readonly nodeId?: string
+  // Why a node worker's call stayed at ask in a session that cannot ask anyone; set only on a non-interactive permission record.
+  readonly note?: string
 }
 
 export type DecisionLog = {
@@ -55,6 +57,7 @@ function isDecision(value: unknown): value is DecisionRecord {
   if (value.backend !== undefined && value.backend !== 'http' && value.backend !== 'model') return false
   if (value.runId !== undefined && typeof value.runId !== 'string') return false
   if (value.nodeId !== undefined && typeof value.nodeId !== 'string') return false
+  if (value.note !== undefined && typeof value.note !== 'string') return false
   if (value.probabilities !== undefined && (!isRecord(value.probabilities) || !Object.values(value.probabilities).every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1))) return false
   return true
 }

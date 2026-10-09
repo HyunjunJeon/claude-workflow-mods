@@ -27,7 +27,8 @@ export function harness(on: On) {
   const prompts: string[] = []
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
-  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false }
+  // permission: the Jev answer to a permission question; unset, the question gets the generic 'quick' answer.
+  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
@@ -39,10 +40,12 @@ export function harness(on: On) {
     const request: JevRequest = JSON.parse(e.init?.body ?? '{}')
     requests.push(request)
     if (control.transportError) throw new Error('mock transport failure')
-    const answers = Object.fromEntries(Object.keys(request.questions).map(id => [id, {
-      type: 'choice', choice: id === 'recovery' ? control.recovery : 'quick',
-      confidence: id === 'recovery' ? control.confidence : 0.99,
-    }]))
+    const answers = Object.fromEntries(Object.keys(request.questions).map(id => [id, id === 'permission' && control.permission
+      ? { type: 'choice', ...control.permission }
+      : {
+        type: 'choice', choice: id === 'recovery' ? control.recovery : 'quick',
+        confidence: id === 'recovery' ? control.confidence : 0.99,
+      }]))
     return { value: { status: control.httpStatus, ok: control.httpStatus === 200, headers: {}, text: JSON.stringify({ answers }) } }
   })
   on('process.run', ($, e) => {

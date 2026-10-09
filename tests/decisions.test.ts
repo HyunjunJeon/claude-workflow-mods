@@ -25,3 +25,10 @@ test('a decision the final-audit rule made survives a reload', () => {
   const ruled: DecisionRecord = { ...record, proposed: 'quick', selected: 'unspecified-low', source: 'rule', outcome: 'low-confidence', confidence: 0.6 }
   expect(parseDecisionLog({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records: [ruled] }, '/p', 's')).toEqual([ruled])
 })
+
+test('a permission note survives a reload and a note that is not text drops the record', () => {
+  const noted: DecisionRecord = { ...record, kind: 'permission', subject: 'Write', proposed: 'ask', selected: 'ask', source: 'baseline', outcome: 'low-confidence', runId: 'dag_1', nodeId: 'a', note: 'Write needs approval' }
+  const log = (records: unknown[]) => ({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records })
+  expect(parseDecisionLog(log([noted]), '/p', 's')).toEqual([noted])
+  expect(parseDecisionLog(log([{ ...noted, note: 7 }]), '/p', 's')).toEqual([])
+})
