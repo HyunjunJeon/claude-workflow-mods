@@ -66,6 +66,15 @@ export function nodeMessage(run: Run, nodeId: string, output = ''): string {
   ].join('\n')
 }
 
+// Submitted the moment a node agent stops in a non-interactive session, before its result is verified, so
+// it carries no result: its only job is to give the host queued work (a new main turn) while the plugin works.
+export function keepAliveMessage(run: Run, nodeId: string): string {
+  return [
+    `Node "${nodeId}" of DAG run "${run.name}" (${run.runId}) finished; dag-workflow is verifying it and continuing the run in the background.`,
+    'Reply with one short line and end your turn without calling any tools. You will get one summary when the run settles.',
+  ].join('\n')
+}
+
 export function settleMessage(run: Run, toolName: string): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {

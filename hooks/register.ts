@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
@@ -48,6 +48,11 @@ const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
 const USAGE = 'Usage: /dag [list | run <file> | status <run> | cancel <run> | retry <run> [nodes...] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|guide|off] | view [auto|graph|lanes|timeline]]'
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'guide', 'off']
 const REPORT_LIMIT = 4_000_000
+// A headless host waits for a held main turn.complete for 60 000 ms only ("[WARN] headless session: turn events still
+// running after 60000ms; the turn ends without them", measured in a live `claude -p` run); it does not abort the hold.
+// Past that only live agents and queued prompts keep the session up, which is why a node completion while the turn
+// is held submits a keep-alive prompt. This constant now only caps how long one hold loop polls when no completion
+// hands it off.
 const HOLD_LIMIT_MS = 3_600_000
 const PANE_ID = 'dag'
 const PREFS_KEY = 'collapse-prefs'
@@ -88,6 +93,12 @@ let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
 let planningLoaded = false
 let interactive = true
+// A non-interactive main turn held open by holdUntilSettled. Each hold takes a new generation and returns once its
+// generation is stale, so a hold handed off to a keep-alive prompt, or replaced by a newer hold, stops spinning.
+let mainHeld = false
+let holdGeneration = 0
+// A keep-alive prompt is with the host and its turn has not started yet; it covers every completion until then.
+let keepAliveQueued = false
 // Only the terminal and desktop surfaces draw the pane and band; elsewhere progress goes out as text.
 let paneSurface = true
 // A /dag run|retry typed during a main model turn is persisted pending and started when that turn ends.
@@ -696,7 +707,32 @@ function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
   return { run, node, report }
 }
 
+// B6: past the host's 60 s wait for the held turn, a -p session ends 58-440 ms after its last live agent stops unless
+// work is queued, which cuts off the verify, checkpoint and successor spawn below. Sessions that survived had a plugin
+// prompt enqueued 2-20 ms after that stop, so the prompt goes out first, before the queue or any verify.
+function keepSessionUp($: EngineInterface, agentId: string): void {
+  if (interactive || !mainHeld || keepAliveQueued) return
+  const run = runs.get(agentRuns.get(agentId) ?? '')
+  const node = run && nodeForAgent(run, agentId)
+  if (!run || !node) return
+  keepAliveQueued = true
+  const generation = holdGeneration
+  debug($, `keep-alive prompt for ${run.runId}/${node.id}`)
+  $.prompt.submit({ text: keepAliveMessage(run, node.id) }).then(result => {
+    if ('drop' in result) throw new Error(result.drop)
+    // The host holds the prompt now: release the hold so its turn can start; that turn ends and holds afresh.
+    if (generation === holdGeneration) {
+      holdGeneration++
+      mainHeld = false
+    }
+  }).catch(error => {
+    keepAliveQueued = false
+    $.ui.log(`could not keep the session open for ${run.runId}/${node.id}: ${message(error)}`)
+  })
+}
+
 async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
+  keepSessionUp($, end.agentId)
   const claim = await serialized(async () => claimCompletion(end))
   if (!claim) return
   const { run, node, report } = claim
@@ -1242,23 +1278,33 @@ async function pollTranscripts($: EngineInterface): Promise<void> {
 }
 
 async function holdUntilSettled($: EngineInterface, signal: AbortSignal): Promise<void> {
-  const deadline = (await $.clock.now()) + HOLD_LIMIT_MS
-  await holdWhileActive(signal, hasActiveRun, async () => {
-    if ((await $.clock.now()) >= deadline) {
-      $.ui.log(`stopped holding the session open after ${HOLD_LIMIT_MS / 60_000} minutes; a DAG run is still active`)
-      return false
-    }
-    try {
-      await $.process.run(['sleep', '1'])
-      return true
-    } catch (error) {
-      $.ui.log(`could not keep the session open for the active DAG run: ${message(error)}`)
-      return false
-    }
-  }, async () => {
-    await persistActiveRuns($)
-    debug($, 'stopped holding: aborted')
-  })
+  const generation = ++holdGeneration
+  mainHeld = true
+  try {
+    const deadline = (await $.clock.now()) + HOLD_LIMIT_MS
+    await holdWhileActive(signal, hasActiveRun, async () => {
+      if (generation !== holdGeneration) {
+        debug($, 'stopped holding: handed off to a newer main turn')
+        return false
+      }
+      if ((await $.clock.now()) >= deadline) {
+        $.ui.log(`stopped holding the session open after ${HOLD_LIMIT_MS / 60_000} minutes; a DAG run is still active`)
+        return false
+      }
+      try {
+        await $.process.run(['sleep', '1'])
+        return true
+      } catch (error) {
+        $.ui.log(`could not keep the session open for the active DAG run: ${message(error)}`)
+        return false
+      }
+    }, async () => {
+      await persistActiveRuns($)
+      debug($, 'stopped holding: aborted')
+    })
+  } finally {
+    if (generation === holdGeneration) mainHeld = false
+  }
 }
 
 export async function holdWhileActive(
@@ -1544,6 +1590,7 @@ export function register(on: On, options: PluginOptions) {
     interactive = e.isInteractive
     paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
+    keepAliveQueued = false
     if (jevEnabled) {
       try {
         jevApiKey = await $.env.get('TYPESAFE_API_KEY')
@@ -1865,6 +1912,9 @@ export function register(on: On, options: PluginOptions) {
 
   on('turn.start', async ($, e, next) => {
     mainTurnBusy = true
+    // The turn a keep-alive prompt asked for has begun (turn.start fires for main turns only); the next completion
+    // while that turn's end is held may queue another.
+    keepAliveQueued = false
     return next(e)
   })
 
