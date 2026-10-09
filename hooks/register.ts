@@ -74,11 +74,12 @@ function debug($: EngineInterface, text: string): void {
 }
 
 // The strict gate must outlive /reload-plugins: a reload re-runs register() and starts every module variable over, while
-// the conversation still holds the planning skill (B10, hit twice in real use). The host keeps $.state across a reload,
-// so the flag is written there too; `planningLoaded` stays the fast in-process copy. The ref is declared in types/index.d.ts.
+// the conversation still holds the planning skill. The host keeps $.state across a reload, so the flag is written there
+// too; `planningLoaded` stays the fast in-process copy. The ref is declared in types/index.d.ts.
 const PLANNING_FLAG = { plugin: 'dag-workflow', key: 'planningLoaded' } as const
 
-// A failed state call is logged and leaves the module variable as it is: a closed gate stays closed, an open one stays open.
+// A failed state call is only logged. set: the in-process flag has already changed and only the stored copy is lost, so a
+// later reload can drop it. restore (below): a failed or missing read leaves the gate as it is.
 async function setPlanningLoaded($: EngineInterface, loaded: boolean): Promise<void> {
   planningLoaded = loaded
   try {
