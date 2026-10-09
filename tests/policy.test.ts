@@ -265,9 +265,10 @@ test('the under-split lints stay silent on every expected scenario shape', async
       lane('fix', ['mathutil.py'], { dependsOn: ['diagnose'] }),
       audit(['fix']),
     ],
+    // 450 items at 200 per quick node: three batches is the minimum
     'wide-harvest': [
-      ...[1, 2, 3, 4].map(n => lane(`batch-${n}`, [`notes/batch-${n}.md`])),
-      lane('totals', ['todo-report.md'], { dependsOn: ['batch-1', 'batch-2', 'batch-3', 'batch-4'] }),
+      ...[1, 2, 3].map(n => lane(`batch-${n}`, [`notes/batch-${n}.md`])),
+      lane('totals', ['todo-report.md'], { dependsOn: ['batch-1', 'batch-2', 'batch-3'] }),
       audit(['totals']),
     ],
     'research-write': [

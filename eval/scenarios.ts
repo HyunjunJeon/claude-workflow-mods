@@ -7,12 +7,13 @@ export type Scenario = {
   unchanged?: string[]
 }
 
+// 450 files hold 675 TODOs, above the doctrine's 200 items per quick node, so a plan that follows it needs at least three batches and a fan-in.
 const todoFiles = Object.fromEntries(
-  Array.from({ length: 24 }, (_, i) => {
+  Array.from({ length: 450 }, (_, i) => {
     const n = i + 1
     const todos = Array.from({ length: n % 4 }, (_, k) => `# TODO: follow-up ${k + 1} for module ${n}`)
     const body = [`"""Module ${n}."""`, '', `def value_${n}():`, `    return ${n}`, '', ...todos, ''].join('\n')
-    return [`src/mod_${String(n).padStart(2, '0')}.py`, body]
+    return [`src/mod_${String(n).padStart(3, '0')}.py`, body]
   }),
 )
 
@@ -77,7 +78,7 @@ export const SCENARIOS: Scenario[] = [
     expect: 'fan-out/fan-in',
     prompt: 'Count the TODO comments in every file under src/ and write todo-report.md with a per-file table and the grand total.',
     files: todoFiles,
-    check: 'grep -Eq "\\b36\\b" todo-report.md && grep -q "mod_24" todo-report.md',
+    check: 'grep -Eq "\\b675\\b" todo-report.md && grep -q "mod_450" todo-report.md',
   },
   {
     id: 'research-write',

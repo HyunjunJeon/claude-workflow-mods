@@ -417,16 +417,16 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 `eval/`은 이 플러그인이 실제로 다양한 DAG 형태를 만드는지 측정하는 하네스입니다. 각 시나리오는 작은 고정 파일과 DAG를 언급하지 않는 평범한 작업 문장, 결과 확인 명령으로 이루어져 있고, 특정 토폴로지를 유도하도록 골랐습니다.
 
 
-| 시나리오              | 기대 형태           |
-| ----------------- | --------------- |
-| `single-edit`     | 단일 노드           |
-| `parallel-files`  | 독립 병렬           |
-| `map-reduce-docs` | 팬아웃 → 팬인        |
-| `pipeline-stats`  | 체인              |
-| `diamond-app`     | 다이아몬드           |
-| `debug-fix`       | 조사 → 수정 → 검증 체인 |
-| `wide-harvest`    | 샤딩 팬아웃 → 집계     |
-| `research-write`  | 조사 병렬 → 작성      |
+| 시나리오              | 기대 형태                |
+| ----------------- | -------------------- |
+| `single-edit`     | 단일 노드                |
+| `parallel-files`  | 독립 병렬                |
+| `map-reduce-docs` | 팬아웃 → 팬인             |
+| `pipeline-stats`  | 체인                   |
+| `diamond-app`     | 다이아몬드                |
+| `debug-fix`       | 조사 → 수정 → 검증 체인      |
+| `wide-harvest`    | 샤딩 팬아웃(파일 450개) → 집계 |
+| `research-write`  | 조사 병렬 → 작성           |
 
 
 ```bash
