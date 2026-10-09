@@ -163,3 +163,21 @@ test('under-split lint lists the normalized spelling of each path it counts', as
   expect(warnings).toHaveLength(1)
   expect(warnings[0]).toContain('node "x": one producer owns 3 files (a.md, b/c.md, d/e.md)')
 })
+
+test('under-split lint treats a bare tests folder as tests, not as a deliverable', async () => {
+  expect(underSplit({ writes: ['tests/', 'a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint treats a nested tests or __tests__ folder as tests', async () => {
+  expect(underSplit({ writes: ['src/tests', 'src/__tests__/', 'a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint treats test, tests/x.ts and a spec file as tests', async () => {
+  expect(underSplit({ writes: ['test', 'tests/x.ts', 'src/a.spec.ts', 'a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint does not treat names that merely contain test as tests', async () => {
+  const warnings = underSplit({ writes: ['testsuite/a.ts', 'contest/b.ts', 'c.md'] })
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('node "x": one producer owns 3 files (testsuite/a.ts, contest/b.ts, c.md)')
+})
