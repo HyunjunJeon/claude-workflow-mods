@@ -308,6 +308,7 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 | 액션                                         | 동작                                                                                            |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | `start {definition}`                       | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict`. 결과에 계약 점검 `warnings` 포함             |
+| `start {path}`                             | `definition` 대신 프로젝트 상대 `.yaml`/`.yml`/`.json` 정의 파일 경로를 받습니다. `/dag run`과 똑같이 읽고 파싱한 뒤 `start {definition}`과 똑같이 시작하므로 계획 스킬 게이트, 린트 `warnings`, 키 재사용이 같습니다. `definition`과 `path` 중 정확히 하나만 허용하며 둘 다 주거나 둘 다 없으면 `invalid_request`입니다. 경로는 `..` 없는 프로젝트 상대 경로이고 `.claude` 밖이며 위 확장자여야 하고, 어기면 `invalid_request`입니다. 읽기나 파싱에 실패하면 경로를 담은 `definition_unreadable`을 돌려줍니다. 모델이 YAML 흐름을 JSON으로 직접 옮겨 적지 않아도 되며, `/dag run`은 계속 사용자 명령이고 절대 경로도 받습니다 |
 | `snapshot {run_id}` / `list`               | 상태 조회(노드 답변 발췌 포함)                                                                            |
 | `wait {run_id}`                            | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다                                   |
 | `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |
