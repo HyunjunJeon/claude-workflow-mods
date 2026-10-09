@@ -9,7 +9,7 @@ import { addNote, contextSummary, emptyContext, parseContext, recordRequest, rem
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
-import { verificationProblem } from './engine/verification.ts'
+import { projectPath, verificationProblem } from './engine/verification.ts'
 import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
 import {
   amendRun,
@@ -32,7 +32,7 @@ import {
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import type { NodeRun, RecoveryKind, Run, VerificationEvidence } from './engine/types.ts'
+import { fail, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
@@ -915,6 +915,43 @@ async function startDefinition($: EngineInterface, input: unknown): Promise<Tool
   })
 }
 
+// The one read-and-parse step behind /dag run and start {path}: .yaml/.yml go through the YAML subset, anything else is JSON.
+// `shown` is how the failure names the file (the path the caller gave); `path` is where it is read.
+async function readDefinitionFile($: EngineInterface, path: string, shown = path): Promise<Result<unknown>> {
+  try {
+    const source = await $.fs.read(path)
+    return { ok: true, value: /\.ya?ml$/i.test(path) ? parseYaml(source) : JSON.parse(source) }
+  } catch (error) {
+    return fail('definition_unreadable', `Cannot read a DAG definition from ${shown}: ${message(error)}`)
+  }
+}
+
+// start takes the definition inline or by project-relative file path; either way it ends in startDefinition,
+// so the planning gate (in the tool.call hook), lint warnings and key reuse behave identically.
+async function startRequest($: EngineInterface, input: ToolInput): Promise<ToolReply> {
+  const hasDefinition = input.definition !== undefined && input.definition !== null
+  const hasPath = input.path !== undefined && input.path !== null
+  if (hasDefinition === hasPath) {
+    return err({
+      code: 'invalid_request',
+      message: `start takes exactly one of "definition" (the definition object) and "path" (a project-relative .yaml, .yml or .json definition file); got ${hasPath ? 'both' : 'neither'}.`,
+    })
+  }
+  if (!hasPath) return startDefinition($, input.definition)
+  const given = input.path
+  if (typeof given !== 'string' || given.trim() === '') {
+    return err({ code: 'invalid_request', message: '"path" must be a nonempty string naming a project-relative .yaml, .yml or .json definition file.' })
+  }
+  if (!projectPath(given)) {
+    return err({ code: 'invalid_request', message: `"path" ${JSON.stringify(given)} must be project-relative: no leading "/", drive letter or ".." segment, and nothing inside .claude.` })
+  }
+  if (!/\.(ya?ml|json)$/i.test(given)) {
+    return err({ code: 'invalid_request', message: `"path" ${JSON.stringify(given)} must end in .yaml, .yml or .json.` })
+  }
+  const read = await readDefinitionFile($, `${await $.session.cwd()}/${given}`, given)
+  return read.ok ? startDefinition($, read.value) : err(read.error)
+}
+
 async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolReply> {
   if (input.action === 'context') return ok({ source: contextPath(), context: workflowContext, summary: JSON.parse(restorationContext()) })
   if (input.action === 'decisions') return ok({ decisions: decisionRecords })
@@ -922,7 +959,7 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
     await refreshSessions($)
     return ok({ sessions: projectSessions(peerSessions, projectRoot, await $.clock.now()), conflicts: sessionConflicts(peerSessions, projectRoot, await $.clock.now()) })
   }
-  if (input.action === 'start') return startDefinition($, input.definition)
+  if (input.action === 'start') return startRequest($, input)
   if (input.action === 'list') {
     return ok({
       runs: [...runs.values()]
@@ -1156,14 +1193,9 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     const given = rest.join(' ')
     if (!given) return { text: USAGE }
     const path = given.startsWith('/') ? given : `${await $.session.cwd()}/${given}`
-    let input: unknown
-    try {
-      const source = await $.fs.read(path)
-      input = /\.ya?ml$/i.test(path) ? parseYaml(source) : JSON.parse(source)
-    } catch (error) {
-      return { text: `Cannot read a DAG definition from ${path}: ${message(error)}` }
-    }
-    const reply = await startDefinition($, input)
+    const read = await readDefinitionFile($, path)
+    if (!read.ok) return { text: read.error.message }
+    const reply = await startDefinition($, read.value)
     if (reply.isError) return { text: `DAG not started:\n${reply.result}` }
     const started = JSON.parse(reply.result) as { run_id: string; reused: boolean; warnings?: string[] }
     const run = runs.get(started.run_id)

@@ -389,6 +389,152 @@ test('only the manual cancel command withdraws a pending handoff', async ($, on)
   expect(h.locks.size).toBe(0)
 })
 
+const FLOW_YAML = [
+  'key: from-file',
+  'name: From file',
+  'goal: Prove start by path',
+  'nodes:',
+  '  - id: a',
+  '    prompt: Produce artifact',
+  '    verify:',
+  '      - kind: command',
+  '        argv: [check-control]',
+  '  - id: b',
+  '    prompt: Consume artifact',
+  '    dependsOn: [a]',
+  '    verify:',
+  '      - kind: command',
+  '        argv: [check-control]',
+  '',
+].join('\n')
+const FLOW_OBJECT = {
+  key: 'from-file', name: 'From file', goal: 'Prove start by path',
+  nodes: [
+    { id: 'a', prompt: 'Produce artifact', verify: CHECK },
+    { id: 'b', prompt: 'Consume artifact', dependsOn: ['a'], verify: CHECK },
+  ],
+}
+
+test('start {path} runs a YAML definition file exactly like start {definition} and reuses it by key', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.yaml', FLOW_YAML)
+  await boot($)
+  const started = await dag($, { action: 'start', path: 'flow.yaml' }) as { reused: boolean; run_id: string; snapshot: { nodes: { id: string }[] } }
+  expect(started.reused).toBe(false)
+  expect(started.snapshot.nodes.map(node => node.id)).toEqual(['a', 'b'])
+  expect(h.spawns).toHaveLength(1)
+  expect(checkpoint(h, started.run_id).definition).toMatchObject({ key: 'from-file', name: 'From file', goal: 'Prove start by path' })
+
+  // The inline object equal to the parsed file is the same definition under the same key, so it finds this run.
+  expect(await dag($, { action: 'start', definition: FLOW_OBJECT })).toMatchObject({ reused: true, run_id: started.run_id })
+  expect(await dag($, { action: 'start', path: 'flow.yaml' })).toMatchObject({ reused: true, run_id: started.run_id })
+  expect(h.spawns).toHaveLength(1)
+})
+
+test('start {path} reads a .json and a nested .yml definition file', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.json', JSON.stringify({ ...FLOW_OBJECT, key: 'from-json' }))
+  h.files.set('/work/flows/deep.yml', FLOW_YAML.replace('from-file', 'from-yml'))
+  await boot($)
+  const json = await dag($, { action: 'start', path: 'flow.json' })
+  expect(json).toMatchObject({ reused: false })
+  expect(checkpoint(h, json.run_id as string).definition.key).toBe('from-json')
+  const yml = await dag($, { action: 'start', path: 'flows/deep.yml' })
+  expect(yml).toMatchObject({ reused: false })
+  expect(checkpoint(h, yml.run_id as string).definition.key).toBe('from-yml')
+})
+
+test('start {path} reports the same definition lint warnings as start {definition}', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.yaml', FLOW_YAML)
+  await boot($)
+  const byPath = await dag($, { action: 'start', path: 'flow.yaml' })
+  const inline = await dag($, { action: 'start', definition: { ...FLOW_OBJECT, key: 'inline' } })
+  expect(byPath.warnings).toEqual(inline.warnings)
+  expect(byPath.warnings).toEqual(expect.arrayContaining([expect.stringContaining('the prompt lacks TASK: and STOP WHEN')]))
+})
+
+test('start refuses both definition and path, and neither, as invalid_request', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.yaml', FLOW_YAML)
+  await boot($)
+  const both = await dag($, { action: 'start', definition: FLOW_OBJECT, path: 'flow.yaml' })
+  expect(both).toMatchObject({ error: { code: 'invalid_request' } })
+  expect((both.error as { message: string }).message).toContain('"definition"')
+  expect((both.error as { message: string }).message).toContain('"path"')
+  const neither = await dag($, { action: 'start' })
+  expect(neither).toMatchObject({ error: { code: 'invalid_request' } })
+  expect((neither.error as { message: string }).message).toContain('"definition"')
+  expect((neither.error as { message: string }).message).toContain('"path"')
+  expect(h.spawns).toHaveLength(0)
+})
+
+test('start {path} refuses a path outside the project, inside .claude, with another extension or not text, before reading anything', async ($, on) => {
+  const h = harness(on)
+  for (const file of ['/x.yaml', '/abs.yaml', '/work/.claude/x.yaml', '/work/x.txt', '/work/flows/x.yaml']) h.files.set(file, FLOW_YAML)
+  await boot($)
+  const readsBefore = h.reads.length
+  for (const path of ['../x.yaml', 'flows/../../x.yaml', '/abs.yaml', 'C:\\flow.yaml', '.claude/x.yaml', 'flows/.claude/x.yaml', 'x.txt', 'flow', '', '  ', 7]) {
+    expect(await dag($, { action: 'start', path })).toMatchObject({ error: { code: 'invalid_request' } })
+  }
+  expect(h.reads).toHaveLength(readsBefore)
+  expect(h.spawns).toHaveLength(0)
+})
+
+test('start {path} names the path when the file is missing or does not parse', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/bad.yaml', 'key: x\nnodes: {a: 1}\n')
+  h.files.set('/work/bad.json', '{"key": ')
+  await boot($)
+  const missing = await dag($, { action: 'start', path: 'flows/missing.yaml' })
+  expect(missing).toMatchObject({ error: { code: 'definition_unreadable' } })
+  expect((missing.error as { message: string }).message).toContain('flows/missing.yaml')
+  const yaml = await dag($, { action: 'start', path: 'bad.yaml' })
+  expect(yaml).toMatchObject({ error: { code: 'definition_unreadable' } })
+  expect((yaml.error as { message: string }).message).toContain('bad.yaml')
+  expect((yaml.error as { message: string }).message).toContain('YAML line 2')
+  const json = await dag($, { action: 'start', path: 'bad.json' })
+  expect(json).toMatchObject({ error: { code: 'definition_unreadable' } })
+  expect((json.error as { message: string }).message).toContain('bad.json')
+  expect(h.spawns).toHaveLength(0)
+})
+
+test('start {path} hands a file that parses but is not a definition to the same checks as start {definition}', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/empty.yaml', 'key: nothing\nnodes: []\n')
+  h.files.set('/work/unverified.json', JSON.stringify({ key: 'unverified', nodes: [{ id: 'a', prompt: 'Produce artifact' }] }))
+  await boot($)
+  expect(await dag($, { action: 'start', path: 'empty.yaml' })).toMatchObject({ error: { code: 'invalid_definition' } })
+  expect(await dag($, { action: 'start', path: 'unverified.json' })).toMatchObject({ error: { code: 'verification_required' } })
+  expect(h.spawns).toHaveLength(0)
+})
+
+test('start {path} is refused until the planning skill is loaded, like start {definition}', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.yaml', FLOW_YAML)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const readsBefore = h.reads.length
+  expect(await dag($, { action: 'start', path: 'flow.yaml' })).toMatchObject({ error: { code: 'planning_skill_required' } })
+  expect(await dag($, { action: 'start', definition: FLOW_OBJECT })).toMatchObject({ error: { code: 'planning_skill_required' } })
+  expect(h.reads).toHaveLength(readsBefore)
+  expect(h.spawns).toHaveLength(0)
+  await $.skill.prompt({ skill: 'dag-workflow:dag-planning', text: '# planning' })
+  expect(await dag($, { action: 'start', path: 'flow.yaml' })).toMatchObject({ reused: false })
+  expect(h.spawns).toHaveLength(1)
+})
+
+test('/dag run still reads absolute paths and names the file it could not read', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/elsewhere/flow.yaml', FLOW_YAML)
+  await boot($)
+  const started = await command($, 'run /elsewhere/flow.yaml')
+  expect(started.text).toContain('From file')
+  expect(h.spawns).toHaveLength(1)
+  const missing = await command($, 'run nope.yaml')
+  expect(missing.text).toContain('Cannot read a DAG definition from /work/nope.yaml: ')
+  expect(h.spawns).toHaveLength(1)
+})
+
 test('accepting a completed checkpoint transfers history without starting a turn', async ($, on) => {
   const h = harness(on)
   await boot($)
