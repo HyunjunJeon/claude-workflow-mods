@@ -104,9 +104,10 @@ that prints OK when run with python3 test_app.py.
 기본값인 `strict`에서는 네 가지가 함께 동작합니다.
 
 1. **도구 게이트**: 메인 대화에서 모델이 호출하는 도구 중 다음을 제외한 모든 도구를 거부합니다. 거부할 때는 "이 작업을 DAG 노드로 옮겨 `start`나 `amend`하라"는 안내를 돌려줍니다.
-   - 허용: dag 도구, Read, LSP, WebFetch/WebSearch, AskUserQuestion, 계획 모드, 작업 조회·중단(TaskList/TaskGet/TaskStop), 읽기 전용 Bash
+   - 허용: dag 도구, Read, LSP, WebFetch/WebSearch, AskUserQuestion, 계획 모드, 작업 조회·중단(TaskList/TaskGet/TaskStop), 읽기 전용 Bash, 호스트가 막는 보고서 이름에 한정한 Write 예외(아래)
    - 읽기 전용 Bash: `ls`, `cat`, `rg`, `find`(‐exec/‐delete 제외), `git status/log/diff/show/...`, 인자가 `--version`/`--help` 하나뿐인 명령, `uv pip list/freeze/show/check`, 출력만 하는 `sed`(`-i`·`-f`·`w`·`e` 제외) 등. 명령이 모두 읽기 전용이면 `for`/`if`/`while` 구조와 입력 리다이렉트(`< 파일`)도 허용합니다. 출력 리다이렉트(`>`), 명령 치환(`$(...)`), 프로세스 치환(`<(...)`), 목록에 없는 명령이 하나라도 있으면 거부합니다.
-   - 거부: Edit, Write, NotebookEdit, Agent, Workflow, TodoWrite/TaskCreate(계획은 DAG로만), 쓰기 Bash, 그 밖의 MCP 도구
+   - Write 예외: 파일 이름(basename)이 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*`로 시작하는 Markdown(`^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$`, 대소문자 무시)은 메인 대화의 Write를 허용합니다. Claude Code가 서브에이전트의 이 이름 쓰기를 `Subagents should return findings as text, not write report files`로 직접 거부하므로 노드로는 `report.md` 같은 파일을 만들 수 없기 때문입니다. 정착한 노드의 `## Output`이나 노트를 그대로 옮겨 쓰는 용도로만 허용하며, Edit과 쓰기 Bash, 다른 이름의 Write는 계속 거부합니다.
+   - 거부: Edit, Write(위 예외 제외), NotebookEdit, Agent, Workflow, TodoWrite/TaskCreate(계획은 DAG로만), 쓰기 Bash, 그 밖의 MCP 도구
    - DAG 노드 에이전트와 플러그인 자신의 호출(노드 spawn, TaskStop)은 제한하지 않습니다.
 2. **프로토콜 주입**: 사용자 프롬프트마다 "계획을 DAG로 짜서 실행하고, 의존 관계를 정확히 적고, 정착 요약을 확인하라"는 짧은 지침을 붙입니다. 비대화형 세션(`session.start`의 `isInteractive`가 false인 경우, 예: `claude -p`)에서는 지침이 한 줄 더 붙어, 사용자에게 묻지 말고(AskUserQuestion도, 확인 질문도 안 됨) 스스로 결정하되 가정을 정의의 `goal`과 노드 프롬프트에 적으라고 알립니다.
 3. **도구 설명**: dag 도구 설명에 같은 원칙을 넣습니다.
@@ -149,6 +150,7 @@ mod는 이 스킬을 강제로 연결합니다.
 - 노드가 끝나면 전체 보고서는 `.claude/dag/runs/<run_id>/<node>.md`에 저장되고, 출력(`## Output` 섹션, 없으면 보고서 전체)은 상태에 기록됩니다.
 - 하위 노드의 프롬프트에는 `dependsOn`에 적힌 직접 의존 노드들의 출력(노드당 4,000자까지)과 전체 보고서 경로가 `<upstream_results>`로 자동으로 들어갑니다. 정의의 `goal`은 모든 노드에 전달됩니다.
 - 메인 대화는 노드마다 출력 발췌가 담긴 짧은 진행 알림을 받고, 정착하면 모든 노드의 출력과 보고서 경로가 담긴 요약을 받습니다.
+- 사용자가 `report.md`처럼 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*` 이름의 파일을 요구하면 노드는 호스트가 서브에이전트의 쓰기를 거부하므로 전체 텍스트를 `## Output`에 돌려주고(또는 `<node-id>-notes.md`에 쓰고), 메인 대화가 정착 뒤에 그 내용을 해당 파일로 그대로 씁니다([강제](#강제)).
 
 **비대화형 세션에서 세션 유지**: 비대화형 세션(`claude -p` 등)에서는 메인 턴이 끝나도 이 세션의 실행이 `running`인 동안 플러그인이 그 턴의 `turn.complete`를 `sleep 1` 반복으로 붙잡아 세션을 열어 둡니다. 그런데 호스트는 붙잡힌 메인 턴을 끝난 뒤 60초까지만 기다립니다. 넘기면 `[WARN] headless session: turn events still running after 60000ms; the turn ends without them and their late notes are dropped`를 남기고, 그 뒤에는 살아 있는 노드 에이전트만 프로세스를 붙잡습니다. 그래서 메인 턴이 끝나고 60초가 지난 뒤에 노드가 끝나면 플러그인이 그 노드를 검증하거나 다음 노드를 띄우는 도중에 세션이 종료되어, 실행은 `running`, 노드는 `scheduled`나 `running`인 채 종료 코드 0으로 끝나곤 했습니다(백로그 B6). 이제 메인 턴이 붙잡힌 동안 노드 에이전트가 끝나면 플러그인이 검증보다 먼저 짧은 진행 프롬프트를 제출합니다. 노드가 끝났고 검증과 후속 실행은 백그라운드에서 이어진다고 알리며, 도구를 부르지 말고 한 줄로 답한 뒤 턴을 끝내라고 요청하는 내용입니다. 호스트가 이 프롬프트로 새 메인 턴을 시작하면 세션이 유지되고, 그 턴이 끝나면 플러그인은 실행이 정착할 때까지 다시 붙잡습니다. 비용은 노드가 끝날 때마다 메인 모델 턴이 짧게 한 번 더 도는 것입니다(그 프롬프트의 턴이 시작되기 전에 겹쳐 끝난 노드는 프롬프트 하나로 묶습니다). 이 턴의 한 줄 답변은 `claude -p`의 stdout에 그대로 나타납니다. 제출이 거부되거나 버려지면 `could not keep the session open for <run_id>/<node>`를 로그에 남깁니다. 대화형 세션은 영향을 받지 않습니다.
 

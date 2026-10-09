@@ -329,7 +329,9 @@ A failed check or missing evidence fails the node and blocks its dependents.
 - Instead, use a file check with nonempty `contains` text consumed downstream, or a command that fails on a wrong deliverable.
 - Lint reads only `argv[0]` and, for `test` and `[`, their dash flags. It does not inspect shell wrappers such as `sh -c '...'`. Do not use a wrapper to hide a vacuous check.
 - A passing check proves only its declared condition. The verification wave below checks further semantic correctness.
-- Never name node deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md. Claude Code 2.1.288 refuses subagent Write calls to those names. Use `<node-id>-notes.md` or return text in `## Output`.
+- Never name node deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name. Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295). Use `<node-id>-notes.md` or return text in `## Output`.
+- When the user requires such a name, the producing node puts the full file text in `## Output` (or writes `<node-id>-notes.md`). After the run settles, the main conversation writes the requested file verbatim with Write, then Reads it back. Never ask a node to work around the block with Bash, `mv` or a rename: that circumvents a host guard.
+- Because the requested file is written after the run settles, point the node's `verify` at the `<node-id>-notes.md` file and the final audit at that file or the Output, not at the requested file.
 - `verify` and `writes` affect the fingerprint. Changing them with `amend` re-runs the node and its dependents.
 - Old definitions or checkpoints without `verify` are unverified. Amend them with real checks; do not report their nodes as done.
 

@@ -181,9 +181,12 @@ A failed check or missing evidence makes the node `failed` and prevents its depe
 A passing check proves only what it checks, not semantic correctness.
 Choose checks that fail when the deliverable is wrong. Never use a no-op such as `true`.
 
-Never name deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md.
-Claude Code 2.1.288 refuses subagent Write calls to those names.
+Never name deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name.
+Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295).
 Use `<node-id>-notes.md` or return text in `## Output`.
+When the user requires such a name, the producing node puts the full file text in `## Output` (or writes `<node-id>-notes.md`).
+After the run settles, the main conversation writes the requested file verbatim with Write, then Reads it back.
+Never ask a node to work around the block with Bash, `mv` or a rename: that circumvents a host guard.
 
 A node from an old definition without `verify` fails as unverified.
 Amend the definition with checks. Do not treat that node as done.
@@ -246,6 +249,7 @@ Under strict enforcement, the main conversation can use:
 - Read, LSP, web search/fetch, AskUserQuestion and plan mode.
 - Task listing and stopping, plus the dag tool.
 - Read-only Bash, as listed below.
+- Write, limited to a REPORT*, SUMMARY*, FINDINGS* or ANALYSIS* .md file the user asked for, copying a settled node's Output or notes verbatim.
 
 Read-only Bash includes `ls`, `cat`, `rg`, and `find` without `-exec`/`-delete`.
 It also includes `git status|log|diff|show|...`, `<tool> --version`, `uv pip list|freeze|show|check`, and printing `sed -n`.
