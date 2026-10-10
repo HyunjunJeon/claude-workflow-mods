@@ -172,7 +172,7 @@ A slice cannot pass alone: it leaves callers broken or must rewrite all callers 
 The chain is one component in the topology lock, with three node types:
 
 - `expand` adds the new form beside the old form without breaking callers. Its `verify` includes a build or test command and a file check for the new form.
-- `migrate` nodes update callers in batches by affected package or directory. Limit each batch to what one node can edit and recheck. First count callers with read-only Bash (`grep -rl <name> <package> | wc -l` per package); do not guess. Each node depends on `expand` and runs the build or tests. The old form keeps those checks passing. Only batches with disjoint write scopes run in parallel. Use `dependsOn` to serialize batches that share files.
+- `migrate` nodes update callers in batches by affected package or directory. Limit each batch to what one node can edit and recheck. First count callers with read-only Bash (`git grep -l <name> -- <package> | wc -l` per package); do not guess. Each node depends on `expand` and runs the build or tests. The old form keeps those checks passing. Only batches with disjoint write scopes run in parallel. Use `dependsOn` to serialize batches that share files.
 - `contract` deletes the old form after all callers migrate. It depends on every `migrate` node. Its `verify` runs the build or tests; remaining callers fail once the old form is gone. For callers outside build coverage, add a scoped absence check with the wrapper below. Select patterns and caller paths that exclude unrelated text.
 
 Example chain for retyping a shared `userId` as `accountId`:
@@ -329,7 +329,7 @@ A failed check or missing evidence fails the node and blocks its dependents.
 - Vacuous means: a file check without `contains` (it only proves the file exists; `touch` passes it); a command whose program basename is `true`, `:`, `echo`, `printf`, `exit`, `yes` or `sleep` (always passes; a directory prefix such as `/bin/true` is stripped, arguments are ignored); `test` or `[` that uses only `-e`, `-f`, `-d` or `-s`, or `ls`, `stat` or `cat` (only proves a path exists). `test` with any other operator (`-n`, `-r`, `-z`) or without a dash flag, such as `test a = b`, is not flagged.
 - Instead, use a file check with nonempty `contains` text consumed downstream, or a command that fails on a wrong deliverable.
 - Lint reads only `argv[0]` and, for `test` and `[`, their dash flags. It does not inspect shell wrappers such as `sh -c '...'`. Do not use a wrapper to hide a vacuous check.
-- Command checks run without a shell on the user's machine, so `argv[0]` must be a program every machine has, such as `grep`, `git`, `test`, `bash` or the project's own runner. Optional tools such as ripgrep may be missing, and a missing program fails the check.
+- Command checks run on the user's machine without a shell, so aliases and shell functions do not apply. `argv[0]` must be a program every machine has, such as `grep`, `git`, `test`, `bash` or the project's own runner. Optional tools such as ripgrep may be missing, and a missing program fails the check.
 - A passing check proves only its declared condition. The verification wave below checks further semantic correctness.
 - Never name node deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name. Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295). Use `<node-id>-notes.md` or return text in `## Output`.
 - When the user requires such a name, the producing node puts the full file text in `## Output` (or writes `<node-id>-notes.md`). After the run settles, the main conversation writes the requested file verbatim with Write, then Reads it back. Never ask a node to work around the block with Bash, `mv` or a rename: that circumvents a host guard.
@@ -347,7 +347,7 @@ Command and input errors must fail.
 For example, to assert that a debug tag is absent, adapt the tag and paths to the actual instrumentation scope before `start`:
 
 ```json
-{"kind":"command","argv":["bash","-c","if grep -rnF -- \"$1\" \"${@:2}\" >/dev/null; then exit 1; else code=$?; test \"$code\" -eq 1; fi","absence-check","DEBUG-a4f2","src","tests"]}
+{"kind":"command","argv":["bash","-c","if grep -rF -- \"$1\" \"${@:2}\" >/dev/null; then exit 1; else code=$?; test \"$code\" -eq 1; fi","absence-check","DEBUG-a4f2","src","tests"]}
 ```
 
 `absence-check` is Bash's `$0`, the tag is `$1`, and later arguments name explicit existing source/test paths.
