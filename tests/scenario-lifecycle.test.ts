@@ -5,7 +5,8 @@ import { protocolFor } from '../hooks/engine/policy.ts'
 import { boot, checkpoint, command, dag, finish, folder, harness, PROGRAMS, ROOT, start } from './control-harness.ts'
 
 // End-to-end scenarios: each one drives the plugin through a whole lifecycle across features (preview, approval, the
-// verify grammar, recovery, retry, amend, run resume, settle messages, the context diet, the planning gate, lint) and
+// verify grammar, recovery, retry, amend, run resume, settle messages, the context diet, the planning gate, lint, the
+// built-in review and commit stages, the wait for a node's background work, and the guard on a run the user rejected) and
 // asserts the chain a person or the model would observe: spawns, checkpoint states, evidence files, submitted prompts and
 // their context.
 // The unit and hook tests prove each case on its own; these prove the cases still compose.
@@ -291,8 +292,9 @@ test('scenario 4, approval: under the session override a model start holds, show
   expect(checkpoint(h, wide.run_id)).toMatchObject({ status: 'cancelled', cancelReason: 'Rejected by the user: too broad, bump only', settledNotified: true })
   expect(states(h, wide.run_id)).toEqual(['bump:cancelled', 'changelog:cancelled', 'verify-release:cancelled'])
   expect(h.prompts.filter(text => text.includes(wide.run_id))).toEqual([`DAG run "Release wide" (${wide.run_id}) was rejected by the user: too broad, bump only. Nothing ran.`])
-  // The rejected run keeps its key: the same definition again returns it and starts nothing, so a new plan needs a new key.
-  expect(await modelStart($, RELEASE_WIDE)).toMatchObject({ reused: true, run_id: wide.run_id })
+  // The rejected run keeps its key: the model's start of the same definition is refused and starts nothing, so a new plan
+  // needs a new key.
+  expect(await dag($, { action: 'start', definition: RELEASE_WIDE })).toMatchObject({ error: { code: 'rejected_by_user' } })
   expect(h.spawns).toHaveLength(0)
 
   const narrow = await modelStart($, RELEASE_NARROW)
@@ -594,4 +596,631 @@ test('scenario 9, missing path and checkpoint store: absent on a deleted file an
     `DAG run "Cleanup" (${runId}) settled: failed.`,
     `DAG run "Cleanup" (${runId}) settled: completed.`,
   ])
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 10. Built-in review and commit stages
+
+// A small git for the commit node's checks. The harness answers every program with exit 0 and no output, but the generated
+// checks judge output: `git log -1 --skip=<n> --format=%s` must print that commit's subject, `git status --porcelain`
+// must print nothing, and `git show --format= --name-only <commit> -- :/ :(exclude,literal)<path>...` must print no file outside
+// the commit's own paths. The repository is three files the test writes when the commit worker has "committed": /repo/log holds
+// the subjects, newest first, /repo/status what `git status` prints, and /repo/changed the files each commit changed, one
+// `<revision> <path>` line each (revisions as the checks name them: HEAD, HEAD~1). The fake does git's own filtering, so a
+// path the exclude pathspecs do not cover is printed and the check's expectation judges it. With no log the repository has
+// no commits (exit 128). The plugin answers git without calling the harness, so each call's argv is also appended to
+// /repo/calls, one JSON line a call.
+const GIT: Plugin = {
+  name: 'scenario-git',
+  register(on) {
+    // An exclude pathspec as git reads it: `literal` makes the path a name, and without it the path is a pattern. So a bare
+    // `:(exclude)app/[id]/page.ts` excuses `app/i/page.ts` (the brackets are a character class) and fails to excuse
+    // `app/[id]/page.ts` itself, where `:(exclude,literal)app/[id]/page.ts` excuses exactly that file (real git 2.54).
+    // It sits inside register because the plugin's code runs in the host, where this file's top level is not in scope.
+    const excludes = (spec: string, path: string): boolean => {
+      const magic = /^:\(([^)]*)\)/.exec(spec)
+      const words = magic?.[1]?.split(',') ?? []
+      if (!words.includes('exclude')) return false
+      const pattern = spec.slice(magic?.[0].length ?? 0)
+      if (words.includes('literal')) return path === pattern || path.startsWith(`${pattern}/`)
+      const source = pattern.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+      return new RegExp(`^${source}(/.*)?$`).test(path)
+    }
+    on('process.run', async ($, e, next) => {
+      if (e.argv[0] !== 'git') return next(e)
+      const done = (exitCode: number, stdout: string, stderr: string) => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } })
+      const readFile = async (path: string): Promise<string | undefined> => {
+        try {
+          return await $.fs.read(path)
+        } catch {
+          return undefined
+        }
+      }
+      await $.fs.write('/repo/calls', `${(await readFile('/repo/calls')) ?? ''}${JSON.stringify(e.argv)}\n`)
+      if (e.argv[1] === 'log') {
+        const log = await readFile('/repo/log')
+        if (log === undefined) return done(128, '', 'fatal: your current branch does not have any commits yet\n')
+        const skip = Number(/^--skip=(\d+)$/.exec(e.argv.find(arg => arg.startsWith('--skip=')) ?? '')?.[1] ?? 0)
+        const subject = log.split('\n').filter(line => line !== '')[skip]
+        return done(0, subject === undefined ? '' : `${subject}\n`, '')
+      }
+      if (e.argv[1] === 'status') return done(0, (await readFile('/repo/status')) ?? '', '')
+      if (e.argv[1] === 'show') {
+        const split = e.argv.indexOf('--')
+        const revision = e.argv[split - 1]
+        const specs = e.argv.slice(split + 1)
+        const changed = ((await readFile('/repo/changed')) ?? '').split('\n').flatMap(line => (line.startsWith(`${revision} `) ? [line.slice(revision?.length ?? 0).trim()] : []))
+        const listed = changed.filter(path => !specs.some(spec => excludes(spec, path)))
+        return done(0, listed.map(path => `${path}\n`).join(''), '')
+      }
+      return done(0, '', '')
+    })
+  },
+}
+
+const GREET_GOAL = 'A greet function exists in src/greet.ts and the README documents it'
+const GREET_REQUEST = 'Add a greet function and document it in the README'
+const FEAT_SUBJECT = 'feat: add greet'
+const DOCS_SUBJECT = 'docs: document greet'
+
+// Two producers; the review and commit stages are declared, not written.
+function greetFlow(key: string) {
+  return {
+    key,
+    name: 'Greet',
+    goal: GREET_GOAL,
+    nodes: [
+      { id: 'code', prompt: contract('Write src/greet.ts exporting greet'), writes: ['src/greet.ts'], verify: [{ kind: 'file', path: 'src/greet.ts', contains: 'export function greet' }] },
+      { id: 'docs', prompt: contract('Document greet in the README'), writes: ['README.md'], verify: [{ kind: 'file', path: 'README.md', contains: 'greet(' }] },
+    ],
+    review: { request: GREET_REQUEST },
+    commit: [
+      { message: `${FEAT_SUBJECT}\n\nThe greeting lives in src/greet.ts.`, paths: ['src/greet.ts'] },
+      { message: DOCS_SUBJECT, paths: ['README.md'] },
+    ],
+  }
+}
+
+// The notes a reviewer leaves, with the sections the generated prompt asks for and the verdict as the last line.
+const specNotes = (verdict: string, finding: string) =>
+  `## Request sentences\n"${GREET_REQUEST}"\n\n## Findings\n${finding}\n\n## Real check\n- file checks: both met\n\n## Safe-but-wrong audit\n1. a function and a README section, as requested\n\n${verdict}\n`
+const standardsNotes = (verdict: string) =>
+  `## Rule sources\nnone - baseline only\n\n## Rule breaches\nnone\n\n## Judgment calls\nnone\n\n${verdict}\n`
+
+// The argv of every git call the checks made, in order.
+function gitCalls(h: Harness): string[][] {
+  return (h.files.get('/repo/calls') ?? '').split('\n').filter(line => line !== '').map(line => JSON.parse(line))
+}
+
+function stageEvidence(h: Harness, runId: string, nodeId: string): string[] {
+  const saved = checkpoint(h, runId).nodes.find(current => current.id === nodeId)
+  return (saved?.verification?.evidence ?? []).map(item => `${item.passed ? 'pass' : 'FAIL'} ${item.detail.split('\n')[0]}`)
+}
+
+test('scenario 10, stages: review and commit declared on a definition expand into reviewers and a commit that run in order, the verdict lines gate the commit, and its git checks judge the real subjects', { ...NO_RECOVERY, plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+
+  // The dry run previews the generated nodes after the user's own and starts nothing.
+  const dry = await dag($, { action: 'start', definition: greetFlow('greet'), dryRun: true }) as PreviewReply
+  expect(dry.preview.node_count).toBe(5)
+  expect(dry.preview.waves).toEqual([['code', 'docs'], ['review-spec', 'review-standards'], ['commit']])
+  expect(dry.preview.nodes.map(item => item.id)).toEqual(['code', 'docs', 'review-spec', 'review-standards', 'commit'])
+  expect(dry.preview.warnings).toEqual([])
+  expect(h.spawns).toHaveLength(0)
+  expect([...h.files.keys()].filter(path => path.startsWith(`${ROOT}/runs/`))).toEqual([])
+
+  const runId = await start($, greetFlow('greet'))
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Greet: code', 'Greet: docs'])
+  expect(states(h, runId)).toEqual(['code:running', 'docs:running', 'review-spec:pending', 'review-standards:pending', 'commit:pending'])
+
+  // The producers finish; both reviewers start, each with the change's write scopes, the request and its own notes file.
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Greet: code', 'Greet: docs', 'Greet: Review: spec axis', 'Greet: Review: standards axis'])
+  const [specPrompt, standardsPrompt] = [h.spawns[2]?.prompt ?? '', h.spawns[3]?.prompt ?? '']
+  expect(specPrompt).toContain('/tmp/dag-review/greet-5d65d5/review-spec-notes.md')
+  expect(specPrompt).toContain(GREET_REQUEST)
+  expect(specPrompt).toContain(GREET_GOAL)
+  expect(specPrompt).toContain('- code: src/greet.ts')
+  expect(specPrompt).toContain('- docs: README.md')
+  expect(specPrompt).toContain('<result node="code"')
+  expect(standardsPrompt).toContain('/tmp/dag-review/greet-5d65d5/review-standards-notes.md')
+  expect(standardsPrompt).toContain('Before you start, load and follow these skills with the Skill tool: dag-workflow:review-standards.')
+  expect(standardsPrompt).not.toContain(GREET_REQUEST)
+  expect(h.spawns[2]?.model).toBe('sonnet')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:running', 'review-standards:running', 'commit:pending'])
+
+  // One verdict is not enough: the commit waits for both reviewers.
+  h.files.set('/tmp/dag-review/greet-5d65d5/review-spec-notes.md', specNotes('Spec verdict: PASS', '(a) none\n(b) none\n(c) none'))
+  await finish($, h, 'agent-3')
+  expect(states(h, runId).slice(2)).toEqual(['review-spec:completed', 'review-standards:running', 'commit:pending'])
+  expect(h.spawns).toHaveLength(4)
+  h.files.set('/tmp/dag-review/greet-5d65d5/review-standards-notes.md', standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-4')
+  expect(stageEvidence(h, runId, 'review-spec')).toEqual([
+    'pass File verified: /tmp/dag-review/greet-5d65d5/review-spec-notes.md',
+    'pass File verified: /tmp/dag-review/greet-5d65d5/review-spec-notes.md',
+  ])
+  expect(stageEvidence(h, runId, 'review-standards')).toEqual([
+    'pass File verified: /tmp/dag-review/greet-5d65d5/review-standards-notes.md',
+    'pass File verified: /tmp/dag-review/greet-5d65d5/review-standards-notes.md',
+  ])
+  // No git ran before the commit node: the reviewers and producers use file checks only.
+  expect(gitCalls(h)).toEqual([])
+
+  // The commit node starts last, reads the verdict files first, and lists both commits with their own paths.
+  expect(h.spawns.map(spawn => spawn.description).slice(4)).toEqual(['Greet: Commit'])
+  const commitPrompt = h.spawns[4]?.prompt ?? ''
+  expect(commitPrompt).toContain('/tmp/dag-review/greet-5d65d5/review-spec-notes.md and /tmp/dag-review/greet-5d65d5/review-standards-notes.md')
+  expect(commitPrompt).toContain(`Commit 1 of 2\n  paths: src/greet.ts\n  subject: ${FEAT_SUBJECT}`)
+  expect(commitPrompt).toContain(`Commit 2 of 2\n  paths: README.md\n  subject: ${DOCS_SUBJECT}`)
+  expect(commitPrompt).toContain('The greeting lives in src/greet.ts.')
+
+  // The commit worker commits both, each with only its own file; the checks read the subjects back from the repository,
+  // oldest at --skip=1, and the sweep checks list what each commit changed outside its own paths: nothing.
+  h.files.set('/repo/log', `${DOCS_SUBJECT}\n${FEAT_SUBJECT}\n`)
+  h.files.set('/repo/changed', 'HEAD~1 src/greet.ts\nHEAD README.md\n')
+  await finish($, h, 'agent-5')
+  expect(stageEvidence(h, runId, 'commit')).toEqual([
+    'pass ["git","log","-1","--skip=1","--format=%s"] exited 0',
+    'pass ["git","log","-1","--skip=0","--format=%s"] exited 0',
+    'pass ["git","show","--format=","--name-only","HEAD~1","--",":/",":(exclude,literal)src/greet.ts"] exited 0',
+    'pass ["git","show","--format=","--name-only","HEAD","--",":/",":(exclude,literal)README.md"] exited 0',
+    'pass ["git","status","--porcelain","--",":(literal)src/greet.ts",":(literal)README.md"] exited 0',
+  ])
+  expect(checkpoint(h, runId).nodes.find(current => current.id === 'commit')?.verification?.evidence.map(item => item.detail.split('\n')[1])).toEqual([FEAT_SUBJECT, DOCS_SUBJECT, '', '', ''])
+  expect(gitCalls(h)).toEqual([
+    ['git', 'log', '-1', '--skip=1', '--format=%s'],
+    ['git', 'log', '-1', '--skip=0', '--format=%s'],
+    ['git', 'show', '--format=', '--name-only', 'HEAD~1', '--', ':/', ':(exclude,literal)src/greet.ts'],
+    ['git', 'show', '--format=', '--name-only', 'HEAD', '--', ':/', ':(exclude,literal)README.md'],
+    ['git', 'status', '--porcelain', '--', ':(literal)src/greet.ts', ':(literal)README.md'],
+  ])
+
+  const saved = checkpoint(h, runId)
+  expect(saved.status).toBe('completed')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:completed', 'review-standards:completed', 'commit:completed'])
+  // The run keeps what the user wrote, not the expansion's text, so an amend sends the original fields.
+  expect(saved.definition).toMatchObject({ review: { request: GREET_REQUEST, notes: '/tmp/dag-review/greet-5d65d5', category: 'unspecified-low' }, commit: [{ paths: ['src/greet.ts'] }, { paths: ['README.md'] }] })
+  expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: completed.`])
+  expect(h.spawns).toHaveLength(5)
+})
+
+test('scenario 10, stages: a reviewer whose notes end with a FAIL verdict fails its node, the commit is skipped, and nothing is committed', { ...NO_RECOVERY, plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, greetFlow('greet-fail'))
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  expect(h.spawns.map(spawn => spawn.description).slice(2)).toEqual(['Greet: Review: spec axis', 'Greet: Review: standards axis'])
+  expect(h.spawns[2]?.prompt).toContain('/tmp/dag-review/greet-fail-b43ef9/review-spec-notes.md')
+
+  // The standards reviewer passes. The spec reviewer found a gap, wrote the PASS line once above its findings, and ended on FAIL.
+  h.files.set('/tmp/dag-review/greet-fail-b43ef9/review-standards-notes.md', standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-4')
+  expect(states(h, runId).slice(2)).toEqual(['review-spec:running', 'review-standards:completed', 'commit:pending'])
+  h.files.set('/tmp/dag-review/greet-fail-b43ef9/review-spec-notes.md',
+    specNotes('Spec verdict: FAIL', '(a) the README documents greet(name) but never says what it returns\n(b) none\n(c) none\nSpec verdict: PASS (earlier draft)'))
+  await finish($, h, 'agent-3')
+
+  const failed = checkpoint(h, runId)
+  expect(failed.status).toBe('failed')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:failed', 'review-standards:completed', 'commit:skipped'])
+  // The Findings section was there; the last line was not the PASS line.
+  expect(stageEvidence(h, runId, 'review-spec')).toEqual([
+    expect.stringMatching(/^FAIL .*review-spec-notes\.md: lastLine expected "Spec verdict: PASS", got "Spec verdict: FAIL"/),
+    'pass File verified: /tmp/dag-review/greet-fail-b43ef9/review-spec-notes.md',
+  ])
+  expect(failed.nodes.find(current => current.id === 'review-spec')?.error).toContain('Spec verdict: FAIL')
+  expect(h.spawns).toHaveLength(4)
+  expect(gitCalls(h)).toEqual([])
+  expect(evidenceFiles(h, runId, 'commit')).toEqual([])
+  expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: failed.`])
+  expect(pluginNews(h)[0]?.text).toContain('- review-spec: failed')
+  expect(pluginNews(h)[0]?.text).toContain('- commit: skipped')
+})
+
+// The harness answers every `rm` with exit 0 and leaves its files alone, which would hide a missing removal. This makes
+// `rm <path>` delete the harness file as the real program does. It wraps the harness's capture array, which the harness fills
+// as the host events arrive; the test kit locks Array.prototype, so the wrapper goes in with defineProperty, not by assignment.
+function removesFiles(h: Harness): void {
+  const push = h.processes.push.bind(h.processes)
+  Object.defineProperty(h.processes, 'push', {
+    value: (...runs: Harness['processes']) => {
+      for (const run of runs) if (run.argv[0] === 'rm') h.files.delete(run.argv.at(-1) ?? '')
+      return push(...runs)
+    },
+  })
+}
+
+test('scenario 10, stages: a PASS verdict an earlier run left in the reviewers\' notes folder is gone before they start, so a reviewer that writes nothing fails, the commit is skipped, and nothing is committed', { ...NO_RECOVERY, plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  removesFiles(h)
+  await boot($)
+  // The default folder is shared by every run that uses the key: an earlier run left complete, passing notes for both reviewers.
+  const notes = '/tmp/dag-review/greet-stale-11a930'
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: PASS', '(a) none\n(b) none\n(c) none'))
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  const runId = await start($, greetFlow('greet-stale'))
+  expect(h.files.has(`${notes}/review-spec-notes.md`)).toBe(true)
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+
+  // Both reviewers started and neither has written yet, so no verdict file stands in the folder.
+  expect(h.spawns.map(spawn => spawn.description).slice(2)).toEqual(['Greet: Review: spec axis', 'Greet: Review: standards axis'])
+  expect(h.spawns[2]?.prompt).toContain(`${notes}/review-spec-notes.md`)
+  expect([...h.files.keys()].filter(path => path.startsWith(`${notes}/`))).toEqual([])
+
+  // The standards reviewer does its work and writes fresh notes. The spec reviewer ends its turn with nothing written.
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-4')
+  expect(states(h, runId).slice(2)).toEqual(['review-spec:running', 'review-standards:completed', 'commit:pending'])
+  await finish($, h, 'agent-3')
+
+  const failed = checkpoint(h, runId)
+  expect(failed.status).toBe('failed')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:failed', 'review-standards:completed', 'commit:skipped'])
+  expect(stageEvidence(h, runId, 'review-spec')).toEqual([
+    expect.stringMatching(/^FAIL .*review-spec-notes\.md/),
+    expect.stringMatching(/^FAIL .*review-spec-notes\.md/),
+  ])
+  expect(h.spawns).toHaveLength(4)
+  expect(gitCalls(h)).toEqual([])
+  expect(evidenceFiles(h, runId, 'commit')).toEqual([])
+  expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: failed.`])
+  expect(pluginNews(h)[0]?.text).toContain('- review-spec: failed')
+  expect(pluginNews(h)[0]?.text).toContain('- commit: skipped')
+})
+
+test('scenario 10, stages: a commit that also swept in a file outside its own paths fails the commit node and names the file, while the clean commit beside it passes its check', { ...NO_RECOVERY, plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, greetFlow('greet-sweep'))
+  const notes = '/tmp/dag-review/greet-sweep-098ce3'
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: PASS', '(a) none\n(b) none\n(c) none'))
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-3')
+  await finish($, h, 'agent-4')
+  expect(h.spawns.map(spawn => spawn.description).slice(4)).toEqual(['Greet: Commit'])
+
+  // Both subjects are right and the listed paths are committed, but the first commit was made with an unrelated edit staged:
+  // it holds src/scratch.ts as well as src/greet.ts. The second commit holds only README.md.
+  h.files.set('/repo/log', `${DOCS_SUBJECT}\n${FEAT_SUBJECT}\n`)
+  h.files.set('/repo/changed', 'HEAD~1 src/greet.ts\nHEAD~1 src/scratch.ts\nHEAD README.md\n')
+  await finish($, h, 'agent-5')
+
+  const failed = checkpoint(h, runId)
+  expect(failed.status).toBe('failed')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:completed', 'review-standards:completed', 'commit:failed'])
+  expect(stageEvidence(h, runId, 'commit')).toEqual([
+    'pass ["git","log","-1","--skip=1","--format=%s"] exited 0',
+    'pass ["git","log","-1","--skip=0","--format=%s"] exited 0',
+    'FAIL stdout: equals expected "", got "src/scratch.ts"',
+    'pass ["git","show","--format=","--name-only","HEAD","--",":/",":(exclude,literal)README.md"] exited 0',
+    'pass ["git","status","--porcelain","--",":(literal)src/greet.ts",":(literal)README.md"] exited 0',
+  ])
+  // The node's error names the check of the first commit and the file it swept in.
+  expect(failed.nodes.find(current => current.id === 'commit')?.error).toContain('"HEAD~1","--",":/",":(exclude,literal)src/greet.ts"] exited 0\nsrc/scratch.ts')
+  expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: failed.`])
+  expect(pluginNews(h)[0]?.text).toContain('- commit: failed')
+})
+
+// A Next.js bracket route and a one-character sibling: git reads a bare pathspec as a pattern, so `app/[id]/page.ts` also names
+// `app/i/page.ts`, and a worker running plain `git add -- app/[id]/page.ts` stages both. The sibling is unrelated work the
+// commit must not hold. The checks name the listed path literally, so the sweep finds the sibling, and a worker that committed
+// only the listed path is not failed for it.
+const ROUTE = 'app/[id]/page.ts'
+const SIBLING = 'app/i/page.ts'
+const ROUTE_SUBJECT = 'feat: add the id route'
+const ROUTE_REQUEST = 'Add the id route page'
+
+function routeFlow(key: string) {
+  return {
+    key,
+    name: 'Route',
+    goal: `The id route page exists in ${ROUTE}`,
+    nodes: [{ id: 'page', prompt: contract(`Write ${ROUTE}`), writes: [ROUTE], verify: [{ kind: 'file', path: ROUTE, contains: 'export default' }] }],
+    review: { request: ROUTE_REQUEST },
+    commit: [{ message: ROUTE_SUBJECT, paths: [ROUTE] }],
+  }
+}
+
+// Runs the route flow until its commit worker is the live agent: the page is written and both reviewers passed.
+async function routeToCommit($: Engine, h: Harness, key: string, notes: string): Promise<string> {
+  const runId = await start($, routeFlow(key))
+  h.files.set(`/work/${ROUTE}`, 'export default function Page() {\n  return null\n}\n')
+  await finish($, h, 'agent-1')
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: PASS', '(a) none\n(b) none\n(c) none').replaceAll(GREET_REQUEST, ROUTE_REQUEST))
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-2')
+  await finish($, h, 'agent-3')
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Route: page', 'Route: Review: spec axis', 'Route: Review: standards axis', 'Route: Commit'])
+  return runId
+}
+
+test('scenario 10, stages: a bracket path commit that also took its one-character sibling fails the commit node and names the sibling, and the worker is told to use literal pathspecs', { ...NO_RECOVERY, plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const notes = '/tmp/dag-review/route-sibling-b3e05d'
+  const runId = await routeToCommit($, h, 'route-sibling', notes)
+
+  // The worker is told to read the path as a name, quoted for the shell.
+  const commitPrompt = h.spawns[3]?.prompt ?? ''
+  expect(commitPrompt).toContain(`Commit 1 of 1\n  paths: '${ROUTE}'\n  subject: ${ROUTE_SUBJECT}`)
+  expect(commitPrompt).toContain('`git --literal-pathspecs add -- <its paths>`')
+  expect(commitPrompt).toContain(`\`git --literal-pathspecs status --porcelain -- '${ROUTE}'\` prints nothing`)
+
+  // The subject is right and the page is committed, but the commit was made without --literal-pathspecs: it holds the sibling too.
+  h.files.set('/repo/log', `${ROUTE_SUBJECT}\n`)
+  h.files.set('/repo/changed', `HEAD ${ROUTE}\nHEAD ${SIBLING}\n`)
+  await finish($, h, 'agent-4')
+
+  const failed = checkpoint(h, runId)
+  expect(failed.status).toBe('failed')
+  expect(states(h, runId)).toEqual(['page:completed', 'review-spec:completed', 'review-standards:completed', 'commit:failed'])
+  expect(stageEvidence(h, runId, 'commit')).toEqual([
+    'pass ["git","log","-1","--skip=0","--format=%s"] exited 0',
+    `FAIL stdout: equals expected "", got "${SIBLING}"`,
+    `pass ["git","status","--porcelain","--",":(literal)${ROUTE}"] exited 0`,
+  ])
+  expect(failed.nodes.find(current => current.id === 'commit')?.error).toContain(`"HEAD","--",":/",":(exclude,literal)${ROUTE}"] exited 0\n${SIBLING}`)
+  expect(pluginNews(h)[0]?.text).toContain('- commit: failed')
+})
+
+test('scenario 10, stages: a bracket path commit that holds only the listed path passes, so a literal-minded worker is not failed for its own path', { ...NO_RECOVERY, plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const notes = '/tmp/dag-review/route-literal-394225'
+  const runId = await routeToCommit($, h, 'route-literal', notes)
+
+  h.files.set('/repo/log', `${ROUTE_SUBJECT}\n`)
+  h.files.set('/repo/changed', `HEAD ${ROUTE}\n`)
+  await finish($, h, 'agent-4')
+
+  expect(checkpoint(h, runId).status).toBe('completed')
+  expect(stageEvidence(h, runId, 'commit')).toEqual([
+    'pass ["git","log","-1","--skip=0","--format=%s"] exited 0',
+    `pass ["git","show","--format=","--name-only","HEAD","--",":/",":(exclude,literal)${ROUTE}"] exited 0`,
+    `pass ["git","status","--porcelain","--",":(literal)${ROUTE}"] exited 0`,
+  ])
+  expect(gitCalls(h)).toEqual([
+    ['git', 'log', '-1', '--skip=0', '--format=%s'],
+    ['git', 'show', '--format=', '--name-only', 'HEAD', '--', ':/', `:(exclude,literal)${ROUTE}`],
+    ['git', 'status', '--porcelain', '--', `:(literal)${ROUTE}`],
+  ])
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 11. Background work and the wait for the worker's next turn
+
+// A node agent that launched a command in the background and ended its turn has not finished: the command's notification
+// starts its next turn. The eval below writes out/eval.log when it is done, so a verification that ran at the first turn
+// end would find no log and fail the node: only a wait for the next turn lets the node pass.
+const BACKGROUND_THIRTY_MINUTES = 30 * 60_000
+const EVAL_LOG = 'out/eval.log'
+const WAITING_ANSWER = 'The eval runs in the background; I will report when it finishes.'
+const FINAL_ANSWER = 'The eval passed.\nDAG_NODE_STATUS: completed'
+
+function evalFlow(key: string) {
+  return {
+    key,
+    name: 'Eval',
+    goal: 'The eval suite passes and its result is reported',
+    nodes: [
+      { id: 'eval', prompt: contract('Run the eval suite'), writes: [EVAL_LOG], verify: [{ kind: 'file', path: EVAL_LOG, lastLine: 'EVAL OK' }] },
+      { id: 'lint', prompt: contract('Lint the sources'), verify: CHECK },
+      { id: 'report', prompt: contract('Report the eval result'), dependsOn: ['eval'], verify: CHECK },
+    ],
+  }
+}
+
+// What the host reports for a tool call a node agent makes.
+async function workerRuns($: Engine, agentId: string, call: Record<string, unknown>): Promise<void> {
+  await $.tool.call({ ...call, agentId, tool_use_id: `call-${agentId}` } as never)
+}
+
+// A worker's turn ends with this answer (the harness `finish` always answers with the status line).
+async function turnEnds($: Engine, h: Harness, agentId: string, answer: string, turn: number): Promise<void> {
+  await $.turn.complete({ turnId: `turn-${agentId}-${turn}`, agentId, reason: 'answer', isAborted: false, answer, durationMs: 1 })
+  await h.clock.settle()
+}
+
+// The host starts the worker's next turn: its first step goes through turn.step.
+async function nextTurnStarts($: Engine, agentId: string, turn: number): Promise<void> {
+  const stream = ($.turn.step as (e: object) => AsyncGenerator)({ turnId: `turn-${agentId}-${turn}`, index: 0, model: 'claude-test', messageCount: 3, agentId })
+  for (let step = await stream.next(); step.done !== true; step = await stream.next());
+}
+
+// The stop the plugin sends a worker it gives up on goes through tool.call as TaskStop; this records which agents got one.
+const STOPS: Plugin = {
+  name: 'scenario-stops',
+  register(on) {
+    on('tool.call', async ($, e, next) => {
+      const call = e as unknown as { tool: string; task_id?: string }
+      if (call.tool === 'TaskStop') await $.fs.write(`/stopped/${call.task_id}`, 'stopped')
+      return next(e)
+    })
+  },
+}
+
+const stopped = (h: Harness): string[] => [...h.files.keys()].filter(path => path.startsWith('/stopped/')).sort()
+
+test('scenario 11, background wait: a node that backgrounded its work and ended its turn without a status line is not verified early, its dependents wait, and the next turn completes it', { ...NO_RECOVERY, plugins: [STOPS] }, async ($, on) => {
+  const h = harness(on)
+  on('turn.step', async function* ($: unknown, e: { turnId: string; index: number }) {
+    yield { kind: 'text', index: 0, text: 'the eval finished' }
+    return { turnId: e.turnId, index: e.index, answer: 'the eval finished', toolUses: [], stopReason: 'end_turn', usage: null }
+  } as never)
+  await boot($)
+  const runId = await start($, evalFlow('eval'))
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Eval: eval', 'Eval: lint'])
+
+  await workerRuns($, 'agent-1', { tool: 'Bash', command: 'bun eval/run.ts > out/eval.log', run_in_background: true })
+  await turnEnds($, h, 'agent-1', WAITING_ANSWER, 1)
+
+  // The turn ended without a status line, so the node stays running and nothing was verified: the log does not exist yet.
+  expect(states(h, runId)).toEqual(['eval:running', 'lint:running', 'report:pending'])
+  expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'running', agentId: 'agent-1' })
+  expect(evidenceFiles(h, runId, 'eval')).toEqual([])
+  expect(h.logs).toContain('Eval › eval: waiting on background work')
+  expect(h.spawns).toHaveLength(2)
+  expect(pluginNews(h)).toEqual([])
+
+  // A sibling finishes meanwhile; the dependent of the waiting node still does not start, and the run is not settled.
+  await finish($, h, 'agent-2')
+  expect(states(h, runId)).toEqual(['eval:running', 'lint:completed', 'report:pending'])
+  expect(checkpoint(h, runId).status).toBe('running')
+  await h.clock.advance(20 * 60_000)
+  expect(states(h, runId)).toEqual(['eval:running', 'lint:completed', 'report:pending'])
+  expect(h.spawns).toHaveLength(2)
+
+  // The background command finishes and its notification starts the agent's next turn. That turn runs on past the 30
+  // minutes counted from the first turn's end without failing the node, and it ends reporting completed.
+  h.files.set(`/work/${EVAL_LOG}`, 'running 40 cases\nEVAL OK\n')
+  await nextTurnStarts($, 'agent-1', 2)
+  await h.clock.advance(15 * 60_000)
+  expect(states(h, runId)).toEqual(['eval:running', 'lint:completed', 'report:pending'])
+  expect(evidenceFiles(h, runId, 'eval')).toEqual([])
+  await turnEnds($, h, 'agent-1', FINAL_ANSWER, 2)
+  expect(states(h, runId)).toEqual(['eval:completed', 'lint:completed', 'report:running'])
+  expect(evidenceFiles(h, runId, 'eval')).toEqual([{ status: 'passed', failed: [] }])
+  expect(checkpoint(h, runId).nodes[0]?.verification?.evidence[0]?.detail).toBe(`File verified: ${EVAL_LOG}`)
+  // The node's report is its last turn's answer, not the waiting note.
+  expect(h.files.get(`${ROOT}/runs/${runId}/eval.md`)).toContain('The eval passed.')
+  expect(h.files.get(`${ROOT}/runs/${runId}/eval.md`)).not.toContain('I will report')
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Eval: eval', 'Eval: lint', 'Eval: report'])
+  expect(h.spawns[2]?.prompt).toContain('<result node="eval"')
+
+  await finish($, h, 'agent-3')
+  expect(checkpoint(h, runId).status).toBe('completed')
+  expect(states(h, runId)).toEqual(['eval:completed', 'lint:completed', 'report:completed'])
+  expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Eval" (${runId}) settled: completed.`])
+
+  // The wait ended with the turn: the minutes after it change nothing and stop nobody.
+  await h.clock.advance(BACKGROUND_THIRTY_MINUTES)
+  expect(states(h, runId)).toEqual(['eval:completed', 'lint:completed', 'report:completed'])
+  expect(stopped(h)).toEqual([])
+  expect(h.spawns).toHaveLength(3)
+})
+
+test('scenario 11, background wait: with no next turn the node fails after 30 minutes on the clock, its agent is stopped, dependents are skipped and a late turn end changes nothing', { ...NO_RECOVERY, plugins: [STOPS] }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, evalFlow('eval-stalled'))
+  await finish($, h, 'agent-2')
+  await workerRuns($, 'agent-1', { tool: 'Bash', command: 'bun eval/run.ts > out/eval.log', run_in_background: true })
+  await turnEnds($, h, 'agent-1', WAITING_ANSWER, 1)
+  expect(states(h, runId)).toEqual(['eval:running', 'lint:completed', 'report:pending'])
+
+  await h.clock.advance(BACKGROUND_THIRTY_MINUTES - 1_000)
+  expect(states(h, runId)).toEqual(['eval:running', 'lint:completed', 'report:pending'])
+  expect(stopped(h)).toEqual([])
+  await h.clock.advance(1_000)
+  await h.clock.settle()
+
+  const failed = checkpoint(h, runId)
+  expect(failed.status).toBe('failed')
+  expect(states(h, runId)).toEqual(['eval:failed', 'lint:completed', 'report:skipped'])
+  expect(failed.nodes[0]?.error).toBe('The node agent ended its turn with background work pending and was not resumed within 30 minutes.')
+  // It was never verified (no log was ever written), its worker was stopped, and its last answer is kept as the report.
+  expect(evidenceFiles(h, runId, 'eval')).toEqual([])
+  expect(stopped(h)).toEqual(['/stopped/agent-1'])
+  expect(h.files.get(`${ROOT}/runs/${runId}/eval.md`)).toBe(WAITING_ANSWER)
+  expect(h.spawns).toHaveLength(2)
+  expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Eval" (${runId}) settled: failed.`])
+  expect(pluginNews(h)[0]?.text).toContain('- eval: failed (The node agent ended its turn with background work pending and was not resumed within 30 minutes.)')
+
+  // The agent's turn end arrives late: the node stays failed and the dependent stays skipped.
+  h.files.set(`/work/${EVAL_LOG}`, 'EVAL OK\n')
+  await turnEnds($, h, 'agent-1', FINAL_ANSWER, 2)
+  expect(states(h, runId)).toEqual(['eval:failed', 'lint:completed', 'report:skipped'])
+  expect(h.spawns).toHaveLength(2)
+  expect(pluginNews(h)).toHaveLength(1)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 12. A run the user rejected
+
+const BUMP = { key: 'bump', name: 'Bump', goal: 'The version is bumped and the changelog says so', nodes: [node('version'), node('changelog'), node('verify-bump', ['version', 'changelog'])] }
+const BUMP_NARROW = { key: 'bump-narrow', name: 'Bump narrow', goal: 'The version is bumped', nodes: [node('version'), node('verify-version', ['version'])] }
+
+test('scenario 12, rejection: after the user rejects a held run the model\'s retry, amend and identical start are refused and spawn nothing, a revised definition under a new key is held again and can be approved, and only the person\'s own retry runs the rejected plan', { options: { auto_recovery: false, start_approval: 'always' } }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const held = await modelStart($, BUMP)
+  expect(held).toMatchObject({ reused: false, awaiting_approval: true })
+  expect(h.spawns).toHaveLength(0)
+
+  await command($, `reject ${held.run_id} too broad, bump only`)
+  await h.clock.settle()
+  const rejectedRun = checkpoint(h, held.run_id)
+  expect(rejectedRun).toMatchObject({ status: 'cancelled', cancelReason: 'Rejected by the user: too broad, bump only', rejected: { reason: 'too broad, bump only' } })
+  expect(states(h, held.run_id)).toEqual(['version:cancelled', 'changelog:cancelled', 'verify-bump:cancelled'])
+  const promptsBefore = h.prompts.length
+  expect(promptsBefore).toBe(1)
+
+  // The model tries to get its plan through anyway: every route to run the rejected plan again is refused, naming the
+  // run, the user's reason and what to do instead, and none of them starts a worker or touches the run.
+  const refusal = {
+    error: {
+      code: 'rejected_by_user',
+      message: `The user rejected run ${held.run_id} ("Bump"): too broad, bump only. Do not retry, amend or restart it. Revise the plan to answer the rejection, give the revised definition a new key, and ask the user before running it again.`,
+    },
+  }
+  expect(await dag($, { action: 'retry', run_id: held.run_id })).toEqual(refusal)
+  expect(await dag($, { action: 'retry', run_id: held.run_id, node_ids: ['version'], prompt: contract('Bump the version, smaller') })).toEqual(refusal)
+  expect(await dag($, { action: 'amend', run_id: held.run_id, definition: BUMP_NARROW })).toEqual(refusal)
+  expect(await dag($, { action: 'amend', run_id: held.run_id, definition: BUMP })).toEqual(refusal)
+  expect(await dag($, { action: 'start', definition: BUMP })).toEqual(refusal)
+  // Another plan under the rejected key is no way around it either.
+  expect(await dag($, { action: 'start', definition: { ...BUMP, nodes: [node('version')] } })).toMatchObject({ error: { code: 'definition_conflict' } })
+  await h.clock.settle()
+  expect(h.spawns).toHaveLength(0)
+  expect(checkpoint(h, held.run_id)).toEqual(rejectedRun)
+  expect(h.prompts).toHaveLength(promptsBefore)
+
+  // A reload keeps the rejection: it is in the checkpoint.
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await h.clock.settle()
+  expect(await dag($, { action: 'retry', run_id: held.run_id })).toEqual(refusal)
+  expect(await dag($, { action: 'start', definition: BUMP })).toEqual(refusal)
+  expect(h.spawns).toHaveLength(0)
+
+  // The revised plan answers the rejection with a new key: it is held for approval like any model start, then approved.
+  const narrow = await modelStart($, BUMP_NARROW)
+  expect(narrow).toMatchObject({ reused: false, awaiting_approval: true })
+  expect(narrow.run_id).not.toBe(held.run_id)
+  expect(h.spawns).toHaveLength(0)
+  expect(states(h, narrow.run_id)).toEqual(['version:scheduled', 'verify-version:pending'])
+  expect(checkpoint(h, narrow.run_id).rejected).toBeUndefined()
+
+  await command($, `approve ${narrow.run_id}`)
+  await h.clock.settle()
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Bump narrow: version'])
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  expect(h.spawns.map(spawn => spawn.description)).toEqual(['Bump narrow: version', 'Bump narrow: verify-version'])
+  expect(checkpoint(h, narrow.run_id).status).toBe('completed')
+  expect(checkpoint(h, held.run_id)).toEqual(rejectedRun)
+  expect(h.prompts.filter(text => text.includes(narrow.run_id)).map(text => text.split('\n')[0])).toEqual([
+    `DAG run "Bump narrow" (${narrow.run_id}) was approved by the user and has started.`,
+    `DAG run "Bump narrow" (${narrow.run_id}) settled: completed.`,
+  ])
+
+  // Only the person can overrule their own rejection: their /dag retry runs the first plan after all.
+  await command($, `retry ${held.run_id}`)
+  await h.clock.settle()
+  expect(h.spawns.map(spawn => spawn.description).slice(2)).toEqual(['Bump: version', 'Bump: changelog'])
+  expect(checkpoint(h, held.run_id).rejected).toBeUndefined()
 })

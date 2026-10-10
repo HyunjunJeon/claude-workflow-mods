@@ -195,12 +195,14 @@ export function approveRun(input: Run, now: number): Run {
 }
 
 // Cancels a held run the way a user cancel does. Nothing runs while an approval is pending, so no agent needs stopping.
-// The run's cancelReason is the same text each node records as its error.
+// The run's cancelReason is the same text each node records as its error, and `rejected` marks it for good: the model may
+// not run it again (register.ts refuses that as rejected_by_user).
 export function rejectRun(input: Run, reason: string, now: number): Run {
   const detail = reason.trim()
   const text = detail ? `Rejected by the user: ${detail}` : 'Rejected by the user.'
   const held = clone(input)
   delete held.approval
+  held.rejected = { at: now, reason: detail }
   return endUnfinished(held, text, text, now).run
 }
 

@@ -28,6 +28,7 @@ export type Strings = {
   critical: string
   viewSwitch: string
   handback: string
+  backgroundWait: string
   fold: string
   unfold: string
   details: string
@@ -112,6 +113,7 @@ const EN: Strings = {
   critical: 'critical path',
   viewSwitch: 'view',
   handback: 'hand-back',
+  backgroundWait: 'waiting on background work',
   fold: 'fold wide layers',
   unfold: 'unfold wide layers',
   details: 'details',
@@ -202,6 +204,7 @@ const KO: Strings = {
   critical: '임계 경로',
   viewSwitch: '보기',
   handback: '결과 보고',
+  backgroundWait: '백그라운드 작업 대기',
   fold: '넓은 층 접기',
   unfold: '넓은 층 펼치기',
   details: '상세',

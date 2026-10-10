@@ -1,5 +1,6 @@
 import { findCycle } from './graph.ts'
 import { hash, stableStringify } from './hash.ts'
+import { expandStages } from './stages.ts'
 import { fail, type Definition, type NodeDef, type Result } from './types.ts'
 import { parseChecks, projectPath } from './verification.ts'
 
@@ -76,10 +77,13 @@ export function parseDefinition(input: unknown): Result<Definition> {
 
   const trimmedKey = key.trim()
   const trimmedGoal = goal?.trim()
-  return {
-    ok: true,
-    value: { key: trimmedKey, name: name?.trim() || trimmedKey, ...(trimmedGoal ? { goal: trimmedGoal } : {}), nodes: parsed },
-  }
+  // review and commit expand into ordinary nodes after the user's nodes are valid, so a user node can never depend on a
+  // generated one. The expansion is a pure function of this input, so the same input gives the same nodes and fingerprints:
+  // an amend sends the original review and commit fields with the user's nodes, never the generated nodes.
+  return expandStages(
+    { key: trimmedKey, name: name?.trim() || trimmedKey, ...(trimmedGoal ? { goal: trimmedGoal } : {}), nodes: parsed },
+    { review: input.review, commit: input.commit },
+  )
 }
 
 export function definitionHash(definition: Definition): string {

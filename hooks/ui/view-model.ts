@@ -112,8 +112,14 @@ function elapsed(node: NodeRun, now: number): string | undefined {
   return formatDuration((node.finishedAt ?? now) - node.startedAt)
 }
 
+// The tool slot of the activity a node shows while it waits on background work it started. It is no host tool: the plugin
+// sets it and this module turns it into the localized label, as it does for SubagentHandback.
+export const BACKGROUND_WAIT_TOOL = 'dag:background-wait'
+
 function toolName(activity: Activity, t: Strings): string {
-  return activity.tool === 'SubagentHandback' ? t.handback : activity.tool ?? 'tool'
+  if (activity.tool === 'SubagentHandback') return t.handback
+  if (activity.tool === BACKGROUND_WAIT_TOOL) return t.backgroundWait
+  return activity.tool ?? 'tool'
 }
 
 export function activityLine(activity: Activity, now: number, t: Strings): Line {

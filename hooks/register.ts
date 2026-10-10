@@ -1,7 +1,7 @@
-import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, Timer } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
-import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
+import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
 import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
@@ -12,6 +12,7 @@ import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
 import { exitProblem, textProblem } from './engine/check-eval.ts'
 import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
+import { REVIEW_SPEC_ID, REVIEW_STANDARDS_ID } from './engine/stages.ts'
 import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
 import {
   amendRun,
@@ -38,7 +39,7 @@ import {
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type FileCheck, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
+import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
@@ -47,7 +48,7 @@ import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
 import { buildInspector, type InspectorInput, type InspectorView } from './ui/inspector-model.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
-import { buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
+import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
@@ -65,6 +66,12 @@ const REPORT_LIMIT = 4_000_000
 // is held submits a keep-alive prompt. This constant now only caps how long one hold loop polls when no completion
 // hands it off.
 const HOLD_LIMIT_MS = 3_600_000
+// How long a node worker that ended its turn with background work pending may stay quiet before its node fails. The host
+// stops a background Bash command after its timeout, 1 800 000 ms by default, and caps a Monitor's timeout_ms at
+// 1 800 000 ms, so by then the work has ended or been re-armed and its notification has started the worker's next turn.
+// On 2026-10-10 a node that ended its turn waiting on a background `bun eval/run.ts` was verified at once and failed; it
+// resumed by itself later and passed.
+const BACKGROUND_WAIT_MS = 30 * 60_000
 const PANE_ID = 'dag'
 const PREFS_KEY = 'collapse-prefs'
 const VIEW_KEY = 'pane-view'
@@ -171,6 +178,13 @@ const toolContexts = new Map<string, JevContext>()
 // Node workers' calls in flight (tool_use_id -> agent) and the workers waiting for a permission answer, in memory only.
 const openCalls = new Map<string, { agentId: string; tool: string }>()
 const waiting = new Map<string, { tool: string; toolUseId?: string; since: number }>()
+// Node workers that started work which runs on after its tool call returns (a background command or subagent, or a Monitor),
+// by agent id: each attempt spawns its own agent, so this is per attempt. In memory only, like openCalls: after a reload
+// the worker's next turn end finishes the node as it did before this guard.
+const backgroundAgents = new Set<string>()
+// Workers whose turn ended with that work pending and no status line: the answer they gave and the timer that fails the
+// node if no next turn starts within BACKGROUND_WAIT_MS.
+const backgroundWaits = new Map<string, { answer: string; timer: Timer }>()
 // Per run and node, the tools already explained in a non-interactive session for the node's current attempt, in
 // first-seen order: a retried call adds no second line, and the settle summary lists them. A new attempt starts over.
 const askedTools = new Map<string, Map<string, { attempt: number; tools: string[] }>>()
@@ -602,13 +616,13 @@ async function loadRuns($: EngineInterface): Promise<void> {
   }
 }
 
-async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string): Promise<boolean> {
+async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string, purpose = 'prune'): Promise<boolean> {
   try {
     const removed = await $.process.run(['rm', flag, path])
     if (removed.exitCode === 0) return true
-    debug($, `could not prune ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
+    debug($, `could not ${purpose} ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
   } catch (error) {
-    debug($, `could not prune ${path}: ${message(error)}`)
+    debug($, `could not ${purpose} ${path}: ${message(error)}`)
   }
   return false
 }
@@ -687,6 +701,35 @@ async function recoverRuns($: EngineInterface): Promise<void> {
   }
 }
 
+// The notes file a generated reviewer will write, found in its own file checks. Only the review-spec and review-standards
+// nodes that the definition's review field expanded qualify (parseDefinition refuses a user node with either id next to
+// review), and only a file named exactly <id>-notes.md, so nothing a user node verifies is ever returned.
+function generatedNotesFiles(run: Run, def: NodeDef): string[] {
+  if (run.definition.review === undefined || (def.id !== REVIEW_SPEC_ID && def.id !== REVIEW_STANDARDS_ID)) return []
+  const paths = (def.verify ?? []).flatMap(check => check.kind === 'file' && readOnlyAbsolutePath(check.path) && check.path.endsWith(`/${def.id}-notes.md`) ? [check.path] : [])
+  return [...new Set(paths)]
+}
+
+// The default notes folder is /tmp/dag-review/<cleaned key>-<6 hex>, shared by every project and run that uses the key, and the
+// reviewer's lastLine check cannot tell a verdict written now from one an earlier run or attempt left. Without this, a reviewer that
+// ends its turn writing nothing passes on the old verdict and opens the commit gate. So the file is removed before every
+// spawn of a generated reviewer. A file that cannot be removed fails the start instead of spawning the reviewer: the check
+// is the gate, and spawning against a stale PASS is the hole this closes. `rm -f` succeeds on a missing file, so a failure is
+// a real one (another user's file in /tmp, a read-only folder, a directory), where the reviewer could not overwrite it either.
+async function clearStaleNotes($: EngineInterface, run: Run, def: NodeDef): Promise<string | undefined> {
+  for (const path of generatedNotesFiles(run, def)) {
+    try {
+      if (!(await $.fs.exists(path))) continue
+    } catch (error) {
+      return `could not look for stale review notes ${path} (${message(error)}), so the reviewer's verdict check cannot be trusted.`
+    }
+    if (!(await removePath($, '-f', path, 'remove stale review notes'))) {
+      return `could not remove the stale review notes ${path}, so the reviewer's verdict check could pass on an old verdict. Remove the file and retry.`
+    }
+  }
+  return undefined
+}
+
 async function startNode($: EngineInterface, run: Run, id: string): Promise<Run> {
   const def = run.definition.nodes.find(n => n.id === id)
   const node = run.nodes.find(n => n.id === id)
@@ -694,6 +737,8 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   if (def.agent === 'fork') {
     return failToStart(run, id, 'Fork agents cannot enforce the Sonnet worker minimum; amend the node to use a non-fork agent type.', await $.clock.now())
   }
+  const stale = await clearStaleNotes($, run, def)
+  if (stale) return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${stale}`, await $.clock.now()), id)
   const target = spawnTarget({ ...def, category: node.routing?.category ?? def.category })
   const upstream: UpstreamResult[] = def.dependsOn.flatMap(depId => {
     const dep = run.nodes.find(n => n.id === depId)
@@ -815,6 +860,8 @@ function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
   const runId = agentRuns.get(end.agentId)
   if (!runId) return
   agentRuns.delete(end.agentId)
+  backgroundAgents.delete(end.agentId)
+  endBackgroundWait(end.agentId)
   const report = handbacks.get(end.agentId)
   handbacks.delete(end.agentId)
   const run = runs.get(runId)
@@ -847,7 +894,74 @@ function keepSessionUp($: EngineInterface, agentId: string): void {
   })
 }
 
+// Agent backgrounds by default ("Set to false only when your very next action depends on this agent's result"), so only
+// an explicit false keeps it in the foreground. Bash, Task and any other tool count only with run_in_background true.
+function startsBackgroundWork(tool: string, input: Readonly<Record<string, unknown>>): boolean {
+  if (tool === 'Monitor') return true
+  if (tool === 'Agent') return input.run_in_background !== false
+  return input.run_in_background === true
+}
+
+// Ends a worker's wait for its background work, when it has one: its next turn has started or ended, or its node ended.
+function endBackgroundWait(agentId: string): { answer: string } | undefined {
+  const wait = backgroundWaits.get(agentId)
+  if (!wait) return undefined
+  wait.timer.cancel()
+  backgroundWaits.delete(agentId)
+  return wait
+}
+
+// A worker that started background work and ended its turn without a status line has not finished: the work's
+// notification starts its next turn. An interrupted, failed or refused turn, or an answer with a status line, finishes as
+// before. The answer is found as onAgentDone finds it; a transcript that cannot be read finishes as before too.
+async function awaitsBackground($: EngineInterface, end: AgentEnd): Promise<string | undefined> {
+  if (!backgroundAgents.has(end.agentId) || end.isAborted || end.reason === 'aborted' || end.reason === 'error' || end.reason === 'refusal') return undefined
+  try {
+    const answer = end.answer || handbacks.get(end.agentId) || await recoverReport($, end.agentId)
+    return hasStatusLine(answer) ? undefined : answer
+  } catch {
+    return undefined
+  }
+}
+
+// The node stays running with its agent mapped, so the next turn end comes back through onAgentDone; the pane and the log
+// say why. Without a next turn within BACKGROUND_WAIT_MS the node fails. A run being cancelled waits for nothing: false
+// sends the turn end on to finish as before.
+function waitForBackground($: EngineInterface, agentId: string, answer: string): boolean {
+  const run = runs.get(agentRuns.get(agentId) ?? '')
+  const node = run && nodeForAgent(run, agentId)
+  if (!run || !node || run.cancelReason !== undefined) return false
+  activity.set(agentId, toolStarted(BACKGROUND_WAIT_TOOL, Date.now()))
+  $.ui.log(`${run.name} › ${node.id}: ${t.backgroundWait}`)
+  $.ui.invalidate('ui.render')
+  const timer = $.clock.after(BACKGROUND_WAIT_MS, () => {
+    serialized(() => backgroundTimedOut($, agentId, timer)).catch(error => {
+      $.ui.log(`could not end the background wait of agent ${agentId}: ${message(error)}`)
+    })
+  })
+  backgroundWaits.set(agentId, { answer, timer })
+  return true
+}
+
+async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Timer): Promise<void> {
+  const wait = backgroundWaits.get(agentId)
+  if (wait?.timer !== timer) return
+  endBackgroundWait(agentId)
+  activity.delete(agentId)
+  const claim = claimCompletion({ agentId, isAborted: false })
+  if (!claim) return
+  // Its background work may still be running: stopped first, so a recovery attempt does not share the scope with it.
+  const stopFailure = await stopAgent($, agentId)
+  if (stopFailure) $.ui.log(`could not stop agent ${agentId} after its background wait: ${stopFailure}`)
+  const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, wait.answer) : undefined
+  const error = `The node agent ended its turn with background work pending and was not resumed within ${BACKGROUND_WAIT_MS / 60_000} minutes.`
+  await applyCompletion($, claim, { outcome: { state: 'failed', error, ...(wait.answer ? { answer: wait.answer } : {}), ...(reportPath ? { reportPath } : {}) } })
+}
+
 async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
+  endBackgroundWait(end.agentId)
+  const pending = await awaitsBackground($, end)
+  if (pending !== undefined && await serialized(async () => waitForBackground($, end.agentId, pending))) return
   keepSessionUp($, end.agentId)
   const claim = await serialized(async () => claimCompletion(end))
   if (!claim) return
@@ -1137,6 +1251,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   const screened = screenDefinition(input)
   if (!screened.ok) return err(screened.error)
   const { definition, existing } = screened.value
+  if (existing?.rejected && by === 'model') return err(rejectedByUser(existing))
   if (existing && by === 'user' && approveHeld && existing.sessionId === sessionId && awaitingApproval(existing)) {
     await decideApproval($, 'approve', existing.runId)
     return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
@@ -1218,7 +1333,19 @@ async function requestedDefinition($: EngineInterface, input: ToolInput): Promis
   return readDefinitionFile($, `${await $.session.cwd()}/${given}`, given)
 }
 
-async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolReply> {
+// The answer to the model's retry, amend or same-definition start of a run the user rejected: the user said no to this
+// plan, so running it again is the user's call. The user's own /dag retry is not refused.
+function rejectedByUser(run: Run): EngineError {
+  const reason = run.rejected?.reason.replace(/\.+$/, '') ?? ''
+  return {
+    code: 'rejected_by_user',
+    message: `The user rejected run ${run.runId} ("${run.name}")${reason ? `: ${reason}` : ''}. Do not retry, amend or restart it. Revise the plan to answer the rejection, give the revised definition a new key, and ask the user before running it again.`,
+  }
+}
+
+// `by` is who asked: the model's dag tool, or a /dag command the person typed in the composer. Only the person may run a
+// run they rejected again.
+async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'user' = 'model'): Promise<ToolReply> {
   // Only start can preview. On amend, retry, cancel and the rest a dryRun would otherwise be ignored and the action would run for real.
   if (input.action !== 'start' && input.dryRun !== undefined) return err({ code: 'invalid_request', message: 'dryRun is for start only.' })
   if (input.action === 'context') return ok({ source: contextPath(), context: workflowContext, summary: JSON.parse(restorationContext()) })
@@ -1271,7 +1398,17 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
     const reason = typeof input.reason === 'string' && input.reason ? input.reason : 'cancelled on request'
     const { run: ended, stopAgents } = cancelRun(run, reason, now)
     // A cancelled run waits for no approval; cancelRun keeps the field, so it goes here.
-    const { approval: _approval, ...cancelled } = ended
+    const { approval: _approval, ...rest } = ended
+    let cancelled: Run = rest
+    // A worker waiting on its background work has no turn for the stop to end, so no turn end would cancel its node.
+    for (const node of ended.nodes) {
+      if (node.state !== 'running' || !node.agentId || !endBackgroundWait(node.agentId)) continue
+      agentRuns.delete(node.agentId)
+      backgroundAgents.delete(node.agentId)
+      handbacks.delete(node.agentId)
+      activity.delete(node.agentId)
+      cancelled = markFinished(cancelled, node.id, { state: 'cancelled', error: `Cancelled: ${reason}` }, now)
+    }
     for (const node of run.nodes) if (node.agentId) clearWaiting($, node.agentId)
     await persist($, cancelled)
     const failures: { agent_id: string; error: string }[] = []
@@ -1282,12 +1419,15 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
     await announce($, cancelled)
     return ok({ ...snapshotOf(cancelled, 0), ...(failures.length ? { stop_failures: failures } : {}) })
   }
+  if ((input.action === 'retry' || input.action === 'amend') && run.rejected && by === 'model') return err(rejectedByUser(run))
   if (input.action === 'retry') {
     const nodeIds = Array.isArray(input.node_ids)
       ? input.node_ids.map(String)
       : typeof input.node_id === 'string' ? [input.node_id] : undefined
     const retried = retryRun(run, { ...(nodeIds ? { nodeIds } : {}), ...(typeof input.prompt === 'string' ? { prompt: input.prompt } : {}) }, now)
     if (!retried.ok) return err(retried.error)
+    // The person's own retry of a run they rejected is their consent to it: from here on it is an ordinary run.
+    if (by === 'user') delete retried.value.rejected
     const routed = await routeRun($, retried.value, retried.value.nodes.filter(node => node.state === 'pending' || node.state === 'scheduled').map(node => node.id))
     runs.set(run.runId, routed)
     return ok(snapshotOf((await tick($, run.runId)) ?? routed, 0))
@@ -1576,7 +1716,7 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
     run_id: run.runId,
     reason: 'cancelled from /dag',
     ...(verb === 'retry' && rest.length > 1 ? { node_ids: rest.slice(1) } : {}),
-  })
+  }, fromComposer ? 'user' : 'model')
   if (reply.isError) return { text: reply.result }
   return { text: runStatusText(runs.get(run.runId) ?? run) }
 }
@@ -2203,6 +2343,8 @@ export function register(on: On, options: PluginOptions) {
     if (!agentId) return yield* next(e)
     seenAgent($, agentId, 'turn.step')
     clearWaiting($, agentId)
+    // The worker's next turn has started: it is no longer waiting on its background work, so the wait's timer stops.
+    endBackgroundWait(agentId)
     activity.set(agentId, stepStarted(Date.now()))
     const stream = next(e)
     let step = await stream.next()
@@ -2320,8 +2462,13 @@ export function register(on: On, options: PluginOptions) {
       // main conversation has no such call and still opens the gate; a main-loop Skill call is covered by the branch above.
       const nodeSkillLoad = e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)
       if (nodeSkillLoad) nodePlanningCalls += 1
+      // A call means the worker's turn is under way, so a wait for its background work is over.
+      endBackgroundWait(agentId)
       try {
-        return await next(e)
+        const reply = await next(e)
+        // Recorded once the call is answered: a refused call started nothing.
+        if (owner && reply.deny === undefined && startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) backgroundAgents.add(agentId)
+        return reply
       } finally {
         if (nodeSkillLoad) nodePlanningCalls -= 1
         if (activity.get(agentId)?.phase === 'tool') activity.set(agentId, stepStarted(Date.now()))

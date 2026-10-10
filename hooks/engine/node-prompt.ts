@@ -3,6 +3,9 @@ import type { NodeDef, NodeRun, Run } from './types.ts'
 
 export const STATUS_PREFIX = 'DAG_NODE_STATUS:'
 export const UPSTREAM_OUTPUT_CHARS = 4_000
+// The end of the worker's turn is its report: the plugin reads the answer and runs the checks then. A node that ended its
+// turn to wait on a background eval was verified before the eval finished and failed, then resumed and passed (2026-10-10).
+export const FOREGROUND_RULE = 'Run commands in the foreground. Do not end your turn while a background task, monitor or background subagent you started is still running: wait for it to finish, then report. Your turn\'s end is read as your final report.'
 
 const OUTPUT_HEADING = /^#{1,4}\s*Output\s*:?\s*$/im
 
@@ -76,6 +79,7 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
     task,
     '</task>',
     '',
+    FOREGROUND_RULE,
     'When you finish, end your final report with an "## Output" section for the nodes that depend on you:',
     'the files you created or changed, the key facts, values, findings or decisions you produced, in compact form.',
     'Then end with exactly one final line:',
@@ -85,6 +89,19 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
   ].join('\n')
 }
 
+// The last non-blank line of an answer: where the prompt asks for the status and where parseOutcome reads it.
+function finalLine(answer: string): string {
+  return answer.trimEnd().split('\n').pop() ?? ''
+}
+
+// Whether the answer ends with the status line the prompt asks for. Only the final line counts, as in parseOutcome: a
+// worker that backgrounded work and wrote "I will end with DAG_NODE_STATUS: completed" mid-text has not reported yet, and
+// reading any line verified it at once (probe G of the stages review, 2026-10-10). extractOutput still drops every line
+// that names the status, so no marker reaches a downstream prompt; that filter shows output and decides nothing.
+export function hasStatusLine(answer: string): boolean {
+  return finalLine(answer).includes(STATUS_PREFIX)
+}
+
 export function parseOutcome(event: { reason?: string; isAborted: boolean; answer: string }): NodeOutcome {
   if (event.isAborted || event.reason === 'aborted') {
     return { state: 'cancelled', error: 'The node agent was stopped before it finished.' }
@@ -92,7 +109,7 @@ export function parseOutcome(event: { reason?: string; isAborted: boolean; answe
   if (event.reason === 'error' || event.reason === 'refusal') {
     return { state: 'failed', answer: event.answer, error: `The node agent ended with ${event.reason}.` }
   }
-  const lastLine = event.answer.trimEnd().split('\n').pop() ?? ''
+  const lastLine = finalLine(event.answer)
   const index = lastLine.indexOf(STATUS_PREFIX)
   if (index >= 0) {
     const verdict = lastLine.slice(index + STATUS_PREFIX.length).trim()

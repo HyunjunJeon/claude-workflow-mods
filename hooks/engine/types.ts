@@ -60,11 +60,28 @@ export type NodeDef = {
   writes?: string[]
 }
 
+// The review pair a definition declares in one field. parseDefinition expands it into the review-spec and review-standards nodes.
+// Kept with its defaults filled in (notes folder, category), so a definition that spells a default out hashes like one that leaves it out.
+export type ReviewStage = {
+  request: string // the user's request, pasted verbatim into review-spec
+  notes: string // absolute folder for both notes files; default /tmp/dag-review/<cleaned key>-<6 hex>
+  category: string // the reviewers' category; default unspecified-low
+  rules?: string[] // repository rule files for review-standards; absent means it searches for them
+}
+
+// One commit of the commit stage, in commit order. The first line of message is the subject; the rest is the body.
+export type CommitEntry = { message: string; paths: string[] }
+
 export type Definition = {
   key: string
   name: string
   goal?: string
+  // The user's nodes followed by the nodes expanded from review and commit (stages.ts).
   nodes: NodeDef[]
+  // Kept so a reused or amended definition re-expands identically. An amend sends these original fields with the user's
+  // nodes only: a node named review-spec, review-standards or commit next to its field is refused as a duplicate stage.
+  review?: ReviewStage
+  commit?: CommitEntry[]
 }
 
 export type NodeRun = {
@@ -125,6 +142,9 @@ export type Run = {
   }
   // A pending user approval: while set, no node starts. Absent means none.
   approval?: { requestedAt: number }
+  // Set when the user rejected the run while it awaited approval (reason is theirs, possibly empty). Every transition and
+  // the checkpoint keep it: the model may not retry, amend or restart the run; only the user's own /dag retry runs it again.
+  rejected?: { at: number; reason: string }
 }
 
 export type EngineError = { code: string; message: string }
