@@ -128,7 +128,7 @@ that prints OK when run with python3 test_app.py.
 - `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`), 안전하지만 틀린 산출물 점검표
 - 노드용 스킬 `skills/debugging/`, `skills/review-standards/`, `skills/testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 테스트)입니다.
 
-계획 스킬은 검증도 묶어서 하게 합니다. 관련 변경은 한 단계 실행으로 묶고 끝에 검증 단계 하나(코드는 검토 한 쌍, 곧 `review-spec`과 `review-standards`)만 둡니다. 작은 변경마다 검토 한 쌍을 붙이지 않고, 단계 전체는 종단 시나리오 테스트로 증명합니다.
+계획 스킬은 검증도 묶어서 하게 합니다. 관련 변경은 한 단계 실행으로 묶고 끝에 검증 단계 하나(코드는 검토 한 쌍, 곧 `review-spec`과 `review-standards`)만 둡니다. 작은 변경마다 검토 한 쌍을 붙이지 않고, 단계 전체는 종단 시나리오 테스트로 증명합니다. 검토 한 쌍과 커밋은 정의의 `review`와 `commit` 필드로 선언하면 플러그인이 노드로 만들어 주므로 손으로 쓰지 않습니다([검토와 커밋 단계](#검토와-커밋-단계)).
 
 mod는 이 스킬을 강제로 연결합니다.  
 프로토콜과 거부 메시지가 스킬을 안내하고, strict에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/validate/check/test/review/audit로 시작하는 단어가 있고 다른 노드에 의존. `preview`는 해당하지 않습니다)가 없거나, 한 노드가 파일 셋 이상을 혼자 만들거나(`writes`와 파일 검사 `verify`의 경로를 세며 테스트 경로는 제외하고, 선언한 폴더와 그 안의 파일은 한 번만 세어 `writes: ['skills/x/']`에 그 안의 파일 둘을 검사하면 둘로 셉니다), 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
@@ -212,9 +212,31 @@ nodes:
 | `load_skills`                          | 노드가 시작 전에 불러올 스킬 이름                                                                                                                                                               |
 | `verify`                               | **`start`·`amend`에서 필수.** 런타임이 직접 실행할 검사 1-16개. 파일 검사(`contains`/`absent`/`matches`/`lastLine`/`equals`)와 명령 검사(`expect`)의 문법은 [검증](#검증)                                                                                                                         |
 | `writes`                               | 이 노드가 쓸 프로젝트 상대 경로나 폴더. 다른 세션과 겹치는지 보여 주는 데만 쓰고, 쓰기를 막지는 않습니다                                                                                                                     |
+| `review` (정의 수준)                      | `{request, notes?, category?, rules?}`. 선언하면 파싱할 때 `review-spec`과 `review-standards` 노드로 확장합니다. `request`는 사용자의 요청 문장으로, `review-spec` 프롬프트에 그대로 붙여 넣습니다. 이 id로 노드를 직접 정의하면 안 됩니다. 자세한 내용은 [검토와 커밋 단계](#검토와-커밋-단계) |
+| `commit` (정의 수준)                      | `[{message, paths}]`. 선언하면 파싱할 때 노드 `commit`으로 확장합니다. 항목마다 `paths`만 스테이징해 `message`로 순서대로 커밋하며, 다른 변경은 스테이징하지 않고 푸시하지 않습니다 |
 
 
 YAML은 DAG 정의에 필요한 부분집합만 지원합니다(매핑, 시퀀스, 인용 문자열, `[a, b]`, `|`/`>` 블록 스칼라, 주석). `{a: 1}` 형태의 플로우 매핑은 지원하지 않습니다.
+
+정의 수준 `review`와 `commit`은 이렇게 씁니다. 노드는 사용자가 만든 것만 적고, 검토 노드와 커밋 노드는 플러그인이 만듭니다.
+
+```yaml
+key: csv-export
+goal: Add CSV export to the report page
+nodes:
+  - id: export
+    prompt: "TASK: Add src/export.ts and tests/export.test.ts. STOP WHEN: the export test passes."
+    writes: [src/export.ts, tests/export.test.ts]
+    verify:
+      - kind: command
+        argv: [bun, test, tests/export.test.ts]
+review:
+  request: "Add CSV export to the report page"   # 사용자의 요청 문장. review-spec에 그대로 들어감
+  category: unspecified-low                      # 생략하면 unspecified-low
+commit:
+  - message: "feat(export): add CSV export"
+    paths: [src/export.ts, tests/export.test.ts]
+```
 
 카테고리 제안 기준은 `skills/planning/references/planning.md`의 **Category routing**에 있습니다. DAG를 작성하는 메인 Claude가 값을 제안하며, 사용자가 정의 파일을 작성하면 그 값이 제안이 됩니다. Jev가 켜져 있으면 `hooks/engine/jev.ts`의 분류 기준으로 작업 내용을 독립적으로 평가하고, 확신도가 기준 이상일 때 실행 카테고리를 바꿉니다. 최종 감사가 제안이나 Jev 판단으로 `quick`이 되면 Jev 설정과 관계없이 `unspecified-low`로 실행합니다(판단 주체 `rule`). 최종 모델은 `hooks/engine/node-prompt.ts`의 매핑으로 정합니다. `quick`과 `unspecified-low`는 모두 Sonnet이지만 기계적 작업과 판단 작업을 구분하는 이름입니다. 작업자 모델은 최소 Sonnet이며, 세션이나 에이전트 타입의 Haiku 설정을 상속하지 않도록 모델을 명시합니다.
 
@@ -319,6 +341,15 @@ verify:
 
 한계: 린트는 프로그램 이름과 위 플래그만 봅니다. `sh -c '...'` 같은 셸 래퍼는 분석하지 않으므로 그 안에 `true`나 `touch`를 넣어도 경고가 나오지 않습니다.
 
+### 검토와 커밋 단계
+
+두 축 검토 한 쌍과 커밋 노드는 모든 코드 변경 실행에 같은 모양으로 들어가므로, 손으로 쓰지 않고 정의 수준의 `review`와 `commit` 필드로 선언합니다. 플러그인이 정의를 파싱할 때(`start`, `amend`, `/dag run`, 드라이런) 이 필드를 노드로 확장하고, 그 노드의 검사도 [검증](#검증)의 검사 문법으로 만들어 붙입니다. 프롬프트는 템플릿입니다. 드라이런(`start {dryRun: true}`)의 `preview`에는 확장된 노드가 보입니다.
+
+- `review: {request, notes?, category?, rules?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다.
+- `commit: [{message, paths}]`: 노드 `commit`을 만듭니다. `review`가 있으면 두 검토 노드 뒤에, 없으면 모든 사용자 노드 뒤에 실행합니다. 항목마다 그 `paths`만 스테이징해 `message`로 순서대로 커밋하고, 다른 변경은 스테이징하지 않으며 푸시하지 않습니다. 검증은 세 가지입니다. 커밋마다 `git log --format=%s`의 제목이 `message`의 첫 줄(제목)과 같은지만 비교하고(본문은 비교하지 않습니다), 나열한 `paths`가 모두 커밋됐는지(`git status --porcelain -- <paths>`가 비었는지) 확인하며, 각 커밋이 자기 `paths` 밖의 파일을 하나도 바꾸지 않았는지 확인합니다. 마지막 검사가 `git add -A` 같은 넓은 스테이징으로 관련 없는 변경이 커밋에 섞이는 것을 막습니다.
+
+`review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
+
 ## 자동 복구
 
 `auto_recovery`(기본 `true`)가 켜져 있고 Jev를 쓸 수 있으면, 실패한 노드의 원인을 Jev가 분류하고 확신도가 `jev_confidence` 이상일 때만 다시 실행합니다.
@@ -358,9 +389,10 @@ verify:
 - 의존 노드가 모두 `completed`인 노드가 `scheduled`가 되고, 실행 수 상한(기본 8)까지 동시에 시작됩니다.
 - 노드가 실패하거나 취소되면 그 하위 노드는 `skipped`가 됩니다. 관계없는 노드는 계속 실행됩니다.
 - 노드 상태는 서브에이전트 턴 종료 이유로 정합니다. `aborted`면 `cancelled`, `error`/`refusal`이면 `failed`이고, 답변 마지막 줄이 `DAG_NODE_STATUS: failed: <이유>`여도 `failed`입니다.
+- 노드 작업자는 명령을 포그라운드로 실행하고, 자기가 시작한 백그라운드 작업·모니터·백그라운드 서브에이전트가 아직 돌고 있으면 턴을 끝내지 말라고 지시받습니다. 그런데도 백그라운드 작업을 시작한 노드가 `DAG_NODE_STATUS` 줄 없이 턴을 끝내면 플러그인은 바로 검증하지 않고 그 에이전트의 다음 턴을 기다립니다. 30분 안에 다음 턴이 오지 않으면 `ended its turn with background work pending and was not resumed`로 노드를 실패시킵니다.
 - 실행이 끝나면 세션에 "완료 주장은 증거로 확인하기 전까지 거짓으로 취급하라"는 지침과 함께 요약 메시지가 들어갑니다.
 
-`start_approval`을 `always`로 하면(기본 `off`) 대화형 세션에서 모델이 `dag` 도구로 시작한 실행은 만들어지기만 하고 노드를 하나도 시작하지 않은 채 보류됩니다. `start` 응답과 스냅샷에 `awaiting_approval: true`와 안내 문구가 붙고, 모델은 사용자에게 한 번 알린 뒤 턴을 끝냅니다. 실행이 보류되면 토스트가 한 번 뜹니다. 프롬프트 아래 상태 줄(`DAG <이름>: 0/3 완료 · 승인 대기 중`)과 프롬프트 위 밴드는 `실행 중 N` 자리에 `승인 대기 중`(영어 `awaiting approval`)을 보여 주고, 도구의 `list` 액션은 그 실행의 `status: running`을 그대로 둔 채 `awaiting_approval: true`를 더해 아직 시작하지 않았음을 알립니다. 보류된 실행 자체는 `/reload-plugins`나 세션 재개 뒤에도 계속 승인을 기다립니다. 보류 표시가 체크포인트에 저장되기 때문입니다. DAG 패널의 승인 블록과 `/dag status`는 사용자가 무엇을 승인하는지 볼 수 있도록 실행 미리보기를 보여 줍니다. 미리보기에는 노드 수와 웨이브 수, 가장 넓은 웨이브와 동시 실행 한도(`max_concurrent`)의 비교, 웨이브별 노드와 카테고리·모델, 쓰기 충돌, 쓰기 범위를 확인하지 못한 노드, lint 경고가 들어갑니다. 승인 블록의 `approve` 버튼(한국어 화면에서는 `승인`)이나 `a` 키, 또는 `/dag approve <run_id>`로 승인하면 실행이 시작되고 모델에 승인되어 시작됐다는 메시지가 갑니다. 같은 블록의 `reject` 버튼(`거절`)이나 `r` 키, 또는 `/dag reject <run_id> [reason]`으로 거부하면 실행이 `Rejected by the user: <reason>`으로 취소되고 모델에 거부되어 아무것도 실행되지 않았다는 메시지가 갑니다. `/dag approval`은 인자 없이 쓰면 지금 유효한 설정만 보여 주며 누가 입력해도 됩니다. `/dag approval off|always`로 덮어쓰는 것과 `/dag approve`, `/dag reject`는 사용자 전용이라 모델이 실행할 수 없습니다. 덮어쓴 값은 메모리에만 있어서 다음 `/reload-plugins`까지만 유지되고, 그 뒤에는 `start_approval` 설정으로 돌아갑니다. `start_approval`에 `off`나 `always`가 아닌 값을 쓰면 다른 설정처럼 무시하고 `off`로 둡니다. 예외가 둘 있습니다. 사용자가 직접 입력한 `/dag run`과 비대화형 세션(`claude -p`)은 설정과 관계없이 기다리지 않고 바로 시작합니다. 사용자가 보류된 실행과 같은 정의로 `/dag run`을 입력하면 그 보류된 실행이 승인됩니다.
+`start_approval`을 `always`로 하면(기본 `off`) 대화형 세션에서 모델이 `dag` 도구로 시작한 실행은 만들어지기만 하고 노드를 하나도 시작하지 않은 채 보류됩니다. `start` 응답과 스냅샷에 `awaiting_approval: true`와 안내 문구가 붙고, 모델은 사용자에게 한 번 알린 뒤 턴을 끝냅니다. 실행이 보류되면 토스트가 한 번 뜹니다. 프롬프트 아래 상태 줄(`DAG <이름>: 0/3 완료 · 승인 대기 중`)과 프롬프트 위 밴드는 `실행 중 N` 자리에 `승인 대기 중`(영어 `awaiting approval`)을 보여 주고, 도구의 `list` 액션은 그 실행의 `status: running`을 그대로 둔 채 `awaiting_approval: true`를 더해 아직 시작하지 않았음을 알립니다. 보류된 실행 자체는 `/reload-plugins`나 세션 재개 뒤에도 계속 승인을 기다립니다. 보류 표시가 체크포인트에 저장되기 때문입니다. DAG 패널의 승인 블록과 `/dag status`는 사용자가 무엇을 승인하는지 볼 수 있도록 실행 미리보기를 보여 줍니다. 미리보기에는 노드 수와 웨이브 수, 가장 넓은 웨이브와 동시 실행 한도(`max_concurrent`)의 비교, 웨이브별 노드와 카테고리·모델, 쓰기 충돌, 쓰기 범위를 확인하지 못한 노드, lint 경고가 들어갑니다. 승인 블록의 `approve` 버튼(한국어 화면에서는 `승인`)이나 `a` 키, 또는 `/dag approve <run_id>`로 승인하면 실행이 시작되고 모델에 승인되어 시작됐다는 메시지가 갑니다. 같은 블록의 `reject` 버튼(`거절`)이나 `r` 키, 또는 `/dag reject <run_id> [reason]`으로 거부하면 실행이 `Rejected by the user: <reason>`으로 취소되고 모델에 거부되어 아무것도 실행되지 않았다는 메시지가 갑니다. 사용자가 거부한 실행은 모델이 `retry`나 `amend`로 다시 살릴 수 없고, 모델이 같은 키와 같은 정의로 `start`해도 거절하며, 모두 코드 `rejected_by_user`입니다. 사용자는 `/dag retry`로 그 실행을 다시 돌릴 수 있고, 계획을 고치려면 새 키로 시작해야 합니다. `/dag approval`은 인자 없이 쓰면 지금 유효한 설정만 보여 주며 누가 입력해도 됩니다. `/dag approval off|always`로 덮어쓰는 것과 `/dag approve`, `/dag reject`는 사용자 전용이라 모델이 실행할 수 없습니다. 덮어쓴 값은 메모리에만 있어서 다음 `/reload-plugins`까지만 유지되고, 그 뒤에는 `start_approval` 설정으로 돌아갑니다. `start_approval`에 `off`나 `always`가 아닌 값을 쓰면 다른 설정처럼 무시하고 `off`로 둡니다. 예외가 둘 있습니다. 사용자가 직접 입력한 `/dag run`과 비대화형 세션(`claude -p`)은 설정과 관계없이 기다리지 않고 바로 시작합니다. 사용자가 보류된 실행과 같은 정의로 `/dag run`을 입력하면 그 보류된 실행이 승인됩니다.
 
 ### `dag` 도구 액션
 

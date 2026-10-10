@@ -80,6 +80,8 @@ A run is a declarative definition with these fields:
 | `goal` | Run goal. |
 | `nodes` | Nodes to execute. |
 
+Two optional definition fields, `review` and `commit`, make the plugin generate the review pair and the commit node for a code-changing run.
+
 Each node has these fields:
 
 | Field | Meaning |
@@ -175,6 +177,7 @@ You can recover a settled run. Completed nodes keep their results:
 - `amend {run_id, definition}` compares fingerprints: prompt, category, agent, dependsOn, verify and writes. Only changed or added nodes and their transitive dependents re-run. Changing a running node returns `amend_running_node`. Keep the same key.
 - `send {run_id, node_id, message}` steers a running node. A finished node returns `node_not_continuable`; retry it with a prompt.
 - `cancel {run_id, reason}` stops running nodes and cancels nodes not yet started. Cancel only to abandon the plan, never from impatience.
+- A run the user rejected returns `rejected_by_user` to `retry`, `amend` and an identical `start`; a revised plan needs a new key and the user's go-ahead.
 
 ## Verification and automatic recovery
 
@@ -187,6 +190,8 @@ A passing check proves only what it checks, not semantic correctness.
 Choose checks that fail when the deliverable is wrong. Never use a no-op such as `true`.
 Use `lastLine` for a verdict line, `absent` on a file or folder for text that must be gone, and `expect` for a command that must fail with a named symptom.
 The reference's verify contract lists the fields and their rules; a Bash wrapper is needed only for pipelines.
+For a code-changing run, declare `review: {request}` and `commit: [{message, paths}]` instead of writing the review pair and commit node by hand.
+The plugin expands them into `review-spec`, `review-standards` and `commit`; the reference's two-axis review shows the fields.
 
 Never name deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name.
 Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295).
