@@ -114,6 +114,11 @@ async function runScenario(scenario: Scenario, root: string, options: Options): 
   const dir = `${root}/${scenario.id}`
   await Bun.$`mkdir -p ${dir}`.quiet()
   for (const [path, content] of Object.entries(scenario.files)) await Bun.write(`${dir}/${path}`, content)
+  // The generated review nodes read the change through git (rev-parse, status, diff), and on 2026-10-10 none of the 8 planners added a review pair on the non-git fixtures (eval/baselines/stages-baseline.md).
+  // No nothrow, so a failed init stops this scenario; --allow-empty because pipeline-stats, diamond-app and research-write start with no files.
+  await Bun.$`git init -q`.cwd(dir).quiet()
+  await Bun.$`git add -A`.cwd(dir).quiet()
+  await Bun.$`git -c user.name=dag-eval -c user.email=dag-eval@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m fixture`.cwd(dir).quiet()
   const started = Date.now()
   const proc = Bun.spawn(['claude', '-p', scenario.prompt, '--plugin-dir', REPO, '--model', options.model, '--allowedTools', ...MAIN_TOOLS], {
     cwd: dir,
@@ -195,7 +200,7 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
   return [
     `# DAG shape evaluation ${stamp}`,
     '',
-    `Model: ${options.model}. Plugin: ${REPO}.`,
+    `Model: ${options.model}. Plugin: ${REPO}. Fixtures: git repositories with one initial commit.`,
     '',
     `Distinct shapes: ${shapes.size} (${[...shapes].join(', ')}). Distinct producer shapes: ${producerShapes.size} (${[...producerShapes].join(', ')}). Scenarios matching their expected shape: ${matches}/${results.length}.`,
     '',

@@ -527,7 +527,7 @@ bun eval/run.ts --list
 bun eval/run.ts [--only id,id] [--concurrency 4] [--model sonnet] [--timeout-min 15] [--keep]
 ```
 
-러너는 시나리오마다 `/tmp/dag-shapes/<stamp>/<id>`에 고정 파일을 만들고 `claude -p --plugin-dir <이 저장소>`를 실행합니다(현재 계정의 사용량을 씁니다). 끝나면 체크포인트의 정의로 노드 수, 깊이, 레이어 폭, 팬인 노드, 검증 노드, 경고, 카테고리, 형태(전체와 검증 노드를 뺀 생산자 형태)를 측정하고, 세션 기록에서 스킬 로드가 start보다 먼저였는지와 거부 횟수를 확인하며, 결과 확인 명령을 실행합니다. 결과는 `eval/results/<stamp>.md`와 `.json`에 저장되고, 고정 파일 디렉터리는 `--keep`이 없으면 지워집니다.
+러너는 시나리오마다 `/tmp/dag-shapes/<stamp>/<id>`에 고정 파일을 만들어 첫 커밋 하나가 있는 git 저장소로 초기화하고 `claude -p --plugin-dir <이 저장소>`를 실행합니다(현재 계정의 사용량을 씁니다). 생성되는 검토 노드(`review-spec`, `review-standards`)가 `git diff`로 변경을 읽기 때문입니다. 머리말에 `Fixtures: git repositories with one initial commit.`이 없는 결과(스탬프 `20261010113334`까지)는 git 저장소가 아닌 고정 파일에서 측정한 것입니다. 끝나면 체크포인트의 정의로 노드 수, 깊이, 레이어 폭, 팬인 노드, 검증 노드, 경고, 카테고리, 형태(전체와 검증 노드를 뺀 생산자 형태)를 측정하고, 세션 기록에서 스킬 로드가 start보다 먼저였는지와 거부 횟수를 확인하며, 결과 확인 명령을 실행합니다. 결과는 `eval/results/<stamp>.md`와 `.json`에 저장되고, 고정 파일 디렉터리는 `--keep`이 없으면 지워집니다.
 
 결과 표의 `AskUserQuestion calls` 열(`refusals (planning/tools)` 바로 뒤)은 시나리오 세션 기록의 메인 대화에서 `AskUserQuestion` 도구를 호출한 횟수입니다(서브에이전트 호출은 세지 않습니다). `claude -p`는 비대화형 세션이라 프로토콜이 사용자에게 묻지 말라고 알리므로 기대값은 0이고, 0보다 크면 모델이 물으려 했다는 뜻입니다. 사용자의 답이 있어야 하는 인터뷰(`interview`, `pm`)는 `claude -p`로 측정할 수 없습니다.
 
