@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { addNote, contextSummary, emptyContext, parseContext, recordRequest, removeNote } from '../hooks/engine/context.ts'
+import { addNote, contextDigest, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from '../hooks/engine/context.ts'
 import type { Run } from '../hooks/engine/types.ts'
 
 function run(runId: string, status: Run['status'], sessionId = 'session'): Run {
@@ -143,4 +143,97 @@ test('unverified completed nodes and undeclared write scope remain unknown', () 
   expect(node.writes).toBe(null)
   expect(node.recovery).toBe(null)
   expect(summary.objective).toBe(null)
+})
+
+test('the context digest ignores requests, objective and timestamps', () => {
+  const record = addNote(recordRequest(emptyContext('/project', 'session', 0), { at: 1, text: 'first objective' }), { at: 2, text: 'pinned' })
+  const runs = [run('a', 'running'), run('b', 'running')]
+  const digest = contextDigest(record, runs)
+  const asked = recordRequest(record, { at: 50, text: 'a new prompt' })
+  expect(contextDigest(asked, runs)).toBe(digest)
+  expect(contextDigest({ ...record, updatedAt: 99 }, runs)).toBe(digest)
+  const [a, b] = runs.map(entry => ({ ...entry, updatedAt: 100 - entry.updatedAt }))
+  expect(contextDigest(record, [b!, a!])).toBe(digest)
+  expect(contextDigest(record, [...runs, run('foreign', 'failed', 'other')])).toBe(digest)
+})
+
+test('the context digest changes with a node state, a verification status, a recovery, a goal, a write scope, a check count, a run and a note', () => {
+  const record = addNote(emptyContext('/project', 'session', 0), { at: 1, text: 'pinned' })
+  const base = run('a', 'running')
+  const digest = contextDigest(record, [base])
+  const node = base.nodes[0]!
+  const changed: Run[] = [
+    { ...base, nodes: [{ ...node, state: 'completed' }] },
+    { ...base, nodes: [{ ...node, attempt: 3 }] },
+    { ...base, nodes: [{ ...node, verification: { ...node.verification!, status: 'passed' } }] },
+    { ...base, nodes: [{ ...node, recovery: { ...node.recovery!, used: 2 } }] },
+    { ...base, status: 'cancelled' },
+    { ...base, handoff: { from: 'session', to: 'next', requestedAt: 5 } },
+    { ...base, definition: { ...base.definition, goal: 'another objective' } },
+    { ...base, definition: { ...base.definition, nodes: base.definition.nodes.map(entry => ({ ...entry, writes: ['src/other.ts'] })) } },
+    { ...base, definition: { ...base.definition, nodes: base.definition.nodes.map(entry => ({ ...entry, verify: [...entry.verify!, { kind: 'command' as const, argv: ['again'] }] })) } },
+  ]
+  for (const variant of changed) expect(contextDigest(record, [variant])).not.toBe(digest)
+  expect(contextDigest(record, [base, run('b', 'running')])).not.toBe(digest)
+  expect(contextDigest(addNote(record, { at: 2, text: 'second' }), [base])).not.toBe(digest)
+  expect(contextDigest(removeNote(record, 0), [base])).not.toBe(digest)
+  const two = addNote(addNote(emptyContext('/project', 'session', 0), { at: 1, text: 'x' }), { at: 2, text: 'y' })
+  const swapped = addNote(addNote(emptyContext('/project', 'session', 0), { at: 1, text: 'y' }), { at: 2, text: 'x' })
+  expect(contextDigest(swapped, [base])).not.toBe(contextDigest(two, [base]))
+})
+
+function finished(entry: Run): Run {
+  return { ...entry, nodes: entry.nodes.map(node => ({ ...node, state: 'completed' as const })) }
+}
+
+test('a run slice changes only with its own run', () => {
+  const record = emptyContext('/project', 'session', 0)
+  const before = contextSlices(record, [run('a', 'running'), run('b', 'running')])
+  const after = contextSlices(record, [run('a', 'running'), finished(run('b', 'running'))])
+  expect(after.runs['a']).toBe(before.runs['a']!)
+  expect(after.notes).toBe(before.notes)
+  expect(after.runs['b']).not.toBe(before.runs['b']!)
+})
+
+test('a run message records only its own run as received', () => {
+  const record = emptyContext('/project', 'session', 0)
+  const a = run('a', 'running')
+  const b = run('b', 'running')
+  let seen = deliverBlock(nothingDelivered(0), 1, contextSlices(record, [a, b]))
+  const now = contextSlices(record, [{ ...a, status: 'cancelled' }, finished(b)])
+  seen = deliverRuns(seen, 2, contextSlices(record, [{ ...a, status: 'cancelled' }]).runs)
+  expect(contextUnseen(seen, now)).toBe(true)
+  seen = deliverRuns(seen, 3, contextSlices(record, [finished(b)]).runs)
+  expect(contextUnseen(seen, now)).toBe(false)
+})
+
+test('a capture older than the recorded delivery leaves it in place', () => {
+  const record = emptyContext('/project', 'session', 0)
+  const before = contextSlices(record, [run('a', 'running')])
+  const now = contextSlices(record, [finished(run('a', 'running'))])
+  const seen = deliverBlock(nothingDelivered(0), 5, now)
+  expect(contextUnseen(deliverRuns(seen, 3, before.runs), now)).toBe(false)
+  expect(contextUnseen(deliverBlock(seen, 4, before), now)).toBe(false)
+  expect(contextUnseen(deliverBlock(seen, 6, before), now)).toBe(true)
+})
+
+test('after a reset earlier captures are discarded and the notes stay unseen until a block', () => {
+  const record = addNote(emptyContext('/project', 'session', 0), { at: 1, text: 'pinned' })
+  const slices = contextSlices(record, [run('a', 'running')])
+  const reset = nothingDelivered(7)
+  expect(deliverRuns(reset, 6, slices.runs)).toEqual(reset)
+  expect(deliverBlock(reset, 6, slices)).toEqual(reset)
+  const told = deliverRuns(reset, 8, slices.runs)
+  expect(contextUnseen(told, slices)).toBe(true)
+  expect(contextUnseen(deliverBlock(told, 9, slices), slices)).toBe(false)
+})
+
+test('a run that appeared or disappeared since the last block counts as unseen', () => {
+  const record = emptyContext('/project', 'session', 0)
+  const one = contextSlices(record, [run('a', 'running')])
+  const two = contextSlices(record, [run('a', 'running'), run('b', 'running')])
+  expect(contextUnseen(deliverBlock(nothingDelivered(0), 1, one), two)).toBe(true)
+  const seenTwo = deliverBlock(nothingDelivered(0), 1, two)
+  expect(contextUnseen(seenTwo, one)).toBe(true)
+  expect(contextUnseen(deliverBlock(seenTwo, 2, one), one)).toBe(false)
 })

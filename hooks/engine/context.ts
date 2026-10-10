@@ -1,3 +1,4 @@
+import { hash, stableStringify } from './hash.ts'
 import type { Run } from './types.ts'
 
 export type ContextRecord = {
@@ -163,4 +164,88 @@ export function contextSummary(record: ContextRecord, runs: readonly Run[], sour
     if (request && append({ kind: 'request', index, at: request.at, ...preview(request.text) })) block.omitted.requests--
   }
   return JSON.stringify(block)
+}
+
+// The state the restoration block reports, as one digest for the notes and one per owned run (its slice), so a message
+// about one run can record that run alone as received. Requests, the objective and every updatedAt stay out: they
+// change on every prompt, and the model already reads its own prompt.
+export type ContextSlices = { readonly notes: string; readonly runs: Readonly<Record<string, string>> }
+
+// What the block says about one run: status, handoff and goal, and for each node its state, attempt, verification
+// status, recovery count, error, report, writes and declared check count. Timestamps and evidence detail stay out.
+function runSlice(run: Run): string {
+  return hash(stableStringify({
+    status: run.status, handoff: run.handoff ?? null, goal: run.definition.goal ?? null,
+    nodes: run.nodes.map(node => {
+      const definition = run.definition.nodes.find(entry => entry.id === node.id)
+      return {
+        id: node.id, state: node.state, attempt: node.attempt,
+        verification: node.verification?.status ?? null, recovery: node.recovery?.used ?? 0,
+        error: node.error ?? null, report: node.reportPath ?? null,
+        writes: definition?.writes ?? null, declaredChecks: definition?.verify?.length ?? 0,
+      }
+    }),
+  }))
+}
+
+export function contextSlices(record: ContextRecord, runs: readonly Run[]): ContextSlices {
+  return {
+    notes: hash(stableStringify(record.notes.map(note => note.text))),
+    runs: Object.fromEntries(runs.filter(run => run.sessionId === record.sessionId).map(run => [run.runId, runSlice(run)])),
+  }
+}
+
+/** One stable string over every slice: equal exactly when the block would report the same state. */
+export function contextDigest(record: ContextRecord, runs: readonly Run[]): string {
+  return hash(stableStringify(contextSlices(record, runs)))
+}
+
+export type DeliveredSlice = { readonly seq: number; readonly digest: string }
+
+/**
+ * The slices the model has received, each stamped with the capture sequence it was taken at. `seq` is the capture of
+ * the last whole block or reset: a run missing from `runs`, or missing notes, counts as unseen as of that capture.
+ */
+export type Delivered = {
+  readonly seq: number
+  readonly notes?: DeliveredSlice
+  readonly runs: Readonly<Record<string, DeliveredSlice>>
+}
+
+export function nothingDelivered(seq: number): Delivered {
+  return { seq, runs: {} }
+}
+
+// Whichever of the recorded slice and one captured at `seq` is newer; an undefined digest means the capture had none.
+// A message that waited in the host's queue therefore never overwrites a delivery captured after it.
+function newer(recorded: DeliveredSlice | undefined, floor: number, seq: number, digest: string | undefined): DeliveredSlice | undefined {
+  return seq > (recorded?.seq ?? floor) ? (digest === undefined ? undefined : { seq, digest }) : recorded
+}
+
+/** The whole block, captured at `seq`, reached the model: the notes and every owned run, and a run it no longer lists is gone. */
+export function deliverBlock(delivered: Delivered, seq: number, slices: ContextSlices): Delivered {
+  const runs: Record<string, DeliveredSlice> = {}
+  for (const id of new Set([...Object.keys(delivered.runs), ...Object.keys(slices.runs)])) {
+    const kept = newer(delivered.runs[id], delivered.seq, seq, slices.runs[id])
+    if (kept) runs[id] = kept
+  }
+  const notes = newer(delivered.notes, delivered.seq, seq, slices.notes)
+  return { seq: Math.max(delivered.seq, seq), runs, ...(notes ? { notes } : {}) }
+}
+
+/** A message about some runs, captured at `seq`, reached the model: only those runs' slices change. */
+export function deliverRuns(delivered: Delivered, seq: number, runs: Readonly<Record<string, string>>): Delivered {
+  const merged = { ...delivered.runs }
+  for (const [id, digest] of Object.entries(runs)) {
+    const kept = newer(delivered.runs[id], delivered.seq, seq, digest)
+    if (kept) merged[id] = kept
+  }
+  return { ...delivered, runs: merged }
+}
+
+/** The model lacks part of the current state: the notes or a run's slice differ, or a run appeared or disappeared. */
+export function contextUnseen(delivered: Delivered, current: ContextSlices): boolean {
+  const ids = Object.keys(current.runs)
+  return delivered.notes?.digest !== current.notes || Object.keys(delivered.runs).length !== ids.length ||
+    ids.some(id => delivered.runs[id]?.digest !== current.runs[id])
 }

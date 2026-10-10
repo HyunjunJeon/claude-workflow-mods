@@ -5,7 +5,7 @@ import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type Upstrea
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
-import { addNote, contextSummary, emptyContext, parseContext, recordRequest, removeNote } from './engine/context.ts'
+import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
@@ -169,6 +169,15 @@ let jevModelFallback = true
 let jevApiKey: string | undefined
 let ticks = 0
 let workflowContext = emptyContext('', '', 0)
+// The restoration block is up to 8,000 characters (SUMMARY_CAP) and used to go on every submitted prompt, each node's
+// progress note and settle summary included. It now goes on a user prompt only when the run and note state differs
+// from the state the model last received, recorded here per run and for the notes: by prompt.context, a compaction
+// message, an earlier injection (each records every slice), or the plugin's own run news (only the run it describes).
+// Empty in a new process, so after /reload-plugins the first user prompt carries the block once more; that costs one
+// block per reload. `captures` orders the snapshots, so a message that waited in the host's queue never overwrites a
+// newer delivery.
+let captures = 0
+let delivered = nothingDelivered(0)
 let decisionRecords: DecisionRecord[] = []
 let peerSessions: SessionRecord[] = []
 let metadataWrites: Promise<unknown> = Promise.resolve()
@@ -430,6 +439,34 @@ function contextPath(): string {
 
 function restorationContext(): string {
   return contextSummary(workflowContext, [...runs.values()], contextPath())
+}
+
+// The block as it goes out now, and the call that records the state it reports as received. Taken together, so a
+// change while the block travels (prompt.context and prompt.submit await the hooks beneath) stays unseen.
+function restoration(): { text: string; received: () => void } {
+  const seq = ++captures
+  const slices = contextSlices(workflowContext, [...runs.values()])
+  return { text: restorationContext(), received: () => { delivered = deliverBlock(delivered, seq, slices) } }
+}
+
+// A cleared, switched or newly resumed conversation has received nothing yet. Captures taken before this are stale.
+function forgetDelivered(): void {
+  delivered = nothingDelivered(++captures)
+}
+
+// The plugin's own prompts (settle summary, node progress, keep-alive) carry the run news themselves, so prompt.submit
+// never adds the block to them. Once the host takes one, the model has that one run as it stood when the text was
+// written; other runs and the notes are not in the message and stay as last delivered, so a node of another run that
+// finished meanwhile, or a note pinned before a settle, still reaches the next user prompt. Recorded here, at the three
+// call sites, rather than on origin 'plugin' in prompt.submit: the slice is taken with the text, and a dropped prompt
+// delivers nothing.
+function submitRunNews($: EngineInterface, run: Run, text: string): ReturnType<EngineInterface['prompt']['submit']> {
+  const seq = ++captures
+  const slice = contextSlices(workflowContext, [run]).runs
+  return $.prompt.submit({ text }).then(result => {
+    if (result.drop === undefined) delivered = deliverRuns(delivered, seq, slice)
+    return result
+  })
 }
 
 // Plain conversations keep requests in memory; the file appears once the session uses the DAG.
@@ -713,7 +750,7 @@ async function announce($: EngineInterface, run: Run): Promise<void> {
   if (!isSettled(run) || run.settledNotified || settleSubmits.has(run.runId)) return
   settleSubmits.add(run.runId)
   // Plugin submissions run once idle; never await them in the queue.
-  $.prompt.submit({ text: settleMessage(run, TOOL_NAME, settleAsks(run)) }).then(result => {
+  submitRunNews($, run, settleMessage(run, TOOL_NAME, settleAsks(run))).then(result => {
     if ('drop' in result) throw new Error(result.drop)
     return serialized(async () => {
       const current = runs.get(run.runId)
@@ -770,7 +807,7 @@ function keepSessionUp($: EngineInterface, agentId: string): void {
   keepAliveQueued = true
   const generation = holdGeneration
   debug($, `keep-alive prompt for ${run.runId}/${node.id}`)
-  $.prompt.submit({ text: keepAliveMessage(run, node.id) }).then(result => {
+  submitRunNews($, run, keepAliveMessage(run, node.id)).then(result => {
     if ('drop' in result) throw new Error(result.drop)
     // The host holds the prompt now: release the hold so its turn can start; that turn ends and holds afresh.
     if (generation === holdGeneration) {
@@ -831,7 +868,7 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   const after = await tick($, runId)
   if (!paneSurface && after && !isSettled(after)) {
     // No pane to watch: say that a node finished; the settle summary still goes through announce.
-    $.prompt.submit({ text: nodeMessage(after, node.id) }).catch(error => {
+    submitRunNews($, after, nodeMessage(after, node.id)).catch(error => {
       $.ui.log(`could not announce ${runId}/${node.id}: ${message(error)}`)
     })
   }
@@ -1712,6 +1749,8 @@ export function register(on: On, options: PluginOptions) {
     paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
     keepAliveQueued = false
+    // A new process: the conversation it serves (a resume) has not been told this process's state yet.
+    forgetDelivered()
     await restorePlanningLoaded($)
     if (jevEnabled) {
       try {
@@ -1795,6 +1834,8 @@ export function register(on: On, options: PluginOptions) {
     }
     const previous = sessionId
     sessionId = await $.session.id()
+    // A cleared or switched conversation holds no block yet; prompt.context records one again if it re-renders.
+    if (e.source === 'clear' || previous !== sessionId) forgetDelivered()
     if (previous && previous !== sessionId) {
       await serialized(async () => {
         for (const run of [...runs.values()]) {
@@ -1837,7 +1878,11 @@ export function register(on: On, options: PluginOptions) {
 
   on('prompt.context', async ($, e, next) => {
     if (!projectRoot || !sessionId) return next(e)
-    return next({ ...e, blocks: [...e.blocks.filter(block => block.name !== 'dag-workflow'), { name: 'dag-workflow', text: restorationContext() }] })
+    const block = restoration()
+    const result = await next({ ...e, blocks: [...e.blocks.filter(entry => entry.name !== 'dag-workflow'), { name: 'dag-workflow', text: block.text }] })
+    // Received only if it is still there: a hook beneath may drop or rewrite the conversation's blocks.
+    if (result.blocks.some(entry => entry.name === 'dag-workflow' && entry.text === block.text)) block.received()
+    return result
   })
 
   on('session.compact', async ($, e, next) => {
@@ -1849,9 +1894,11 @@ export function register(on: On, options: PluginOptions) {
       instructions: [e.instructions, 'Keep the user goal, pinned decisions and unresolved work. Workflow checkpoints and verification evidence, not completion claims, are authoritative.'].filter(Boolean).join('\n'),
     })
     if (compacted.skip !== undefined) return compacted
+    const block = restoration()
+    block.received()
     return {
       ...compacted,
-      messages: [...compacted.messages, { role: 'user' as const, text: `[dag-workflow context restoration]\n${restorationContext()}`, toolUses: [] }],
+      messages: [...compacted.messages, { role: 'user' as const, text: `[dag-workflow context restoration]\n${block.text}`, toolUses: [] }],
     }
   })
 
@@ -1885,7 +1932,15 @@ export function register(on: On, options: PluginOptions) {
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
       await persistContext($)
     }
-    return next({ ...e, context: [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive)]), restorationContext()] })
+    // The protocol rides on every prompt. The block (up to 8,000 characters) goes only on a user prompt whose run and
+    // note state the model has not received yet; a plugin's prompt never gets it, and the plugin's own carry the news.
+    // It counts as received only once the prompt entered: a hook beneath that drops it delivers nothing.
+    const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive)])]
+    const block = userOrigin && contextUnseen(delivered, contextSlices(workflowContext, [...runs.values()])) ? restoration() : undefined
+    if (block) context.push(block.text)
+    const result = await next({ ...e, context })
+    if (block && result.drop === undefined) block.received()
+    return result
   })
 
   on('classic.PermissionRequest', async ($, e, next) => {

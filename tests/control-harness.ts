@@ -25,6 +25,8 @@ export function harness(on: On) {
   const notices: { toolUseId: string; text: string | undefined }[] = []
   const sends: EventOf['session.send'][] = []
   const prompts: string[] = []
+  // Every prompt that reached the host, with the context hooks attached and where it came from.
+  const submits: { text: string; context: readonly string[]; origin: string }[] = []
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
   // permission: the Jev answer to a permission question; unset, the question gets the generic 'quick' answer.
@@ -113,13 +115,17 @@ export function harness(on: On) {
   on('ui.status', ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.toast', ($, e) => { toasts.push({ text: e.text, ...(e.timeoutMs === undefined ? {} : { timeoutMs: e.timeoutMs }) }); return { value: undefined } })
   on('ui.notice', ($, e) => { notices.push({ toolUseId: e.tool_use_id, text: e.text }); return { value: undefined } })
-  on('prompt.submit', ($, e) => { prompts.push(e.text); return { text: e.text } })
+  on('prompt.submit', ($, e) => {
+    prompts.push(e.text)
+    submits.push({ text: e.text, context: e.context ?? [], origin: e.origin.kind })
+    return { text: e.text }
+  })
   on('skill.prompt', ($, e) => ({ text: e.text }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PermissionRequest', () => ({}))
-  return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, locks, lockMtimes, control }
+  return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
 }
 
 export async function boot($: Engine) {
