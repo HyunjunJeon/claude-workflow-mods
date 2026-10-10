@@ -75,6 +75,20 @@ test('context parsing isolates identities and rejects malformed persisted fields
   expect(parsed?.requests[0] === record.requests[0]).toBe(false)
 })
 
+test('context parsing keeps only a true planning-skill flag and the edits carry it', () => {
+  const record = recordRequest(emptyContext('/project', 'session', 0), { at: 1, text: 'source' })
+  expect(parseContext({ ...record, planningLoaded: true }, '/project', 'session')).toEqual({ ...record, planningLoaded: true })
+  for (const planningLoaded of [false, 'true', 1, null, {}]) {
+    const parsed = parseContext({ ...record, planningLoaded }, '/project', 'session')
+    expect(parsed).toEqual(record)
+    expect(parsed && 'planningLoaded' in parsed).toBe(false)
+  }
+  const flagged = { ...record, planningLoaded: true as const }
+  expect(recordRequest(flagged, { at: 2, text: 'next' }).planningLoaded).toBe(true)
+  expect(addNote(flagged, { at: 2, text: 'pinned' }).planningLoaded).toBe(true)
+  expect(removeNote(addNote(flagged, { at: 2, text: 'pinned' }), 0).planningLoaded).toBe(true)
+})
+
 test('restoration projects current owned states and recorded evidence, not self-reports', () => {
   const record = addNote(recordRequest(emptyContext('/project', 'session', 0), { at: 1, text: 'current objective' }), { at: 2, text: 'pinned' })
   const active = run('active', 'running')

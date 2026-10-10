@@ -7,6 +7,9 @@ export type ContextRecord = {
   updatedAt: number
   requests: { at: number; text: string }[]
   notes: { at: number; text: string }[]
+  // The planning skill was loaded in this session. $.state holds the flag across /reload-plugins only; this file carries
+  // it into a new process that resumes the same session id. Present only as true.
+  planningLoaded?: true
 }
 
 // Source requests retain at most 20,000 UTF-16 code units, including an explicit
@@ -77,7 +80,10 @@ export function parseContext(value: unknown, projectRoot: string, sessionId: str
   if (!requests || !notes || requests.length > 8 ||
     requests.some(entry => entry.text.length > REQUEST_CAP) ||
     [...requests, ...notes].some(entry => entry.at > updatedAt)) return undefined
-  return { schemaVersion: 1, projectRoot, sessionId, updatedAt, requests, notes }
+  return {
+    schemaVersion: 1, projectRoot, sessionId, updatedAt, requests, notes,
+    ...('planningLoaded' in value && value.planningLoaded === true ? { planningLoaded: true as const } : {}),
+  }
 }
 
 function preview(text: string, cap = 240) {

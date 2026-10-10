@@ -73,13 +73,18 @@ function debug($: EngineInterface, text: string): void {
   $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
 }
 
-// The strict gate must outlive /reload-plugins: a reload re-runs register() and starts every module variable over, while
-// the conversation still holds the planning skill. The host keeps $.state across a reload, so the flag is written there
-// too; `planningLoaded` stays the fast in-process copy. The ref is declared in types/index.d.ts.
+// The strict gate must outlive the conversation's process, while the conversation still holds the planning skill.
+// `planningLoaded` is the fast in-process copy, and two stores carry it past a restart of the plugin's code:
+// - /reload-plugins re-runs register() and starts every module variable over; the host keeps $.state across it.
+//   The ref is declared in types/index.d.ts.
+// - claude --resume starts a new process under the same session id, and $.state lives only as long as the process, so
+//   the per-session context file (persistContext) also carries the flag, as `planningLoaded: true`.
 const PLANNING_FLAG = { plugin: 'dag-workflow', key: 'planningLoaded' } as const
 
-// A failed state call is only logged. set: the in-process flag has already changed and only the stored copy is lost, so a
-// later reload can drop it. restore (below): a failed or missing read leaves the gate as it is.
+// A failed store write is only logged: the in-process flag has already changed and only the stored copy is lost, so a
+// later reload or resume can drop it. Only true is written to the context file: the one false call is the /clear
+// branch, which runs before the session id changes, so writing there would strip the old session's own flag. The file
+// write stays a no-op until the session owns a run or a note (contextWanted); its first write then carries the flag.
 async function setPlanningLoaded($: EngineInterface, loaded: boolean): Promise<void> {
   planningLoaded = loaded
   try {
@@ -87,9 +92,16 @@ async function setPlanningLoaded($: EngineInterface, loaded: boolean): Promise<v
   } catch (error) {
     debug($, `could not store the planning-skill flag: ${message(error)}`)
   }
+  if (!loaded || !projectRoot || !sessionId || workflowContext.sessionId !== sessionId) return
+  try {
+    await persistContext($)
+  } catch (error) {
+    debug($, `could not store the planning-skill flag in the context file: ${message(error)}`)
+  }
 }
 
-// Only a stored true opens the gate here; a missing or unreadable flag keeps it closed, as a fresh session has it.
+// Reload: only a true in $.state opens the gate here. Resume: restorePlanningFromContext opens it from the context file.
+// A missing, unreadable or unparsable flag in either store keeps the gate closed, as a fresh session has it.
 async function restorePlanningLoaded($: EngineInterface): Promise<void> {
   try {
     if ((await $.state.get(PLANNING_FLAG)).value === true) planningLoaded = true
@@ -117,6 +129,8 @@ let t: Strings = stringsFor('en')
 let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
 let planningLoaded = false
+// Skill tool calls for the planning skill that a node worker has in flight; see the tool.call hook.
+let nodePlanningCalls = 0
 let interactive = true
 // A non-interactive main turn held open by holdUntilSettled. Each hold takes a new generation and returns once its
 // generation is stale, so a hold handed off to a keep-alive prompt, or replaced by a newer hold, stops spinning.
@@ -426,6 +440,11 @@ function contextWanted(): boolean {
 async function persistContext($: EngineInterface): Promise<void> {
   if (!contextWanted()) return
   const path = contextPath()
+  // The written flag comes from the module variable at every write, never from a value already on workflowContext: a
+  // /clear copies the previous session's context into the new one with a spread, and its flag must not come along.
+  // The stamped record goes back into workflowContext so the `context` action shows what the file holds.
+  const { planningLoaded: _carried, ...record } = workflowContext
+  workflowContext = planningLoaded ? { ...record, planningLoaded: true } : record
   const content = JSON.stringify(workflowContext)
   const result = metadataWrites.then(async () => {
     await ensureDir($, `${projectRoot}/${DAG_SUBDIR}/context`)
@@ -448,6 +467,11 @@ async function loadMetadata($: EngineInterface): Promise<void> {
     decisionRecords = parseDecisionLog(JSON.parse(await $.fs.read(decisionsPath)), projectRoot, sessionId)
   }
   userRequest = workflowContext.requests.at(-1)?.text ?? ''
+}
+
+// Called after loadMetadata: a context file of this session that records the planning skill opens the gate.
+async function restorePlanningFromContext($: EngineInterface): Promise<void> {
+  if (workflowContext.sessionId === sessionId && workflowContext.planningLoaded === true) await setPlanningLoaded($, true)
 }
 
 async function refreshSessions($: EngineInterface, closed = false): Promise<void> {
@@ -1716,6 +1740,7 @@ export function register(on: On, options: PluginOptions) {
     } catch (error) {
       $.ui.log(`could not restore workflow context: ${message(error)}`)
     }
+    await restorePlanningFromContext($)
     try {
       await refreshSessions($)
       await serialized(async () => {
@@ -1777,6 +1802,7 @@ export function register(on: On, options: PluginOptions) {
         }
       })
       await loadMetadata($)
+      if (e.source !== 'clear') await restorePlanningFromContext($)
       if (e.source === 'clear' && workflowContext.requests.length === 0) {
         workflowContext = { ...previousContext, sessionId, updatedAt: await $.clock.now() }
         userRequest = workflowContext.requests.at(-1)?.text ?? ''
@@ -1847,7 +1873,8 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('skill.prompt', async ($, e, next) => {
-    if (isPlanningSkill(e.skill)) await setPlanningLoaded($, true)
+    // Skipped while a node's own planning-skill call is in flight: that load is the node's, not the conversation's.
+    if (isPlanningSkill(e.skill) && nodePlanningCalls === 0) await setPlanningLoaded($, true)
     return next(e)
   })
 
@@ -1935,9 +1962,17 @@ export function register(on: On, options: PluginOptions) {
         return { deny: `Claude Code refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files ("Subagents should return findings as text, not write report files"). Put the full file text in ## Output (or write ${owner.nodeId}-notes.md); the main conversation writes the requested file after the run settles. Bash, mv or a rename is no way around it.` }
       }
       activity.set(agentId, toolStarted(e.tool, Date.now()))
+      // A node loads its skills with the Skill tool (node-prompt.ts), and skill.prompt carries no agent id, so it cannot
+      // tell that load from the conversation's own and would open the main gate. Count the node's planning-skill call
+      // while it is in flight and let skill.prompt skip meanwhile. Assumes the host expands the skill's prompt inside
+      // the Skill tool call; if skill.prompt fires outside it, the gate opens as it did before. A typed /planning in the
+      // main conversation has no such call and still opens the gate; a main-loop Skill call is covered by the branch above.
+      const nodeSkillLoad = e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)
+      if (nodeSkillLoad) nodePlanningCalls += 1
       try {
         return await next(e)
       } finally {
+        if (nodeSkillLoad) nodePlanningCalls -= 1
         if (activity.get(agentId)?.phase === 'tool') activity.set(agentId, stepStarted(Date.now()))
       }
     } finally {
