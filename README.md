@@ -34,6 +34,7 @@ claude --plugin-dir /path/to/claude-workflow-mods
 
 ```text
 /dag run flows/review.yaml      JSON 또는 YAML 정의 파일 실행
+/dag preview <file>             정의 파일을 실행하지 않고 단계·모델·쓰기 충돌·경고 미리보기
 /dag                            DAG 패널 열기
 /dag list                       이 프로젝트의 실행 목록
 /dag status <run_id>            노드별 상태
@@ -311,6 +312,7 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | `start {definition}`                       | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict`. 결과에 계약 점검 `warnings` 포함             |
 | `start {path}`                             | `definition` 대신 프로젝트 상대 `.yaml`/`.yml`/`.json` 정의 파일 경로를 받습니다. `/dag run`과 똑같이 읽고 파싱한 뒤 `start {definition}`과 똑같이 시작하므로 계획 스킬 게이트, 린트 `warnings`, 키 재사용이 같습니다. `definition`과 `path` 중 정확히 하나만 허용하며 둘 다 주거나 둘 다 없으면 `invalid_request`입니다. 경로는 `..` 없는 프로젝트 상대 경로이고 `.claude` 밖이며 위 확장자여야 하고, 어기면 `invalid_request`입니다. 읽기나 파싱에 실패하면 경로를 담은 `definition_unreadable`을 돌려줍니다. 모델이 YAML 흐름을 JSON으로 직접 옮겨 적지 않아도 되며, `/dag run`은 계속 사용자 명령이고 절대 경로도 받습니다 |
+| `start {dryRun: true}`                     | 정의를 검증만 하고 실행은 만들지 않은 채 `{dry_run: true, preview}`를 돌려줍니다. `definition` 또는 `path`와 함께 씁니다. `preview`에는 단계별 노드 id `waves`, `critical_path`, `node_count`, 노드별 `nodes`(`wave`, 실효 `category`, `model`, `agent`, `depends_on`, `checks`, `writes`, `load_skills`), 동시에 실행될 수 있는 노드끼리 `writes`가 겹치는 쌍 `write_conflicts`, `widest_wave`, `max_concurrent`, `start`가 돌려주는 것과 같은 린트 `warnings`가 들어 있고, 같은 키로 같은 정의가 이미 실행됐다면 `existing_run_id`도 붙습니다. `writes`를 선언하지 않은 노드는 `writes`가 null이고, 그런 노드 중 다른 노드와 동시에 실행될 수 있는 것은 `unchecked_writes`에 나열됩니다. 이 노드들은 충돌을 점검하지 못했다는 뜻이며, `writes: []`는 읽기 전용으로 선언한 범위입니다. 알 수 없는 category는 `warnings`에 경고가 추가됩니다. `routing_note`는 category와 모델이 정의가 내놓은 제안값이며 실제로 시작할 때 Jev가 노드를 다시 분류할 수 있다고 알려 주므로, 표시된 category는 최종 감사 규칙까지 적용한 제안값입니다. 계획 스킬 게이트는 드라이런에도 적용됩니다. `dryRun`이 불리언이 아니면 `invalid_request`로 거부하고, `amend`는 `dryRun`을 받지 않고 거부합니다. 사용자는 `/dag preview <file>`로 정의 파일에 같은 미리보기를 볼 수 있습니다. `/dag preview`는 계획 스킬 게이트를 받지 않는 사용자 명령이며, 아무것도 시작하지 않으므로 `/dag run`과 달리 모델 턴 중에도 즉시 실행됩니다 |
 | `snapshot {run_id}` / `list`               | 상태 조회(노드 답변 발췌 포함)                                                                            |
 | `wait {run_id}`                            | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다                                   |
 | `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |

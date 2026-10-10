@@ -162,6 +162,7 @@ The run is done when the goal's observable condition holds, not merely when the 
 - One run covers one phase. If the next phase depends on this one's findings, read the settled outputs. Then `start` a run under a new key, with the needed facts in its prompts.
 - The user can execute definition files with `/dag run <file.yaml|json>` and watch runs in the `/dag` pane.
 - To run a definition that already exists as a file (for example `flows/<name>.yaml`), call `start {path}` with the project-relative `.yaml`, `.yml` or `.json` path instead of transcribing it into `definition`. Pass exactly one of `path` and `definition`. The same planning gate, lint `warnings` and key reuse apply. A bad path returns `invalid_request`; an unreadable or unparsable file returns `definition_unreadable`.
+- To check the waves, models, write conflicts and lint warnings before starting, call `start` with `dryRun: true` (with `definition` or `path`); it validates and returns a preview but creates no run. Nodes without `writes` are listed in `unchecked_writes`.
 
 ## Recovering a node - retry, amend, send
 
