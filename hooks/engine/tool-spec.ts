@@ -11,7 +11,7 @@ export const TOOL_DESCRIPTION = [
   'A node receives the outputs of the nodes in its dependsOn, so list exactly the nodes whose results it needs. Ready nodes run in parallel waves; a failed node skips its dependents.',
   'Definition: "key" (same key and definition returns the existing run; a different definition under that key is refused), "name", optional "goal" (shown to every node) and "nodes".',
   'Node: "id", a self-contained "prompt" saying what to do and produce, optional "dependsOn", "category" (model routing; Jev may override it), "agent" (subagent type such as Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
-  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
+  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} validates and previews waves, models, write conflicts and warnings, starting nothing; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
   'retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and their skipped dependents; completed nodes are reused); amend {run_id, definition} (re-runs changed nodes and their dependents, adds nodes);',
   'send {run_id, node_id, message} (steer a running node); attach {run_id} (adopt a run from another session).',
 ].join(' ')
@@ -63,6 +63,7 @@ export const INPUT_SCHEMA = {
       required: ['key', 'nodes'],
     },
     path: { type: 'string', description: 'start only: project-relative .yaml, .yml or .json definition file, instead of definition' },
+    dryRun: { type: 'boolean', description: 'start only: true previews the definition (waves, critical path, models, write conflicts, warnings) and starts nothing' },
     run_id: { type: 'string' },
     node_id: { type: 'string' },
     node_ids: { type: 'array', items: { type: 'string' } },

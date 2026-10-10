@@ -3,6 +3,7 @@ import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
+import { previewDefinition, type Preview } from './engine/preview.ts'
 import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
@@ -32,7 +33,7 @@ import {
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { fail, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
+import { fail, type Definition, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
@@ -45,7 +46,7 @@ import { buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const USAGE = 'Usage: /dag [list | run <file> | status <run> | cancel <run> | retry <run> [nodes...] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|guide|off] | view [auto|graph|lanes|timeline]]'
+const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|guide|off] | view [auto|graph|lanes|timeline]]'
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'guide', 'off']
 const REPORT_LIMIT = 4_000_000
 // A headless host waits for a held main turn.complete for 60 000 ms only ("[WARN] headless session: turn events still
@@ -976,25 +977,44 @@ async function recoverReport($: EngineInterface, agentId: string): Promise<strin
   return finalReport(rows as TranscriptRow[])
 }
 
-async function startDefinition($: EngineInterface, input: unknown): Promise<ToolReply> {
+// Both start and a dry run say so when the person or the model has not loaded the planning skill (guide mode lets the start through).
+function planningWarning(): string[] {
+  return planningLoaded || enforcement === 'off' ? [] : [`the ${PLANNING_SKILL} skill is not loaded in this session - load it and follow its node prompt contract.`]
+}
+
+// The checks start runs before it creates anything, in start's order: parse, then the key, then verification. A key that already
+// holds this same definition comes back as `existing` and skips verification, as start's `reused` reply does. Start and a dry run share this.
+function screenDefinition(input: unknown): Result<{ definition: Definition; existing: Run | undefined }> {
   const parsed = parseDefinition(input)
-  if (!parsed.ok) return err(parsed.error)
+  if (!parsed.ok) return parsed
   const reusable = findReusable([...runs.values()], parsed.value)
-  if (!reusable.ok) return err(reusable.error)
-  if (reusable.value) return ok({ reused: true, run_id: reusable.value.runId, snapshot: snapshotOf(reusable.value) })
+  if (!reusable.ok) return reusable
+  if (reusable.value) return { ok: true, value: { definition: parsed.value, existing: reusable.value } }
   const problem = verificationProblem(parsed.value)
-  if (problem) return err(problem)
+  if (problem) return { ok: false, error: problem }
+  return { ok: true, value: { definition: parsed.value, existing: undefined } }
+}
+
+// A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
+function previewRequest(input: unknown): Result<{ preview: Preview; existing: Run | undefined }> {
+  const screened = screenDefinition(input)
+  if (!screened.ok) return screened
+  return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
+}
+
+async function startDefinition($: EngineInterface, input: unknown): Promise<ToolReply> {
+  const screened = screenDefinition(input)
+  if (!screened.ok) return err(screened.error)
+  const { definition, existing } = screened.value
+  if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
   const now = await $.clock.now()
   const runId = `dag_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-  const created = await routeRun($, createRun(parsed.value, { runId, sessionId, now }), parsed.value.nodes.map(node => node.id))
+  const created = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
   runs.set(runId, created)
   view = { ...view, runIndex: 0 }
   const started = (await tick($, runId)) ?? created
   await openPane($, false)
-  const warnings = [
-    ...lintDefinition(parsed.value),
-    ...(planningLoaded || enforcement === 'off' ? [] : [`the ${PLANNING_SKILL} skill is not loaded in this session - load it and follow its node prompt contract.`]),
-  ]
+  const warnings = [...lintDefinition(definition), ...planningWarning()]
   return ok({
     reused: false,
     run_id: runId,
@@ -1017,31 +1037,49 @@ async function readDefinitionFile($: EngineInterface, path: string, shown = path
 
 // start takes the definition inline or by project-relative file path; either way it ends in startDefinition,
 // so the planning gate (in the tool.call hook), lint warnings and key reuse behave identically.
+// With dryRun:true it ends in previewRequest instead: the same reading, parsing and key checks, then a preview and nothing started.
+// A dryRun that is present but not a boolean is refused before anything is read: a request meant to start nothing must not start a run.
 async function startRequest($: EngineInterface, input: ToolInput): Promise<ToolReply> {
+  if (input.dryRun !== undefined && typeof input.dryRun !== 'boolean') return err({ code: 'invalid_request', message: 'dryRun must be true or false.' })
+  const source = await requestedDefinition($, input)
+  if (!source.ok) return err(source.error)
+  if (input.dryRun !== true) return startDefinition($, source.value)
+  const previewed = previewRequest(source.value)
+  if (!previewed.ok) return err(previewed.error)
+  const { preview, existing } = previewed.value
+  return ok({
+    dry_run: true,
+    preview: { ...preview, warnings: [...preview.warnings, ...planningWarning()] },
+    ...(existing ? { existing_run_id: existing.runId } : {}),
+  })
+}
+
+async function requestedDefinition($: EngineInterface, input: ToolInput): Promise<Result<unknown>> {
   const hasDefinition = input.definition !== undefined && input.definition !== null
   const hasPath = input.path !== undefined && input.path !== null
   if (hasDefinition === hasPath) {
-    return err({
-      code: 'invalid_request',
-      message: `start takes exactly one of "definition" (the definition object) and "path" (a project-relative .yaml, .yml or .json definition file); got ${hasPath ? 'both' : 'neither'}.`,
-    })
+    return fail(
+      'invalid_request',
+      `start takes exactly one of "definition" (the definition object) and "path" (a project-relative .yaml, .yml or .json definition file); got ${hasPath ? 'both' : 'neither'}.`,
+    )
   }
-  if (!hasPath) return startDefinition($, input.definition)
+  if (!hasPath) return { ok: true, value: input.definition }
   const given = input.path
   if (typeof given !== 'string' || given.trim() === '') {
-    return err({ code: 'invalid_request', message: '"path" must be a nonempty string naming a project-relative .yaml, .yml or .json definition file.' })
+    return fail('invalid_request', '"path" must be a nonempty string naming a project-relative .yaml, .yml or .json definition file.')
   }
   if (!projectPath(given)) {
-    return err({ code: 'invalid_request', message: `"path" ${JSON.stringify(given)} must be project-relative: no leading "/", drive letter or ".." segment, and nothing inside .claude.` })
+    return fail('invalid_request', `"path" ${JSON.stringify(given)} must be project-relative: no leading "/", drive letter or ".." segment, and nothing inside .claude.`)
   }
   if (!/\.(ya?ml|json)$/i.test(given)) {
-    return err({ code: 'invalid_request', message: `"path" ${JSON.stringify(given)} must end in .yaml, .yml or .json.` })
+    return fail('invalid_request', `"path" ${JSON.stringify(given)} must end in .yaml, .yml or .json.`)
   }
-  const read = await readDefinitionFile($, `${await $.session.cwd()}/${given}`, given)
-  return read.ok ? startDefinition($, read.value) : err(read.error)
+  return readDefinitionFile($, `${await $.session.cwd()}/${given}`, given)
 }
 
 async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolReply> {
+  // Only start can preview. On amend, retry, cancel and the rest a dryRun would otherwise be ignored and the action would run for real.
+  if (input.action !== 'start' && input.dryRun !== undefined) return err({ code: 'invalid_request', message: 'dryRun is for start only.' })
   if (input.action === 'context') return ok({ source: contextPath(), context: workflowContext, summary: JSON.parse(restorationContext()) })
   if (input.action === 'decisions') return ok({ decisions: decisionRecords })
   if (input.action === 'sessions') {
@@ -1219,6 +1257,34 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
   }
 }
 
+// /dag run and /dag preview take an absolute path as typed and anything else relative to the project.
+async function commandFilePath($: EngineInterface, given: string): Promise<string> {
+  return given.startsWith('/') ? given : `${await $.session.cwd()}/${given}`
+}
+
+// The text of /dag preview, plain English like /dag status. previewRequest adds no planning-skill warning, since a command is not
+// gated by that skill, so the warnings are the preview's own.
+function previewText(preview: Preview, existingRunId: string | undefined): string {
+  const byId = new Map(preview.nodes.map(node => [node.id, node]))
+  const lines = [
+    `Preview (nothing started): ${preview.node_count} nodes, ${preview.waves.length} waves, widest wave ${preview.widest_wave}, max concurrent ${preview.max_concurrent}`,
+    preview.routing_note,
+    ...(existingRunId ? [`This definition is already run ${existingRunId}; /dag run would reuse it.`] : []),
+    ...preview.waves.map((ids, index) => `  wave ${index + 1}: ${ids.map(id => {
+      const node = byId.get(id)
+      return node ? `${id} (${node.category} -> ${node.model})` : id
+    }).join(', ')}`),
+    `Critical path: ${preview.critical_path.join(' -> ')}`,
+  ]
+  if (preview.write_conflicts.length) {
+    lines.push('Write conflicts (can run at the same time):')
+    for (const conflict of preview.write_conflicts) lines.push(`  ${conflict.a} <-> ${conflict.b}: ${conflict.paths.join(', ')}`)
+  }
+  if (preview.unchecked_writes.length) lines.push(`unchecked write scope (no writes declared): ${preview.unchecked_writes.join(', ')}`)
+  if (preview.warnings.length) lines.push('Warnings:', ...preview.warnings.map(warning => `- ${warning}`))
+  return lines.join('\n')
+}
+
 async function runCommand($: EngineInterface, args: string): Promise<{ text?: string }> {
   const [verb = 'open', ...rest] = splitArgs(args)
   if (verb === 'inspect') {
@@ -1278,11 +1344,19 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     if (level) enforcement = level
     return { text: `DAG enforcement: ${enforcement}` }
   }
+  if (verb === 'preview') {
+    const given = rest.join(' ')
+    if (!given) return { text: USAGE }
+    const read = await readDefinitionFile($, await commandFilePath($, given))
+    if (!read.ok) return { text: read.error.message }
+    const previewed = previewRequest(read.value)
+    if (!previewed.ok) return { text: `DAG not previewed:\n${JSON.stringify({ error: previewed.error }, null, 2)}` }
+    return { text: previewText(previewed.value.preview, previewed.value.existing?.runId) }
+  }
   if (verb === 'run') {
     const given = rest.join(' ')
     if (!given) return { text: USAGE }
-    const path = given.startsWith('/') ? given : `${await $.session.cwd()}/${given}`
-    const read = await readDefinitionFile($, path)
+    const read = await readDefinitionFile($, await commandFilePath($, given))
     if (!read.ok) return { text: read.error.message }
     const reply = await startDefinition($, read.value)
     if (reply.isError) return { text: `DAG not started:\n${reply.result}` }
@@ -1820,7 +1894,7 @@ export function register(on: On, options: PluginOptions) {
     await $.command.register({
       name: 'dag',
       description: 'Open the DAG pane, or run, list, inspect, cancel or retry DAG workflows, or set enforcement',
-      argumentHint: '[list | run <file> | status <run> | cancel <run> | retry <run> [node...] | enforce [strict|guide|off]]',
+      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | enforce [strict|guide|off]]',
       immediate: true,
     })
     return next(e)
