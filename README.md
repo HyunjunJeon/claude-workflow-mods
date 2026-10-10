@@ -51,9 +51,12 @@ claude --plugin-dir /path/to/claude-workflow-mods
 /dag handoff <run> <session>    실행을 다른 세션에 넘기겠다고 제안
 /dag handoff <run> cancel       보낸 제안 취소
 /dag accept <run>               나에게 온 제안 수락
+/dag approve <run>              승인 대기 중인 실행을 승인하고 시작
+/dag reject <run> [reason]      승인 대기 중인 실행을 거부하고 취소(사유는 모델에 전달)
+/dag approval [off|always]      모델이 시작한 실행의 승인 설정(start_approval) 확인·이 세션에서만 변경
 ```
 
-`handoff`, `accept`, `note`는 사용자가 직접 입력하거나 패널 버튼을 눌러야 실행됩니다. 모델이 대신 실행할 수 없습니다.
+`handoff`, `accept`, `note`, `approve`, `reject`, `approval`은 사용자가 직접 입력하거나 패널 버튼을 눌러야 실행됩니다. 모델이 대신 실행할 수 없습니다.
 
 `/dag run`과 `/dag retry`를 모델 턴이 진행 중일 때 입력하면 정의를 바로 검증하고 실행을 보류 상태로 저장한 뒤, 그 턴이 끝날 때(중단된 턴 포함) 시작합니다. 모델이 턴 안에서 호출하는 `dag` 도구는 계속 즉시 시작합니다.
 
@@ -305,6 +308,8 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 - 노드 상태는 서브에이전트 턴 종료 이유로 정합니다. `aborted`면 `cancelled`, `error`/`refusal`이면 `failed`이고, 답변 마지막 줄이 `DAG_NODE_STATUS: failed: <이유>`여도 `failed`입니다.
 - 실행이 끝나면 세션에 "완료 주장은 증거로 확인하기 전까지 거짓으로 취급하라"는 지침과 함께 요약 메시지가 들어갑니다.
 
+`start_approval`을 `always`로 하면(기본 `off`) 대화형 세션에서 모델이 `dag` 도구로 시작한 실행은 만들어지기만 하고 노드를 하나도 시작하지 않은 채 보류됩니다. `start` 응답과 스냅샷에 `awaiting_approval: true`와 안내 문구가 붙고, 모델은 사용자에게 한 번 알린 뒤 턴을 끝냅니다. DAG 패널의 Approve 버튼이나 `/dag approve <run_id>`로 승인하면 실행이 시작되고 모델에 승인되어 시작됐다는 메시지가 갑니다. 패널의 Reject 버튼이나 `/dag reject <run_id> [reason]`으로 거부하면 실행이 `Rejected by the user: <reason>`으로 취소되고 모델에 거부되어 아무것도 실행되지 않았다는 메시지가 갑니다. `/dag approval [off|always]`는 지금 유효한 설정을 보여 주거나 이 세션에서만 덮어씁니다. 이 세 명령은 사용자 전용이라 모델이 실행할 수 없습니다. 예외가 둘 있습니다. 사용자가 직접 입력한 `/dag run`과 비대화형 세션(`claude -p`)은 설정과 관계없이 기다리지 않고 바로 시작합니다.
+
 ### `dag` 도구 액션
 
 
@@ -401,6 +406,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `max_concurrent`               | `8`       | 실행 하나에서 동시에 도는 노드 수                                                                                               |
 | `retention_days`               | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
 | `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
+| `start_approval`               | `off`     | `always`면 대화형 세션에서 모델이 시작한 실행을 만들되 시작하지 않고 사용자의 승인을 기다림([실행 규칙](#실행-규칙)). 사용자가 입력한 `/dag run`과 비대화형 세션은 기다리지 않음 |
 
 
 ### 보관 기간
