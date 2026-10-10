@@ -115,7 +115,7 @@ async function runScenario(scenario: Scenario, root: string, options: Options): 
   await Bun.$`mkdir -p ${dir}`.quiet()
   for (const [path, content] of Object.entries(scenario.files)) await Bun.write(`${dir}/${path}`, content)
   // The generated review nodes read the change through git (rev-parse, status, diff), and on 2026-10-10 none of the 8 planners added a review pair on the non-git fixtures (eval/baselines/stages-baseline.md).
-  // No nothrow, so a failed init stops this scenario; --allow-empty because pipeline-stats, diamond-app and research-write start with no files.
+  // No nothrow: a failed git step rejects the pool, so the whole run stops before any results file is written; --allow-empty because pipeline-stats, diamond-app and research-write start with no files.
   await Bun.$`git init -q`.cwd(dir).quiet()
   await Bun.$`git add -A`.cwd(dir).quiet()
   await Bun.$`git -c user.name=dag-eval -c user.email=dag-eval@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m fixture`.cwd(dir).quiet()
