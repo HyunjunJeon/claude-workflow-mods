@@ -61,6 +61,10 @@ export type Strings = {
   toastHandoff: string
   toastSettledFailed: (run: string, failed: number) => string
   toastPaneWaiting: (reason: string) => string
+  toastApproval: (run: string) => string
+  approvalWaiting: string
+  approve: string
+  reject: string
   runDeferred: string
   bandOpen: string
   bandRunning: (count: number) => string
@@ -138,6 +142,10 @@ const EN: Strings = {
   toastHandoff: 'A DAG run was offered to this session. Open /dag sessions to accept it.',
   toastSettledFailed: (run, failed) => `DAG ${run} settled with ${failed} failed node(s)`,
   runDeferred: 'The run starts when the current turn ends.',
+  toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
+  approvalWaiting: 'Waiting for your approval: no node starts until you approve this run.',
+  approve: 'approve',
+  reject: 'reject',
   toastPaneWaiting: reason => `DAG pane not shown · type 0 at an empty prompt or run /dag to open it (${reason})`,
   bandOpen: 'DAG pane',
   bandRunning: count => `${count} running`,
@@ -215,6 +223,10 @@ const KO: Strings = {
   toastHandoff: '이 세션에 DAG 실행이 넘어왔습니다. /dag sessions에서 수락하세요.',
   toastSettledFailed: (run, failed) => `DAG ${run} 종료: 실패 노드 ${failed}개`,
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
+  toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
+  approvalWaiting: '승인 대기 중: 이 실행을 승인하기 전에는 어떤 노드도 시작하지 않습니다.',
+  approve: '승인',
+  reject: '거절',
   toastPaneWaiting: reason => `DAG 패널 미표시 · 빈 프롬프트에서 0을 입력하거나 /dag로 여세요 (${reason})`,
   bandOpen: 'DAG 패널',
   bandRunning: count => `실행 중 ${count}`,

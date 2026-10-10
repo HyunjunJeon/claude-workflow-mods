@@ -53,6 +53,13 @@
       "options": ["strict", "guide", "off"],
       "default": "strict"
     },
+    "start_approval": {
+      "type": "string",
+      "title": "Approve runs before they start",
+      "description": "always: a run the model starts in an interactive session waits until you approve it in the /dag pane or with /dag approve; off: runs start at once",
+      "options": ["off", "always"],
+      "default": "off"
+    },
     "main_allowed_tools": {
       "type": "string",
       "title": "Extra main-conversation tools",

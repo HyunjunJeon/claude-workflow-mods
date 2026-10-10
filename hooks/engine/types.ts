@@ -102,6 +102,8 @@ export type Run = {
     requestedAt: number
     offeredAt?: number
   }
+  // A pending user approval: while set, no node starts. Absent means none.
+  approval?: { requestedAt: number }
 }
 
 export type EngineError = { code: string; message: string }

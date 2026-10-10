@@ -86,6 +86,8 @@ export function advance(input: Run, now: number): Run {
 }
 
 export function nextToStart(run: Run, maxConcurrent: number): string[] {
+  // A run held for approval starts nothing, even if a caller forgets to check.
+  if (run.approval) return []
   const running = run.nodes.filter(n => n.state === 'running').length
   const slots = Math.max(0, maxConcurrent - running)
   return run.nodes.filter(n => n.state === 'scheduled').slice(0, slots).map(n => n.id)
@@ -151,7 +153,9 @@ export function nodeForAgent(run: Run, agentId: string): NodeRun | undefined {
   return run.nodes.find(n => n.agentId === agentId && n.state === 'running')
 }
 
-export function cancelRun(input: Run, reason: string, now: number): { run: Run; stopAgents: string[] } {
+// Ends every node that has not finished and marks the run cancelled. A running node that owns an agent is left for the
+// caller to stop (its id comes back in stopAgents); `nodeError` is the text each ended node records.
+function endUnfinished(input: Run, reason: string, nodeError: string, now: number): { run: Run; stopAgents: string[] } {
   const run = clone(input)
   run.cancelReason = reason
   const stopAgents: string[] = []
@@ -159,11 +163,40 @@ export function cancelRun(input: Run, reason: string, now: number): { run: Run; 
     if (node.state === 'running' && node.agentId) stopAgents.push(node.agentId)
     else if (ACTIVE.has(node.state) || node.state === 'paused') {
       node.state = 'cancelled'
-      node.error = `Cancelled: ${reason}`
+      node.error = nodeError
       node.finishedAt = now
     }
   }
   return { run: advance(run, now), stopAgents }
+}
+
+export function cancelRun(input: Run, reason: string, now: number): { run: Run; stopAgents: string[] } {
+  return endUnfinished(input, reason, `Cancelled: ${reason}`, now)
+}
+
+// Holds a run for the user to approve: nextToStart returns nothing until approveRun or rejectRun clears it.
+export function requestApproval(input: Run, now: number): Run {
+  const run = clone(input)
+  run.approval = { requestedAt: now }
+  run.updatedAt = now
+  return run
+}
+
+export function approveRun(input: Run, now: number): Run {
+  const run = clone(input)
+  delete run.approval
+  run.updatedAt = now
+  return run
+}
+
+// Cancels a held run the way a user cancel does. Nothing runs while an approval is pending, so no agent needs stopping.
+// The run's cancelReason is the same text each node records as its error.
+export function rejectRun(input: Run, reason: string, now: number): Run {
+  const detail = reason.trim()
+  const text = detail ? `Rejected by the user: ${detail}` : 'Rejected by the user.'
+  const held = clone(input)
+  delete held.approval
+  return endUnfinished(held, text, text, now).run
 }
 
 export function pauseRunning(input: Run, now: number): Run {
@@ -312,6 +345,7 @@ export type RunSnapshot = {
   session_id: string
   created_at: number
   updated_at: number
+  awaiting_approval?: true
   nodes: NodeSnapshot[]
   edges: Edge[]
 }
@@ -326,6 +360,7 @@ export function snapshotOf(run: Run, answerChars = 2_000): RunSnapshot {
     session_id: run.sessionId,
     created_at: run.createdAt,
     updated_at: run.updatedAt,
+    ...(run.approval ? { awaiting_approval: true as const } : {}),
     nodes: run.nodes.map(n => ({
       id: n.id,
       label: n.label,

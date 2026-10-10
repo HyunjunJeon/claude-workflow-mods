@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
@@ -14,6 +14,7 @@ import { projectPath, verificationProblem } from './engine/verification.ts'
 import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
 import {
   amendRun,
+  approveRun,
   cancelRun,
   createRun,
   failToStart,
@@ -24,6 +25,8 @@ import {
   nextToStart,
   nodeForAgent,
   pauseRunning,
+  rejectRun,
+  requestApproval,
   requeueLost,
   resumePaused,
   retryRun,
@@ -46,8 +49,12 @@ import { buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|guide|off] | view [auto|graph|lanes|timeline]]'
+const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|guide|off] | view [auto|graph|lanes|timeline]]'
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'guide', 'off']
+type StartApproval = 'off' | 'always'
+const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
+const USER_ONLY = 'This action requires a user command or pane control.'
+const APPROVAL_NOTE = 'The user must approve this run in the /dag pane or with /dag approve <run_id> before any node starts. Do not poll; you will receive a message when it is approved or rejected.'
 const REPORT_LIMIT = 4_000_000
 // A headless host waits for a held main turn.complete for 60 000 ms only ("[WARN] headless session: turn events still
 // running after 60000ms; the turn ends without them", measured in a live `claude -p` run); it does not abort the hold.
@@ -129,6 +136,9 @@ let retentionDays = 14
 let t: Strings = stringsFor('en')
 let nodeMessages: 'compact' | 'full' = 'compact'
 let enforcement: Enforcement = 'strict'
+// start_approval from settings, and the /dag approval override that wins over it until the plugin's code reloads.
+let startApproval: StartApproval = 'off'
+let approvalOverride: StartApproval | undefined
 let planningLoaded = false
 // Skill tool calls for the planning skill that a node worker has in flight; see the tool.call hook.
 let nodePlanningCalls = 0
@@ -730,7 +740,8 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
     }
     await refreshSessions($)
     if (run.handoff?.offeredAt !== undefined && current.handoff?.offeredAt === undefined) await notifyHandoff($, run)
-    if (!run.handoff && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
+    // A run held for approval keeps its roots scheduled with nothing running: looping again would never end.
+    if (!run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
     if (!isSettled(run)) {
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
@@ -746,24 +757,36 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
   }
 }
 
-async function announce($: EngineInterface, run: Run): Promise<void> {
+// The host refuses $.prompt.submit from inside a command.run hook ("it would wait on the turn this hook is holding"), so
+// news a /dag command causes goes out on the clock, once the hook has returned. The pane buttons share the same path.
+function afterHook($: EngineInterface, send: () => void): void {
+  $.clock.after(0, send)
+}
+
+// `text` replaces the settle summary when the settle has its own news (a rejected run, where nothing ran to summarize);
+// `deferred` sends it through afterHook.
+async function announce($: EngineInterface, run: Run, text?: string, deferred = false): Promise<void> {
   $.ui.invalidate('ui.render')
   if (!isSettled(run) || run.settledNotified || settleSubmits.has(run.runId)) return
   settleSubmits.add(run.runId)
-  // Plugin submissions run once idle; never await them in the queue.
-  submitRunNews($, run, settleMessage(run, TOOL_NAME, settleAsks(run))).then(result => {
-    if ('drop' in result) throw new Error(result.drop)
-    return serialized(async () => {
-      const current = runs.get(run.runId)
-      if (current?.sessionId === sessionId && isSettled(current)) {
-        await persist($, { ...current, settledNotified: true })
-      }
+  const send = () => {
+    // Plugin submissions run once idle; never await them in the queue.
+    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run))).then(result => {
+      if ('drop' in result) throw new Error(result.drop)
+      return serialized(async () => {
+        const current = runs.get(run.runId)
+        if (current?.sessionId === sessionId && isSettled(current)) {
+          await persist($, { ...current, settledNotified: true })
+        }
+      })
+    }).catch(error => {
+      $.ui.log(`could not tell the session that ${run.runId} settled: ${message(error)}`)
+    }).finally(() => {
+      settleSubmits.delete(run.runId)
     })
-  }).catch(error => {
-    $.ui.log(`could not tell the session that ${run.runId} settled: ${message(error)}`)
-  }).finally(() => {
-    settleSubmits.delete(run.runId)
-  })
+  }
+  if (deferred) afterHook($, send)
+  else send()
 }
 
 async function stopAgent($: EngineInterface, agentId: string): Promise<string | undefined> {
@@ -1002,25 +1025,42 @@ function previewRequest(input: unknown): Result<{ preview: Preview; existing: Ru
   return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
 }
 
-async function startDefinition($: EngineInterface, input: unknown): Promise<ToolReply> {
+function effectiveApproval(): StartApproval {
+  return approvalOverride ?? startApproval
+}
+
+// Held: approval pending on a run that has not settled. A cancel can end a held run; it then waits for nothing.
+function awaitingApproval(run: Run): boolean {
+  return Boolean(run.approval) && !isSettled(run)
+}
+
+// `by` is who asked: the model's dag tool, or the person's /dag run. Only a model start in an interactive session waits
+// for approval; a person who typed /dag run has already chosen, and a non-interactive session has no one to ask.
+async function startDefinition($: EngineInterface, input: unknown, by: 'model' | 'user'): Promise<ToolReply> {
   const screened = screenDefinition(input)
   if (!screened.ok) return err(screened.error)
   const { definition, existing } = screened.value
   if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
   const now = await $.clock.now()
   const runId = `dag_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-  const created = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
+  const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
+  const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
   view = { ...view, runIndex: 0 }
   const started = (await tick($, runId)) ?? created
   await openPane($, false)
+  const held = awaitingApproval(started)
+  if (held) $.ui.toast(t.toastApproval(started.name), { timeoutMs: ATTENTION_TOAST_MS })
   const warnings = [...lintDefinition(definition), ...planningWarning()]
   return ok({
     reused: false,
     run_id: runId,
+    ...(held ? { awaiting_approval: true } : {}),
     snapshot: snapshotOf(started, 0),
     warnings,
-    note: 'The run continues in the background. You will receive a message when it settles; do not poll. Treat every warning as a defect in the definition.',
+    note: held
+      ? APPROVAL_NOTE
+      : 'The run continues in the background. You will receive a message when it settles; do not poll. Treat every warning as a defect in the definition.',
   })
 }
 
@@ -1043,7 +1083,7 @@ async function startRequest($: EngineInterface, input: ToolInput): Promise<ToolR
   if (input.dryRun !== undefined && typeof input.dryRun !== 'boolean') return err({ code: 'invalid_request', message: 'dryRun must be true or false.' })
   const source = await requestedDefinition($, input)
   if (!source.ok) return err(source.error)
-  if (input.dryRun !== true) return startDefinition($, source.value)
+  if (input.dryRun !== true) return startDefinition($, source.value, 'model')
   const previewed = previewRequest(source.value)
   if (!previewed.ok) return err(previewed.error)
   const { preview, existing } = previewed.value
@@ -1102,7 +1142,9 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
   if (input.action === 'wait') {
     const note = isSettled(run)
       ? 'The run has settled.'
-      : 'wait cannot block inside Claude Code; the run is still active and you will receive a message when it settles.'
+      : awaitingApproval(run)
+        ? APPROVAL_NOTE
+        : 'wait cannot block inside Claude Code; the run is still active and you will receive a message when it settles.'
     return ok({ ...snapshotOf(run), note })
   }
   if (input.action === 'attach') {
@@ -1122,7 +1164,9 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
   if (run.handoff) return err({ code: 'handoff_pending', message: 'A manual handoff is pending. The owner can cancel it with /dag handoff <run> cancel.' })
   if (input.action === 'cancel') {
     const reason = typeof input.reason === 'string' && input.reason ? input.reason : 'cancelled on request'
-    const { run: cancelled, stopAgents } = cancelRun(run, reason, now)
+    const { run: ended, stopAgents } = cancelRun(run, reason, now)
+    // A cancelled run waits for no approval; cancelRun keeps the field, so it goes here.
+    const { approval: _approval, ...cancelled } = ended
     for (const node of run.nodes) if (node.agentId) clearWaiting($, node.agentId)
     await persist($, cancelled)
     const failures: { agent_id: string; error: string }[] = []
@@ -1257,6 +1301,70 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
   }
 }
 
+// /dag approve|reject and the pane's Approve and Reject buttons; callers check that a person asked. Approve clears the
+// hold and ticks, so the roots start now, or when a busy main turn ends if the caller set deferStarts. Reject cancels
+// the run, and its own message to the model stands in for the settle summary (announce marks the run notified).
+async function decideApproval($: EngineInterface, decision: 'approve' | 'reject', runId: string | undefined, reason = ''): Promise<{ text: string }> {
+  const run = runId ? runs.get(runId) : undefined
+  if (!run) return { text: `Unknown run "${runId ?? ''}".\n${USAGE}` }
+  if (run.sessionId !== sessionId) return { text: `Run ${run.runId} belongs to session ${run.sessionId}; only that session can approve or reject it.` }
+  if (!awaitingApproval(run)) return { text: `Run ${run.runId} is not awaiting approval.` }
+  const now = await $.clock.now()
+  if (decision === 'approve') {
+    const approved = approveRun(run, now)
+    await persist($, approved)
+    const started = (await tick($, run.runId)) ?? approved
+    // Plugin submissions run once idle; never await them in the queue.
+    afterHook($, () => {
+      submitRunNews($, started, `DAG run "${run.name}" (${run.runId}) was approved by the user and has started.`).then(result => {
+        if ('drop' in result) throw new Error(result.drop)
+      }).catch(error => {
+        $.ui.log(`could not tell the session that ${run.runId} was approved: ${message(error)}`)
+      })
+    })
+    return { text: runStatusText(started) }
+  }
+  const rejected = rejectRun(run, reason, now)
+  await persist($, rejected)
+  const detail = reason.trim().replace(/\.+$/, '')
+  await announce($, rejected, `DAG run "${run.name}" (${run.runId}) was rejected by the user${detail ? `: ${detail}` : ''}. Nothing ran.`, true)
+  return { text: runStatusText(rejected) }
+}
+
+// The pane's buttons and keys: a press is the person's own act. Approve defers like a typed /dag approve while the main
+// turn is busy.
+async function paneApproval($: EngineInterface, decision: 'approve' | 'reject', runId: string): Promise<void> {
+  const reply = await serialized(async () => {
+    deferStarts = decision === 'approve' && mainTurnBusy
+    try {
+      return await decideApproval($, decision, runId)
+    } finally {
+      deferStarts = false
+    }
+  })
+  $.ui.log(reply.text)
+  $.ui.invalidate('ui.render')
+}
+
+// statusText with the hold spelled out: a waiting run otherwise reads as running with nothing started.
+function runStatusText(run: Run): string {
+  const text = statusText(run, sessionId)
+  if (!awaitingApproval(run)) return text
+  const [head = '', ...rest] = text.split('\n')
+  return [head, `  awaiting approval: /dag approve ${run.runId} starts it, /dag reject ${run.runId} [reason] cancels it`, ...rest].join('\n')
+}
+
+// listText's lines, newest first, with waiting runs marked.
+function runListText(): string {
+  const all = [...runs.values()]
+  if (all.length === 0) return listText(all, sessionId)
+  return all.sort((a, b) => b.createdAt - a.createdAt).map(run => `${runLine(run, sessionId)}${awaitingApproval(run) ? '  [awaiting approval]' : ''}`).join('\n')
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
 // /dag run and /dag preview take an absolute path as typed and anything else relative to the project.
 async function commandFilePath($: EngineInterface, given: string): Promise<string> {
   return given.startsWith('/') ? given : `${await $.session.cwd()}/${given}`
@@ -1267,7 +1375,7 @@ async function commandFilePath($: EngineInterface, given: string): Promise<strin
 function previewText(preview: Preview, existingRunId: string | undefined): string {
   const byId = new Map(preview.nodes.map(node => [node.id, node]))
   const lines = [
-    `Preview (nothing started): ${preview.node_count} nodes, ${preview.waves.length} waves, widest wave ${preview.widest_wave}, max concurrent ${preview.max_concurrent}`,
+    `Preview (nothing started): ${plural(preview.node_count, 'node')}, ${plural(preview.waves.length, 'wave')}, widest wave ${preview.widest_wave}, max concurrent ${preview.max_concurrent}`,
     preview.routing_note,
     ...(existingRunId ? [`This definition is already run ${existingRunId}; /dag run would reuse it.`] : []),
     ...preview.waves.map((ids, index) => `  wave ${index + 1}: ${ids.map(id => {
@@ -1330,7 +1438,7 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     await openPane($, true)
     return {}
   }
-  if (verb === 'list') return { text: listText([...runs.values()], sessionId) }
+  if (verb === 'list') return { text: runListText() }
   if (verb === 'view') {
     if (!rest[0]) return { text: `DAG view: ${view.graphView ?? 'auto'}` }
     const choice = viewChoice(rest[0])
@@ -1343,6 +1451,16 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     if (level && !ENFORCEMENTS.includes(level)) return { text: `Unknown enforcement level "${level}". Use strict, guide or off.` }
     if (level) enforcement = level
     return { text: `DAG enforcement: ${enforcement}` }
+  }
+  if (verb === 'approval') {
+    const choice = rest[0] as StartApproval | undefined
+    if (choice && !START_APPROVALS.includes(choice)) return { text: `Unknown start approval "${choice}". Use off or always.` }
+    if (choice) approvalOverride = choice
+    return { text: `DAG start approval: ${effectiveApproval()} (${approvalOverride === undefined ? 'setting' : 'session override'})` }
+  }
+  if (verb === 'approve' || verb === 'reject') {
+    if (!rest[0]) return { text: USAGE }
+    return decideApproval($, verb, rest[0], rest.slice(1).join(' '))
   }
   if (verb === 'preview') {
     const given = rest.join(' ')
@@ -1358,20 +1476,20 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     if (!given) return { text: USAGE }
     const read = await readDefinitionFile($, await commandFilePath($, given))
     if (!read.ok) return { text: read.error.message }
-    const reply = await startDefinition($, read.value)
+    const reply = await startDefinition($, read.value, 'user')
     if (reply.isError) return { text: `DAG not started:\n${reply.result}` }
     const started = JSON.parse(reply.result) as { run_id: string; reused: boolean; warnings?: string[] }
     const run = runs.get(started.run_id)
     await openPane($, true)
     // /dag run is not gated by the planning skill, so only definition lint reaches the person.
     const warnings = (started.warnings ?? []).filter(warning => !warning.includes(PLANNING_SKILL))
-    const text = run ? statusText(run, sessionId) : reply.result
+    const text = run ? runStatusText(run) : reply.result
     return { text: warnings.length ? `${text}\nWarnings:\n${warnings.map(warning => `- ${warning}`).join('\n')}` : text }
   }
   if (verb !== 'status' && verb !== 'cancel' && verb !== 'retry') return { text: USAGE }
   const run = rest[0] ? runs.get(rest[0]) : undefined
   if (!run) return { text: `Unknown run "${rest[0] ?? ''}".\n${USAGE}` }
-  if (verb === 'status') return { text: statusText(run, sessionId) }
+  if (verb === 'status') return { text: runStatusText(run) }
   const reply = await handleTool($, {
     action: verb,
     run_id: run.runId,
@@ -1379,7 +1497,7 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     ...(verb === 'retry' && rest.length > 1 ? { node_ids: rest.slice(1) } : {}),
   })
   if (reply.isError) return { text: reply.result }
-  return { text: statusText(runs.get(run.runId) ?? run, sessionId) }
+  return { text: runStatusText(runs.get(run.runId) ?? run) }
 }
 
 // While the surface holds the pane undrawn the band stands in for it; one toast per wait says why.
@@ -1623,7 +1741,12 @@ async function handlePaneKey($: EngineInterface, key: string, shift: boolean): P
   else if (key === 'c') view = { ...view, showCompleted: !view.showCompleted }
   else if (key === 'f') view = { ...view, unfold: !view.unfold }
   else if (key === 'v') return cycleView($)
-  else if (key === ' ' || key === 'space' || key === 'return') {
+  else if (key === 'a' || key === 'r') {
+    // The Approve and Reject hotkeys, posted by the graph client while it holds the keyboard.
+    const run = shownRun()
+    if (run && run.sessionId === sessionId && awaitingApproval(run)) await paneApproval($, key === 'a' ? 'approve' : 'reject', run.runId)
+    return
+  } else if (key === ' ' || key === 'space' || key === 'return') {
     const run = shownRun()
     if (run && view.selected) await toggleFold($, run, view.selected)
     return
@@ -1759,6 +1882,21 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
         gap(),
       ]
     : []
+  // A run of this session held for approval: say so, and offer the two answers. Hotkeys a and r are free in this pane.
+  const approval = run.sessionId === sessionId && awaitingApproval(run)
+    ? [
+        line([{ text: t.approvalWaiting, color: ACCENT, bold: true }]),
+        Box({
+          flexDirection: 'row',
+          columnGap: 2,
+          children: [
+            Button({ key: 'approve', label: t.approve, hotkey: 'a', plain: true, onPress: () => paneApproval($, 'approve', run.runId) }),
+            Button({ key: 'reject', label: t.reject, hotkey: 'r', plain: true, onPress: () => paneApproval($, 'reject', run.runId) }),
+          ],
+        }),
+        gap(),
+      ]
+    : []
   const graph = Client
     ? Client({ key: 'graph', module: './ui/graph-client.ts', props: model.graph, width: '100%' })
     : Box({ flexDirection: 'column', children: viewLines(model.graph, FALLBACK_GRAPH_COLUMNS).map(line) })
@@ -1789,6 +1927,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
       ...model.header.map(line),
       gap(),
       ...selector,
+      ...approval,
       graph,
       gap(),
       line([{ text: t.dependencies, bold: true }]),
@@ -1815,6 +1954,7 @@ export function register(on: On, options: PluginOptions) {
   if (typeof options.retention_days === 'number') retentionDays = options.retention_days
   if (options.node_messages === 'full') nodeMessages = 'full'
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
+  if (START_APPROVALS.includes(options.start_approval as StartApproval)) startApproval = options.start_approval as StartApproval
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
   jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
 
@@ -1893,8 +2033,8 @@ export function register(on: On, options: PluginOptions) {
     await $.command.register({ name: 'dag-ping', description: 'Check that the dag-workflow mod is loaded' })
     await $.command.register({
       name: 'dag',
-      description: 'Open the DAG pane, or run, list, inspect, cancel or retry DAG workflows, or set enforcement',
-      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | enforce [strict|guide|off]]',
+      description: 'Open the DAG pane, or run, list, inspect, approve, cancel or retry DAG workflows, or set enforcement',
+      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|guide|off]]',
       immediate: true,
     })
     return next(e)
@@ -2165,9 +2305,11 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('command.run', { command: 'dag' }, async ($, e) => {
-    const verb = splitArgs(e.args ?? '')[0]
-    if ((verb === 'handoff' || verb === 'accept' || verb === 'note') && e.origin.kind !== 'composer') return { text: 'This action requires a user command or pane control.' }
-    if (!mainTurnBusy || (verb !== 'run' && verb !== 'retry')) return serialized(() => runCommand($, e.args ?? ''))
+    const [verb, setting] = splitArgs(e.args ?? '')
+    // Approving is the person's call: the model could otherwise approve its own run, or switch the gate off.
+    const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || (verb === 'approval' && setting !== undefined)
+    if (userOnly && e.origin.kind !== 'composer') return { text: USER_ONLY }
+    if (!mainTurnBusy || (verb !== 'run' && verb !== 'retry' && verb !== 'approve')) return serialized(() => runCommand($, e.args ?? ''))
     return serialized(async () => {
       const before = pendingStarts.length
       deferStarts = true
