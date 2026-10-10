@@ -1,4 +1,4 @@
-import { mock, type Engine } from 'claude-code/testing'
+import { mock, type Engine, type Plugin } from 'claude-code/testing'
 import type { EventOf, On } from 'claude-code'
 import type { Run } from '../hooks/engine/types.ts'
 import type { JevRequest } from '../hooks/engine/jev.ts'
@@ -161,4 +161,30 @@ export async function finish($: Engine, h: ReturnType<typeof harness>, agentId =
     isAborted: aborted, answer: aborted ? '' : 'DAG_NODE_STATUS: completed', durationMs: 1,
   })
   await h.clock.settle()
+}
+
+// A folder for the harness: its files are listed under it, and a lock makes `stat` answer `dir`.
+export function folder(h: ReturnType<typeof harness>, path: string, files: Record<string, string>): void {
+  h.locks.add(path)
+  for (const [name, text] of Object.entries(files)) h.files.set(`${path}/${name}`, text)
+}
+
+// The harness answers every program with exit 0 and no output. Load this plugin beside a test's harness
+// (`{ plugins: [PROGRAMS] }`) for verify commands whose exit code, output or failure to start a check judges. It runs in
+// its own layer, so it does not register process.run twice. Other programs pass through to the harness. Behaviour travels
+// in argv:
+//   report <exit> [stdout] [stderr]  runs and answers those three
+//   report-cut <exit> <stdout>       the same with stdout cut at the host's 4 MiB limit
+//   missing-program                  cannot start, so the host rejects the call
+export const PROGRAMS: Plugin = {
+  name: 'control-harness-programs',
+  register(on) {
+    on('process.run', ($, e, next) => {
+      if (e.argv[0] === 'report' || e.argv[0] === 'report-cut') {
+        return { value: { exitCode: Number(e.argv[1]), stdout: e.argv[2] ?? '', stderr: e.argv[3] ?? '', isStdoutTruncated: e.argv[0] === 'report-cut', isStderrTruncated: false } }
+      }
+      if (e.argv[0] === 'missing-program') return { deny: 'spawn missing-program ENOENT' }
+      return next(e)
+    })
+  },
 }

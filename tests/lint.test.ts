@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { lintDefinition } from '../hooks/engine/lint.ts'
+import { isVerificationNode, lintDefinition } from '../hooks/engine/lint.ts'
 import { verificationProblem } from '../hooks/engine/verification.ts'
 
 // Every definition carries a goal unless a test passes undefined, so the goal warning stays out of the other tests.
@@ -19,11 +19,55 @@ test('vacuous verify V1 warns about a file check without contains', async () => 
   expect(warnings).toHaveLength(1)
   expect(warnings[0]).toContain('node "x"')
   expect(warnings[0]).toContain('vacuous verify')
-  expect(warnings[0]).toContain('check 1 is a file check without contains, so it only proves the file exists (touch passes it)')
+  expect(warnings[0]).toContain('check 1 is a file check without contains, absent, matches, lastLine or equals, so it only proves the file exists (touch passes it)')
 })
 
 test('vacuous verify V1 stays silent when the file check has contains', async () => {
   expect(lintVerify([{ kind: 'file', path: 'out.md', contains: 'heading' }])).toEqual([])
+})
+
+test('vacuous verify V1 stays silent when the file check has any one text expectation', async () => {
+  for (const [field, value] of [['contains', 'x'], ['absent', 'TODO'], ['matches', '^## Output$'], ['lastLine', 'PASS'], ['equals', ''], ['lastLine', '']] as const) {
+    expect({ field, warnings: lintVerify([{ kind: 'file', path: 'out.md', [field]: value }]) }).toEqual({ field, warnings: [] })
+  }
+})
+
+test('vacuous verify V4 warns about a command that accepts several exit codes without checking output', async () => {
+  for (const exit of [[0, 1], [1, 2, 3], [0, 255]]) {
+    const warnings = lintVerify([{ kind: 'command', argv: ['bun', 'test'], expect: { exit } }])
+    expect({ exit, count: warnings.length }).toEqual({ exit, count: 1 })
+    expect(warnings[0]).toContain('vacuous verify')
+    expect(warnings[0]).toContain('check 1 accepts several exit codes without checking output')
+  }
+})
+
+test('vacuous verify V4 stays silent on one accepted exit code or when output is checked', async () => {
+  const run = (expectation: unknown) => lintVerify([{ kind: 'command', argv: ['bun', 'test'], expect: expectation }])
+  expect(run({ exit: 1 })).toEqual([])
+  expect(run({ exit: [1] })).toEqual([])
+  expect(run({ exit: [0, 0] })).toEqual([])
+  expect(run({ exit: [0, 1], stdout: { lastLine: 'PASS' } })).toEqual([])
+  expect(run({ exit: [0, 1], stderr: { absent: 'error' } })).toEqual([])
+  expect(run({ stdout: { contains: 'ok' } })).toEqual([])
+})
+
+test('the under-split rule does not count read-only absolute file checks as files the producer owns', async () => {
+  const verify = [
+    { kind: 'file', path: '/etc/a.txt', contains: 'x' },
+    { kind: 'file', path: '/etc/b.txt', contains: 'x' },
+    { kind: 'file', path: 'C:\\data\\d.txt', contains: 'x' },
+    { kind: 'file', path: 'c.md', contains: 'x' },
+  ]
+  expect(lintVerify(verify)).toEqual([])
+})
+
+test('the report-name rule warns on absolute verify paths too, such as review notes under /tmp', async () => {
+  for (const path of ['/tmp/run/FINDINGS-notes.md', 'C:\\tmp\\REPORT.md', '/var/summary.md']) {
+    const warnings = lintVerify([{ kind: 'file', path, lastLine: 'Verdict: PASS' }])
+    expect({ path, count: warnings.length }).toEqual({ path, count: 1 })
+    expect(warnings[0]).toContain(`node "x": "${path}" is named like a report`)
+  }
+  expect(lintVerify([{ kind: 'file', path: '/tmp/run/review-spec-notes.md', lastLine: 'Verdict: PASS' }])).toEqual([])
 })
 
 test('vacuous verify V2 warns about every program that always passes', async () => {
@@ -86,7 +130,7 @@ test('vacuous verify collects every offending check of one node into one warning
   ])
   const warnings = lintDefinition(definition)
   expect(warnings).toEqual([
-    'node "x": vacuous verify - check 1 is a file check without contains, so it only proves the file exists (touch passes it); check 3 runs true, which always passes - declare a file check with nonempty contains text, or a command that exits nonzero when the deliverable is wrong.',
+    'node "x": vacuous verify - check 1 is a file check without contains, absent, matches, lastLine or equals, so it only proves the file exists (touch passes it); check 3 runs true, which always passes - declare a file check with contains, absent, matches, lastLine or equals, or a command that fails when the deliverable is wrong (one accepted exit code, or an expect on its stdout or stderr).',
   ])
   expect(warnings[0]).not.toContain('check 2')
   expect(verificationProblem(definition)).toBeUndefined()
@@ -192,4 +236,27 @@ test('under-split lint does not treat names that merely contain test as tests', 
   const warnings = underSplit({ writes: ['testsuite/a.ts', 'contest/b.ts', 'c.md'] })
   expect(warnings).toHaveLength(1)
   expect(warnings[0]).toContain('node "x": one producer owns 3 files (testsuite/a.ts, contest/b.ts, c.md)')
+})
+
+const node = (fields: Record<string, string>) => ({ id: 'n', prompt: full, dependsOn: ['a'], ...fields })
+
+test('a verification word counts only at the start of a word', async () => {
+  for (const id of ['review-spec', 'verify', 'verify-x', 'checks', 'tests', 'unit_test', 'final.audit', 'validate-all', 'finalReview', 'e2eTests']) {
+    expect({ id, verification: isVerificationNode(node({ id })) }).toEqual({ id, verification: true })
+  }
+  for (const id of ['preview', 'commit-preview', 'contest', 'retest', 'previewDocs', 'attestation', 'build']) {
+    expect({ id, verification: isVerificationNode(node({ id })) }).toEqual({ id, verification: false })
+  }
+  expect(isVerificationNode(node({ id: 'commit', label: 'Commit the run preview' }))).toBe(false)
+  expect(isVerificationNode(node({ id: 'final', label: 'Run tests' }))).toBe(true)
+  expect(isVerificationNode(node({ id: 'final', task_summary: 'Re-check the diff' }))).toBe(true)
+  expect(isVerificationNode(node({ id: 'final', description: '(Audit) every lane' }))).toBe(true)
+})
+
+test('a graph whose only candidate is a preview commit gets the no-verification-node warning', async () => {
+  const warnings = lintDefinition(def([
+    { id: 'a', prompt: full },
+    { id: 'commit', label: 'Commit the run preview', prompt: full, dependsOn: ['a'] },
+  ]))
+  expect(warnings).toEqual(['the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.'])
 })

@@ -11,9 +11,30 @@ export type NodeState =
 
 export type RunStatus = 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
-export type VerificationCheck =
-  | { kind: 'file'; path: string; contains?: string }
-  | { kind: 'command'; argv: string[] }
+// The text expectation fields, in evaluation order. The parser, lint, the tool schema and the runtime read this one list,
+// so a new field is added here and nowhere else is missed.
+export const TEXT_FIELDS = ['contains', 'absent', 'matches', 'lastLine', 'equals'] as const
+
+export type TextField = (typeof TEXT_FIELDS)[number]
+
+// What a text must satisfy; every given field must hold. contains: the text includes it. absent: it does not.
+// matches: RegExp source compiled with the m flag, kept as a string so the definition hashes and persists it.
+// lastLine: the last line after trailing whitespace is removed equals it. equals: the whole text after trailing whitespace is removed equals it.
+export type TextExpect = { [Field in TextField]?: string }
+
+// path is project-relative, or absolute for a read-only check outside the project (never inside .claude/dag).
+export type FileCheck = { kind: 'file'; path: string } & TextExpect
+
+// Without exit only 0 is accepted.
+export type CommandExpect = {
+  exit?: number | number[]
+  stdout?: TextExpect
+  stderr?: TextExpect
+}
+
+export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandExpect }
+
+export type VerificationCheck = FileCheck | CommandCheck
 
 export type VerificationEvidence = {
   check: VerificationCheck

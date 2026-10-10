@@ -1,4 +1,5 @@
 import { CATEGORIES } from './node-prompt.ts'
+import { TEXT_FIELDS, type TextField } from './types.ts'
 
 // Claude Code passes the model only the first 2048 characters of a tool description, so the
 // rules come first and tests/tool-spec.test.ts keeps the whole text under that limit.
@@ -7,7 +8,7 @@ export const TOOL_DESCRIPTION_LIMIT = 2048
 export const TOOL_DESCRIPTION = [
   'The only way to get work done in this session: plan the task as a dependency-ordered DAG of subagent nodes and run it here.',
   'start returns at once. Do not poll: when the run settles you receive a summary with every node\'s output. Treat node completion claims as false until you verify them.',
-  'Every node needs verify: one or more {kind:"file",path,contains?} or {kind:"command",argv:[...]} checks, run by the plugin before the node completes; start/amend refuse nodes without them.',
+  'Every node needs verify: 1-16 checks run by the plugin before the node completes, {kind:"file",path,contains?|absent?|matches?|lastLine?|equals?} (path relative, or absolute read-only; a folder allows contains/absent) or {kind:"command",argv,expect?:{exit,stdout,stderr}} (exit 0 unless expect.exit); start/amend refuse nodes without them.',
   'A node receives the outputs of the nodes in its dependsOn, so list exactly the nodes whose results it needs. Ready nodes run in parallel waves; a failed node skips its dependents.',
   'Definition: "key" (same key and definition returns the existing run; a different definition under that key is refused), "name", optional "goal" (shown to every node) and "nodes".',
   'Node: "id", a self-contained "prompt" saying what to do and produce, optional "dependsOn", "category" (model routing; Jev may override it), "agent" (subagent type such as Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
@@ -15,6 +16,20 @@ export const TOOL_DESCRIPTION = [
   'retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and their skipped dependents; completed nodes are reused); amend {run_id, definition} (re-runs changed nodes and their dependents, adds nodes);',
   'send {run_id, node_id, message} (steer a running node); attach {run_id} (adopt a run from another session).',
 ].join(' ')
+
+// Keyed by TextField, so a field added to TEXT_FIELDS does not compile until it is described here.
+const TEXT_FIELD_DESCRIPTIONS: Record<TextField, string> = {
+  contains: 'The text includes this',
+  absent: 'The text does not include this',
+  matches: 'JavaScript RegExp source, m flag (^ and $ anchor lines)',
+  lastLine: 'The last line, trailing whitespace removed, equals this',
+  equals: 'The whole text, trailing whitespace removed, equals this',
+}
+
+// The text expectations of a file check, and of a command's stdout or stderr; every given field must hold.
+const TEXT_EXPECT_PROPERTIES = Object.fromEntries(TEXT_FIELDS.map(field => [field, { type: 'string', description: TEXT_FIELD_DESCRIPTIONS[field] }]))
+
+const EXIT_CODE = { type: 'integer', minimum: 0, maximum: 255 }
 
 const NODE_SCHEMA = {
   type: 'object',
@@ -37,9 +52,18 @@ const NODE_SCHEMA = {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['file', 'command'] },
-          path: { type: 'string' },
-          contains: { type: 'string' },
-          argv: { type: 'array', items: { type: 'string' } },
+          path: { type: 'string', description: 'file: project-relative, or absolute for a read-only check outside the project' },
+          ...TEXT_EXPECT_PROPERTIES,
+          argv: { type: 'array', items: { type: 'string' }, description: 'command: run without a shell from the project root' },
+          expect: {
+            type: 'object',
+            description: 'command: without exit only 0 passes',
+            properties: {
+              exit: { anyOf: [EXIT_CODE, { type: 'array', items: EXIT_CODE, minItems: 1 }], description: 'Accepted exit code or codes' },
+              stdout: { type: 'object', properties: TEXT_EXPECT_PROPERTIES },
+              stderr: { type: 'object', properties: TEXT_EXPECT_PROPERTIES },
+            },
+          },
         },
         required: ['kind'],
       },

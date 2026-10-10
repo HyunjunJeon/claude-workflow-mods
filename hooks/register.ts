@@ -10,7 +10,8 @@ import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, de
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
-import { projectPath, verificationProblem } from './engine/verification.ts'
+import { exitProblem, textProblem } from './engine/check-eval.ts'
+import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
 import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
 import {
   amendRun,
@@ -37,7 +38,7 @@ import {
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { fail, type Definition, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
+import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type FileCheck, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
@@ -930,6 +931,113 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
   return recovered.value
 }
 
+// A folder check reads every regular file under the folder, so it is bounded: past either limit it fails and reads nothing.
+const FOLDER_CHECK_MAX_FILES = 2_000
+const FOLDER_CHECK_MAX_BYTES = 20 * 1024 * 1024
+const FOLDER_CHECK_FIELDS = TEXT_FIELDS.filter(field => field !== 'contains' && field !== 'absent')
+
+// The plugin's own checkpoint store, wherever it sits. It keeps every run's definition, so the text of each check, and the
+// reports of other nodes: a folder walk that read it would find its own `contains` text and pass with no deliverable. The
+// path folds as the parser's does (readOnlyAbsolutePath): backslashes are separators, repeated separators, `.` segments and
+// trailing separators vanish, so `/work/.claude/` plus `dag` is `/work/.claude//dag` and still ends at the pair. The case
+// folds too, since macOS and Windows open .CLAUDE/DAG as the same folder.
+function isCheckpointDir(path: string): boolean {
+  const parts = path.replaceAll('\\', '/').split('/').filter(part => part !== '' && part !== '.').map(part => part.toLowerCase())
+  return parts.length >= 2 && parts[parts.length - 2] === '.claude' && parts[parts.length - 1] === 'dag'
+}
+
+// A relative check path is joined to the project root without its `.` segments, so `.` is the project root itself.
+function resolveCheckPath(path: string): string {
+  const parts = path.split('/').filter(part => part !== '' && part !== '.')
+  return parts.length ? `${projectRoot}/${parts.join('/')}` : projectRoot
+}
+
+// Every regular file under dir, hidden and ignored ones included, as paths relative to dir in name order. A symbolic link
+// is not followed and not listed, since $.fs.list reports it as `other`. A directory that is a checkpoint store (.claude/dag)
+// is skipped whole at any depth: nothing below it is read or counted. Past a bound it answers the problem instead.
+async function folderFiles($: EngineInterface, dir: string): Promise<{ files: string[] } | { problem: string }> {
+  const files: string[] = []
+  let bytes = 0
+  const bounded = (): string | undefined => files.length > FOLDER_CHECK_MAX_FILES
+    ? `the folder holds more than ${FOLDER_CHECK_MAX_FILES} files; point the check at a smaller folder`
+    : bytes > FOLDER_CHECK_MAX_BYTES ? `the files in the folder total more than ${FOLDER_CHECK_MAX_BYTES / 1024 / 1024} MB; point the check at a smaller folder` : undefined
+  const walk = async (prefix: string): Promise<string | undefined> => {
+    const entries = [...await $.fs.list(prefix === '' ? dir : `${dir}/${prefix}`)].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    for (const entry of entries) {
+      const relative = `${prefix}${entry.name}`
+      if (entry.kind === 'file') {
+        files.push(relative)
+        bytes += entry.size
+        const problem = bounded()
+        if (problem) return problem
+      } else if (entry.kind === 'dir' && !isCheckpointDir(`${dir}/${relative}`)) {
+        const problem = await walk(`${relative}/`)
+        if (problem) return problem
+      }
+    }
+    return undefined
+  }
+  const problem = await walk('')
+  return problem ? { problem } : { files }
+}
+
+// contains holds when any file under the folder has the text, absent when none does; the first file that breaks absent is named, never quoted.
+async function folderCheckResult($: EngineInterface, check: FileCheck, dir: string): Promise<{ passed: boolean; detail: string }> {
+  const unsupported = FOLDER_CHECK_FIELDS.filter(field => check[field] !== undefined)
+  if (unsupported.length) return { passed: false, detail: `${check.path} is a folder, and a folder check allows only contains and absent, not ${unsupported.join(', ')}` }
+  const listed = await folderFiles($, dir)
+  if ('problem' in listed) return { passed: false, detail: `${check.path}: ${listed.problem}` }
+  const base = check.path.replace(/[\\/]+$/, '')
+  let found = check.contains === undefined
+  for (const file of listed.files) {
+    if (found && check.absent === undefined) break
+    const shown = `${base}/${file}`
+    let text: string
+    try {
+      text = await $.fs.read(`${dir}/${file}`)
+    } catch (error) {
+      return { passed: false, detail: `${shown} could not be read (${message(error)}), so the folder check cannot be judged` }
+    }
+    const problem = check.absent === undefined ? undefined : textProblem(text, { absent: check.absent }, shown)
+    if (problem) return { passed: false, detail: problem }
+    if (check.contains !== undefined && text.includes(check.contains)) found = true
+  }
+  if (!found) return { passed: false, detail: textProblem('', { contains: check.contains }, `${check.path} (${listed.files.length} files)`) ?? '' }
+  return { passed: true, detail: `Folder verified: ${check.path} (${listed.files.length} files)` }
+}
+
+// A file check on a missing or unreadable path fails, absent included: a path that is not there proves nothing.
+async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<{ passed: boolean; detail: string }> {
+  if (!projectPath(check.path) && !readOnlyAbsolutePath(check.path)) return { passed: false, detail: `Path not allowed: ${check.path}` }
+  const path = projectPath(check.path) ? resolveCheckPath(check.path) : check.path
+  let kind: string
+  try {
+    kind = (await $.fs.stat(path)).kind
+  } catch (error) {
+    return { passed: false, detail: `Path is missing or unreadable: ${check.path} (${message(error)})` }
+  }
+  const hasText = TEXT_FIELDS.some(field => check[field] !== undefined)
+  if (kind === 'dir') return hasText ? folderCheckResult($, check, path) : { passed: true, detail: `Folder verified: ${check.path}` }
+  if (kind !== 'file') return { passed: false, detail: `Expected a file or folder: ${check.path}` }
+  const problem = hasText ? textProblem(await $.fs.read(path), check, check.path) : undefined
+  return problem ? { passed: false, detail: problem } : { passed: true, detail: `File verified: ${check.path}` }
+}
+
+// A program that cannot start or runs past the limit makes $.process.run reject, which fails the check whatever expect says.
+// The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
+async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<{ passed: boolean; detail: string; exitCode: number | undefined }> {
+  const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })
+  const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
+  const expectation = check.expect
+  const truncated = (stream: 'stdout' | 'stderr') => expectation?.[stream] !== undefined && (stream === 'stdout' ? result.isStdoutTruncated : result.isStderrTruncated)
+    ? `${stream} was cut at 4 MiB, so its expectation cannot be judged` : undefined
+  const problem = exitProblem(exitCode, expectation) ??
+    truncated('stdout') ?? (expectation?.stdout ? textProblem(result.stdout, expectation.stdout, 'stdout') : undefined) ??
+    truncated('stderr') ?? (expectation?.stderr ? textProblem(result.stderr, expectation.stderr, 'stderr') : undefined)
+  const excerpt = `${JSON.stringify(check.argv)} exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`
+  return { passed: problem === undefined, detail: (problem ? `${problem}\n${excerpt}` : excerpt).slice(0, 4_000), exitCode }
+}
+
 async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<NonNullable<NodeRun['verification']>> {
   const checks = run.definition.nodes.find(def => def.id === node.id)?.verify
   if (!checks?.length) return { status: 'missing', evidence: [], error: 'No verification contract was declared; amend this node with verify checks.' }
@@ -941,21 +1049,11 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
     try {
       switch (check.kind) {
         case 'file': {
-          const path = `${projectRoot}/${check.path}`
-          const stat = await $.fs.stat(path)
-          if (stat.kind !== 'file') detail = `Expected a file: ${check.path}`
-          else if (check.contains !== undefined && !(await $.fs.read(path)).includes(check.contains)) detail = `File exists but required output content is missing: ${check.path}`
-          else {
-            passed = true
-            detail = `File verified: ${check.path}`
-          }
+          ({ passed, detail } = await fileCheckResult($, check))
           break
         }
         case 'command': {
-          const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })
-          exitCode = result.exitCode
-          passed = result.exitCode === 0
-          detail = `${JSON.stringify(check.argv)} exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`.slice(0, 4_000)
+          ({ passed, detail, exitCode } = await commandCheckResult($, check))
           break
         }
         default: {

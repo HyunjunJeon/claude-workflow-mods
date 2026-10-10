@@ -1,6 +1,13 @@
-import type { Definition, NodeDef, VerificationCheck } from './types.ts'
+import { TEXT_FIELDS, type Definition, type NodeDef, type VerificationCheck } from './types.ts'
+import { projectPath, TEXT_FIELD_LIST } from './verification.ts'
 
-const VERIFICATION_WORDS = /verif|validat|check|test|review|audit/i
+// A verification word counts only at the start of a word, so "preview", "contest" and "retest" do not make a node a verifier.
+// camelCase ids are split first ("finalReview" -> "final Review").
+const VERIFICATION_WORDS = /(^|[^a-z0-9])(verif|validat|check|test|review|audit)/i
+
+function hasVerificationWord(text: string): boolean {
+  return VERIFICATION_WORDS.test(text.replace(/([a-z0-9])([A-Z])/g, '$1 $2'))
+}
 
 // Claude Code refuses subagent Write calls to Markdown files with these basenames (seen on 2.1.288, re-checked on 2.1.295 with --safe-mode).
 export const HOST_BLOCKED_REPORT_NAME = /^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i
@@ -11,7 +18,7 @@ export function isBlockedReportPath(path: string): boolean {
 
 export function isVerificationNode(node: NodeDef): boolean {
   if (node.dependsOn.length === 0) return false
-  return [node.id, node.label, node.task_summary, node.description].some(text => text !== undefined && VERIFICATION_WORDS.test(text))
+  return [node.id, node.label, node.task_summary, node.description].some(text => text !== undefined && hasVerificationWord(text))
 }
 
 // The final audit: a verification node that nothing depends on and that judges two or more inputs.
@@ -26,17 +33,25 @@ const MIN_SPLIT_SECTIONS = 3
 const TEST_PATH = /(^|\/)(tests?|__tests__)(\/|$)|\.(test|spec)\.[^/]+$/
 
 // ./src/, src//a.ts, src/./a.ts and src\a.ts name the same place as src and src/a.ts, so every path is spelled one way before it is compared.
-// The definition gate (projectPath) already rejects absolute paths, .. and .claude segments, so only separators and . segments are left to fold. The project root itself stays as ".".
+// Callers pass only project-relative paths (projectPath), so only separators and . segments are left to fold. The project root itself stays as ".".
 export function normalizePath(path: string): string {
   return path.replaceAll('\\', '/').split('/').filter(part => part !== '' && part !== '.').join('/') || '.'
 }
 
+// Every path a node's file checks read, relative or absolute: a node may write its notes under /tmp and check them there.
+function checkedFiles(node: NodeDef): string[] {
+  return (node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : []))
+}
+
+// The under-split rule counts lanes of project work, so it takes only project-relative paths; an absolute check
+// (notes under /tmp, a file outside the project) is not a project file the producer owns, and normalizePath folds only relative spellings.
+function checkedProjectFiles(node: NodeDef): string[] {
+  return checkedFiles(node).filter(projectPath)
+}
+
 // A declared folder and the files checked inside it are one deliverable, so only the most specific paths count.
 function deliverablePaths(node: NodeDef): string[] {
-  const paths = [
-    ...(node.writes ?? []),
-    ...(node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : [])),
-  ]
+  const paths = [...(node.writes ?? []), ...checkedProjectFiles(node)]
   const unique = [...new Set(paths.map(normalizePath))].filter(path => !TEST_PATH.test(path))
   return unique.filter(path => !unique.some(other => other.startsWith(`${path}/`)))
 }
@@ -47,7 +62,8 @@ function namedSections(prompt: string): string[] {
 }
 
 // Vacuous verify checks pass without proving the deliverable is right.
-// V1: a file check without contains. V2: a command that always passes. V3: a command that only tests that a path exists.
+// V1: a file check with no text expectation. V2: a command that always passes. V3: a command that only tests that a path exists.
+// V4: a command that accepts several exit codes and checks no output, so success and failure both pass.
 const ALWAYS_PASSING_PROGRAMS = new Set(['true', ':', 'echo', 'printf', 'exit', 'yes', 'sleep']) // V2
 const EXISTENCE_ONLY_PROGRAMS = new Set(['ls', 'stat', 'cat']) // V3
 const EXISTENCE_TEST_PROGRAMS = new Set(['test', '[']) // V3
@@ -64,12 +80,21 @@ function isExistenceTest(argv: string[]): boolean {
   return flags.length > 0 && flags.every(flag => EXISTENCE_TEST_FLAGS.has(flag))
 }
 
+// V4: two or more distinct accepted exit codes and neither stdout nor stderr expected.
+function acceptsSeveralExitsBlind(check: Extract<VerificationCheck, { kind: 'command' }>): boolean {
+  const exit = check.expect?.exit
+  return Array.isArray(exit) && new Set(exit).size >= 2 && check.expect?.stdout === undefined && check.expect?.stderr === undefined
+}
+
 function vacuousReason(check: VerificationCheck): string | undefined {
   if (check.kind === 'file') {
-    return check.contains ? undefined : 'is a file check without contains, so it only proves the file exists (touch passes it)'
+    return TEXT_FIELDS.some(field => check[field] !== undefined)
+      ? undefined
+      : `is a file check without ${TEXT_FIELD_LIST}, so it only proves the file exists (touch passes it)`
   }
   const program = programName(check.argv)
   if (ALWAYS_PASSING_PROGRAMS.has(program)) return `runs ${program}, which always passes`
+  if (acceptsSeveralExitsBlind(check)) return 'accepts several exit codes without checking output'
   if (EXISTENCE_ONLY_PROGRAMS.has(program) || isExistenceTest(check.argv)) return 'only tests that a path exists'
   return undefined
 }
@@ -86,11 +111,7 @@ export function lintDefinition(definition: Definition): string[] {
     }
   }
   for (const node of definition.nodes) {
-    const paths = [
-      ...(node.verify ?? []).flatMap(check => (check.kind === 'file' ? [check.path] : [])),
-      ...(node.writes ?? []),
-    ]
-    for (const path of paths) {
+    for (const path of [...checkedFiles(node), ...(node.writes ?? [])]) {
       if (isBlockedReportPath(path)) {
         warnings.push(`node "${node.id}": "${path}" is named like a report, and Claude Code 2.1.295 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${node.id}-notes.md or return the text in ## Output; if the user requires this exact name, the main conversation writes the file after the run settles.`)
       }
@@ -102,7 +123,7 @@ export function lintDefinition(definition: Definition): string[] {
       return reason === undefined ? [] : [`check ${index + 1} ${reason}`]
     })
     if (clauses.length > 0) {
-      warnings.push(`node "${node.id}": vacuous verify - ${clauses.join('; ')} - declare a file check with nonempty contains text, or a command that exits nonzero when the deliverable is wrong.`)
+      warnings.push(`node "${node.id}": vacuous verify - ${clauses.join('; ')} - declare a file check with ${TEXT_FIELD_LIST}, or a command that fails when the deliverable is wrong (one accepted exit code, or an expect on its stdout or stderr).`)
     }
   }
   const producers = definition.nodes.filter(node => !isVerificationNode(node))
