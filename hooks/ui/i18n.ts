@@ -54,7 +54,8 @@ export type Strings = {
   runningTool: (tool: string, elapsed: string) => string
   stalled: string
   waitingPermission: (tool: string) => string
-  statusLine: (name: string, done: number, total: number, running: number, failed: number, otherRuns: number, waiting: number) => string
+  // `awaiting` is a run held for start approval: the label stands where the running count would, since nothing runs.
+  statusLine: (name: string, done: number, total: number, running: number, failed: number, otherRuns: number, waiting: number, awaiting?: boolean) => string
   toastWaiting: (run: string, node: string) => string
   toastNodeFailed: (run: string, node: string) => string
   toastVerificationFailed: (run: string, node: string) => string
@@ -63,6 +64,15 @@ export type Strings = {
   toastPaneWaiting: (reason: string) => string
   toastApproval: (run: string) => string
   approvalWaiting: string
+  awaitingApproval: string
+  previewSummary: (nodes: number, waves: number, widest: number, maxConcurrent: number) => string
+  previewWave: (index: number, entries: string) => string
+  previewConflicts: (entries: string) => string
+  previewUnchecked: (ids: string) => string
+  previewLint: (warning: string) => string
+  previewLintMany: (count: number, first: string) => string
+  previewLintClean: string
+  previewRouting: string
   approve: string
   reject: string
   runDeferred: string
@@ -72,6 +82,9 @@ export type Strings = {
   bandOtherRuns: (count: number) => string
   bandPaneWaiting: (reason: string) => string
 }
+
+const EN_AWAITING = 'awaiting approval'
+const KO_AWAITING = '승인 대기 중'
 
 const EN: Strings = {
   nextNode: 'next',
@@ -135,7 +148,7 @@ const EN: Strings = {
   runningTool: (tool, elapsed) => `▶ ${tool} running ${elapsed}`,
   stalled: '⚠ possibly stalled',
   waitingPermission: tool => `waiting: ${tool}`,
-  statusLine: (name, done, total, running, failed, otherRuns, waiting) => `DAG ${name}: ${done}/${total} done · ${running} running${waiting ? ` · ${waiting} waiting for permission` : ''}${failed ? ` · ${failed} failed` : ''}${otherRuns ? ` · +${otherRuns} runs` : ''}`,
+  statusLine: (name, done, total, running, failed, otherRuns, waiting, awaiting = false) => `DAG ${name}: ${done}/${total} done · ${awaiting ? EN_AWAITING : `${running} running`}${waiting ? ` · ${waiting} waiting for permission` : ''}${failed ? ` · ${failed} failed` : ''}${otherRuns ? ` · +${otherRuns} runs` : ''}`,
   toastWaiting: (run, node) => `DAG ${run} › ${node} is waiting for your permission`,
   toastNodeFailed: (run, node) => `DAG ${run}: node ${node} failed`,
   toastVerificationFailed: (run, node) => `DAG ${run}: node ${node} failed verification`,
@@ -144,6 +157,15 @@ const EN: Strings = {
   runDeferred: 'The run starts when the current turn ends.',
   toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
   approvalWaiting: 'Waiting for your approval: no node starts until you approve this run.',
+  awaitingApproval: EN_AWAITING,
+  previewSummary: (nodes, waves, widest, maxConcurrent) => `${nodes} node${nodes === 1 ? '' : 's'}, ${waves} wave${waves === 1 ? '' : 's'}, widest wave ${widest} (max concurrent ${maxConcurrent})`,
+  previewWave: (index, entries) => `wave ${index}: ${entries}`,
+  previewConflicts: entries => `write conflicts: ${entries}`,
+  previewUnchecked: ids => `write scope unchecked (no writes declared): ${ids}`,
+  previewLint: warning => `lint: ${warning}`,
+  previewLintMany: (count, first) => `${count} lint warnings, first: ${first}`,
+  previewLintClean: 'lint: no warnings',
+  previewRouting: 'category and model are proposals; Jev may reroute a node at start.',
   approve: 'approve',
   reject: 'reject',
   toastPaneWaiting: reason => `DAG pane not shown · type 0 at an empty prompt or run /dag to open it (${reason})`,
@@ -216,7 +238,7 @@ const KO: Strings = {
   runningTool: (tool, elapsed) => `▶ ${tool} 실행 중 ${elapsed}`,
   stalled: '⚠ 멈췄을 수 있음',
   waitingPermission: tool => `승인 대기: ${tool}`,
-  statusLine: (name, done, total, running, failed, otherRuns, waiting) => `DAG ${name}: ${done}/${total} 완료 · 실행 중 ${running}${waiting ? ` · 권한 승인 대기 ${waiting}` : ''}${failed ? ` · 실패 ${failed}` : ''}${otherRuns ? ` · +${otherRuns}개 실행` : ''}`,
+  statusLine: (name, done, total, running, failed, otherRuns, waiting, awaiting = false) => `DAG ${name}: ${done}/${total} 완료 · ${awaiting ? KO_AWAITING : `실행 중 ${running}`}${waiting ? ` · 권한 승인 대기 ${waiting}` : ''}${failed ? ` · 실패 ${failed}` : ''}${otherRuns ? ` · +${otherRuns}개 실행` : ''}`,
   toastWaiting: (run, node) => `DAG ${run} › ${node} 노드가 권한 승인을 기다립니다`,
   toastNodeFailed: (run, node) => `DAG ${run}: 노드 ${node} 실패`,
   toastVerificationFailed: (run, node) => `DAG ${run}: 노드 ${node} 검증 실패`,
@@ -225,6 +247,15 @@ const KO: Strings = {
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
   toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
   approvalWaiting: '승인 대기 중: 이 실행을 승인하기 전에는 어떤 노드도 시작하지 않습니다.',
+  awaitingApproval: KO_AWAITING,
+  previewSummary: (nodes, waves, widest, maxConcurrent) => `노드 ${nodes}개, 웨이브 ${waves}개, 가장 넓은 웨이브 ${widest} (동시 실행 한도 ${maxConcurrent})`,
+  previewWave: (index, entries) => `웨이브 ${index}: ${entries}`,
+  previewConflicts: entries => `쓰기 충돌: ${entries}`,
+  previewUnchecked: ids => `쓰기 범위 미확인(writes 미선언): ${ids}`,
+  previewLint: warning => `lint 경고: ${warning}`,
+  previewLintMany: (count, first) => `lint 경고 ${count}건, 첫째: ${first}`,
+  previewLintClean: 'lint 경고 없음',
+  previewRouting: '카테고리와 모델은 제안값이며 시작할 때 Jev가 노드를 재배정할 수 있습니다.',
   approve: '승인',
   reject: '거절',
   toastPaneWaiting: reason => `DAG 패널 미표시 · 빈 프롬프트에서 0을 입력하거나 /dag로 여세요 (${reason})`,

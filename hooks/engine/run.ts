@@ -182,6 +182,11 @@ export function requestApproval(input: Run, now: number): Run {
   return run
 }
 
+// Held: approval pending on a run that has not settled. A cancel can end a held run; it then waits for nothing.
+export function awaitingApproval(run: Run): boolean {
+  return Boolean(run.approval) && !isSettled(run)
+}
+
 export function approveRun(input: Run, now: number): Run {
   const run = clone(input)
   delete run.approval

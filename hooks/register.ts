@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
@@ -15,6 +15,7 @@ import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNIN
 import {
   amendRun,
   approveRun,
+  awaitingApproval,
   cancelRun,
   createRun,
   failToStart,
@@ -38,6 +39,7 @@ import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import { fail, type Definition, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
+import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
 import type { ViewKind } from './ui/graph-model.ts'
@@ -560,7 +562,7 @@ async function refreshExternalRuns($: EngineInterface): Promise<void> {
 
 function updateStatus($: EngineInterface): void {
   const active = summarizeActive(runs.values(), sessionId, waiting.size)
-  const text = active ? t.statusLine(active.run.name, active.done, active.total, active.running, active.failed, active.otherRuns, active.waiting) : undefined
+  const text = active ? t.statusLine(active.run.name, active.done, active.total, active.running, active.failed, active.otherRuns, active.waiting, active.awaiting) : undefined
   if (text === pinnedStatus) return
   pinnedStatus = text
   $.ui.status(text)
@@ -1029,17 +1031,18 @@ function effectiveApproval(): StartApproval {
   return approvalOverride ?? startApproval
 }
 
-// Held: approval pending on a run that has not settled. A cancel can end a held run; it then waits for nothing.
-function awaitingApproval(run: Run): boolean {
-  return Boolean(run.approval) && !isSettled(run)
-}
-
 // `by` is who asked: the model's dag tool, or the person's /dag run. Only a model start in an interactive session waits
 // for approval; a person who typed /dag run has already chosen, and a non-interactive session has no one to ask.
-async function startDefinition($: EngineInterface, input: unknown, by: 'model' | 'user'): Promise<ToolReply> {
+// `approveHeld` is set when that person typed it in the composer: /dag run of the definition one of their runs holds for
+// approval is then their answer to it, and approves it the way /dag approve does. Every other reuse returns the run as is.
+async function startDefinition($: EngineInterface, input: unknown, by: 'model' | 'user', approveHeld = false): Promise<ToolReply> {
   const screened = screenDefinition(input)
   if (!screened.ok) return err(screened.error)
   const { definition, existing } = screened.value
+  if (existing && by === 'user' && approveHeld && existing.sessionId === sessionId && awaitingApproval(existing)) {
+    await decideApproval($, 'approve', existing.runId)
+    return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
+  }
   if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
   const now = await $.clock.now()
   const runId = `dag_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -1131,7 +1134,11 @@ async function handleTool($: EngineInterface, input: ToolInput): Promise<ToolRep
     return ok({
       runs: [...runs.values()]
         .sort((a, b) => b.createdAt - a.createdAt)
-        .map(r => ({ run_id: r.runId, run_key: r.key, name: r.name, status: r.status, session_id: r.sessionId, owned: r.sessionId === sessionId })),
+        .map(r => ({
+          run_id: r.runId, run_key: r.key, name: r.name, status: r.status, session_id: r.sessionId, owned: r.sessionId === sessionId,
+          // status stays running for a held run, so this is what tells the model it has not started.
+          ...(awaitingApproval(r) ? { awaiting_approval: true } : {}),
+        })),
     })
   }
   const run = typeof input.run_id === 'string' ? runs.get(input.run_id) : undefined
@@ -1346,12 +1353,14 @@ async function paneApproval($: EngineInterface, decision: 'approve' | 'reject', 
   $.ui.invalidate('ui.render')
 }
 
-// statusText with the hold spelled out: a waiting run otherwise reads as running with nothing started.
+// statusText with the hold spelled out: a waiting run otherwise reads as running with nothing started. It ends with the
+// preview of what approving starts, the same text /dag preview gives for the definition.
 function runStatusText(run: Run): string {
   const text = statusText(run, sessionId)
   if (!awaitingApproval(run)) return text
   const [head = '', ...rest] = text.split('\n')
-  return [head, `  awaiting approval: /dag approve ${run.runId} starts it, /dag reject ${run.runId} [reason] cancels it`, ...rest].join('\n')
+  const preview = previewText(previewDefinition(run.definition, { maxConcurrent }), undefined)
+  return [head, `  awaiting approval: /dag approve ${run.runId} starts it, /dag reject ${run.runId} [reason] cancels it`, ...rest, preview].join('\n')
 }
 
 // listText's lines, newest first, with waiting runs marked.
@@ -1361,39 +1370,13 @@ function runListText(): string {
   return all.sort((a, b) => b.createdAt - a.createdAt).map(run => `${runLine(run, sessionId)}${awaitingApproval(run) ? '  [awaiting approval]' : ''}`).join('\n')
 }
 
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`
-}
-
 // /dag run and /dag preview take an absolute path as typed and anything else relative to the project.
 async function commandFilePath($: EngineInterface, given: string): Promise<string> {
   return given.startsWith('/') ? given : `${await $.session.cwd()}/${given}`
 }
 
-// The text of /dag preview, plain English like /dag status. previewRequest adds no planning-skill warning, since a command is not
-// gated by that skill, so the warnings are the preview's own.
-function previewText(preview: Preview, existingRunId: string | undefined): string {
-  const byId = new Map(preview.nodes.map(node => [node.id, node]))
-  const lines = [
-    `Preview (nothing started): ${plural(preview.node_count, 'node')}, ${plural(preview.waves.length, 'wave')}, widest wave ${preview.widest_wave}, max concurrent ${preview.max_concurrent}`,
-    preview.routing_note,
-    ...(existingRunId ? [`This definition is already run ${existingRunId}; /dag run would reuse it.`] : []),
-    ...preview.waves.map((ids, index) => `  wave ${index + 1}: ${ids.map(id => {
-      const node = byId.get(id)
-      return node ? `${id} (${node.category} -> ${node.model})` : id
-    }).join(', ')}`),
-    `Critical path: ${preview.critical_path.join(' -> ')}`,
-  ]
-  if (preview.write_conflicts.length) {
-    lines.push('Write conflicts (can run at the same time):')
-    for (const conflict of preview.write_conflicts) lines.push(`  ${conflict.a} <-> ${conflict.b}: ${conflict.paths.join(', ')}`)
-  }
-  if (preview.unchecked_writes.length) lines.push(`unchecked write scope (no writes declared): ${preview.unchecked_writes.join(', ')}`)
-  if (preview.warnings.length) lines.push('Warnings:', ...preview.warnings.map(warning => `- ${warning}`))
-  return lines.join('\n')
-}
-
-async function runCommand($: EngineInterface, args: string): Promise<{ text?: string }> {
+// `fromComposer` is whether the person typed the command in the prompt, the only origin that may approve a held run.
+async function runCommand($: EngineInterface, args: string, fromComposer = false): Promise<{ text?: string }> {
   const [verb = 'open', ...rest] = splitArgs(args)
   if (verb === 'inspect') {
     const choice = rest[0]
@@ -1476,7 +1459,7 @@ async function runCommand($: EngineInterface, args: string): Promise<{ text?: st
     if (!given) return { text: USAGE }
     const read = await readDefinitionFile($, await commandFilePath($, given))
     if (!read.ok) return { text: read.error.message }
-    const reply = await startDefinition($, read.value, 'user')
+    const reply = await startDefinition($, read.value, 'user', fromComposer)
     if (reply.isError) return { text: `DAG not started:\n${reply.result}` }
     const started = JSON.parse(reply.result) as { run_id: string; reused: boolean; warnings?: string[] }
     const run = runs.get(started.run_id)
@@ -1882,10 +1865,11 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
         gap(),
       ]
     : []
-  // A run of this session held for approval: say so, and offer the two answers. Hotkeys a and r are free in this pane.
+  // A run of this session held for approval: say so, show what approving starts, and offer the two answers. Hotkeys a and r are free in this pane.
   const approval = run.sessionId === sessionId && awaitingApproval(run)
     ? [
         line([{ text: t.approvalWaiting, color: ACCENT, bold: true }]),
+        ...approvalPreview(previewDefinition(run.definition, { maxConcurrent }), e.props.bodyColumns, t).map(line),
         Box({
           flexDirection: 'row',
           columnGap: 2,
@@ -2309,12 +2293,13 @@ export function register(on: On, options: PluginOptions) {
     // Approving is the person's call: the model could otherwise approve its own run, or switch the gate off.
     const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || (verb === 'approval' && setting !== undefined)
     if (userOnly && e.origin.kind !== 'composer') return { text: USER_ONLY }
-    if (!mainTurnBusy || (verb !== 'run' && verb !== 'retry' && verb !== 'approve')) return serialized(() => runCommand($, e.args ?? ''))
+    const fromComposer = e.origin.kind === 'composer'
+    if (!mainTurnBusy || (verb !== 'run' && verb !== 'retry' && verb !== 'approve')) return serialized(() => runCommand($, e.args ?? '', fromComposer))
     return serialized(async () => {
       const before = pendingStarts.length
       deferStarts = true
       try {
-        const out = await runCommand($, e.args ?? '')
+        const out = await runCommand($, e.args ?? '', fromComposer)
         return pendingStarts.length > before ? { text: `${out.text ?? ''}\n${t.runDeferred}`.trim() } : out
       } finally {
         deferStarts = false

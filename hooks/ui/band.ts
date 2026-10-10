@@ -1,9 +1,10 @@
-import { isSettled } from '../engine/run.ts'
+import { awaitingApproval, isSettled } from '../engine/run.ts'
 import type { NodeRun, NodeState, Run } from '../engine/types.ts'
 import type { Strings } from './i18n.ts'
 import { ACCENT, fit, width, type Line } from './text.ts'
 
-export type RunSummary = { run: Run; done: number; total: number; running: number; failed: number; waiting: number; otherRuns: number }
+/** `awaiting` is a run held for start approval: its running count is zero because nothing may start. */
+export type RunSummary = { run: Run; done: number; total: number; running: number; failed: number; waiting: number; otherRuns: number; awaiting: boolean }
 export type BandButton = { key: string; hotkey: string; label: string; nodeId?: string }
 export type BandModel = { summary?: Line; buttons: BandButton[]; notice?: Line }
 export type BandInput = {
@@ -32,7 +33,7 @@ export function summarizeActive(runs: Iterable<Run>, sessionId: string, waiting:
   const run = active.reduce<Run | undefined>((best, current) => (!best || current.updatedAt >= best.updatedAt ? current : best), undefined)
   if (!run) return undefined
   const count = (state: NodeState) => run.nodes.filter(node => node.state === state).length
-  return { run, done: count('completed'), total: run.nodes.length, running: count('running'), failed: count('failed'), waiting, otherRuns: active.length - 1 }
+  return { run, done: count('completed'), total: run.nodes.length, running: count('running'), failed: count('failed'), waiting, otherRuns: active.length - 1, awaiting: awaitingApproval(run) }
 }
 
 function attentionOf(node: NodeRun, waitingAgents: BandInput['waitingAgents']): Attention | undefined {
@@ -80,7 +81,9 @@ export function buildBand(input: BandInput): BandModel | undefined {
     { text: `  ${t.done(summary.done, summary.total)}` },
     ...(summary.failed ? part(`${ICON.failed} ${t.failedCount(summary.failed)}`, { color: 'red' }) : []),
     ...(summary.waiting ? part(`${ICON.waiting} ${t.bandWaiting(summary.waiting)}`, { color: 'yellow', bold: true }) : []),
-    ...part(`${ICON.running} ${t.bandRunning(summary.running)}`, summary.running ? { color: ACCENT } : { dim: true }),
+    ...(summary.awaiting
+      ? part(`${ICON.waiting} ${t.awaitingApproval}`, { color: 'yellow', bold: true })
+      : part(`${ICON.running} ${t.bandRunning(summary.running)}`, summary.running ? { color: ACCENT } : { dim: true })),
     ...(summary.otherRuns ? part(t.bandOtherRuns(summary.otherRuns), { dim: true }) : []),
   ]
   // One row keeps the buttons: the pinned status line repeats the counts, the hotkeys exist nowhere else.

@@ -1,6 +1,7 @@
 import type { ContextRecord } from '../engine/context.ts'
 import type { DecisionOutcome, DecisionRecord } from '../engine/decisions.ts'
 import { MAX_AUTO_RECOVERIES } from '../engine/recovery.ts'
+import { awaitingApproval } from '../engine/run.ts'
 import { projectSessions, sessionConflicts, type SessionRecord } from '../engine/sessions.ts'
 import type { NodeRun, NodeState, Run, RunStatus, VerificationEvidence } from '../engine/types.ts'
 import { stringsFor, type Language, type Strings } from './i18n.ts'
@@ -414,7 +415,8 @@ function sourceLine(label: string, path: string, columns: number): Line {
 }
 
 function runLine(run: Run, s: Strings): Line {
-  return indented(bold(run.name), seg(' · '), seg(s.state[run.status], stateStyle(run.status)), dim(` · ${run.runId}`))
+  const state = awaitingApproval(run) ? seg(s.awaitingApproval, WARN) : seg(s.state[run.status], stateStyle(run.status))
+  return indented(bold(run.name), seg(' · '), state, dim(` · ${run.runId}`))
 }
 
 function handoffText(handoff: Handoff, input: InspectorInput, t: InspectorStrings): string {

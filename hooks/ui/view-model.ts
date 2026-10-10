@@ -1,5 +1,6 @@
 import { layers } from '../engine/graph.ts'
 import { STATUS_PREFIX } from '../engine/node-prompt.ts'
+import { awaitingApproval } from '../engine/run.ts'
 import type { NodeRun, NodeState, Run, RunStatus } from '../engine/types.ts'
 import { isStalled, type Activity } from './activity.ts'
 import type { GraphModel, GraphNode, ViewKind } from './graph-model.ts'
@@ -252,7 +253,9 @@ function runSelector(runs: Run[], index: number, view: ViewState, t: Strings): R
     const done = run.nodes.filter(n => n.state === 'completed').length
     const running = run.nodes.filter(n => n.state === 'running').length
     const waiting = run.nodes.filter(n => !SETTLED_NODES.has(n.state) && n.state !== 'running').length
-    const text = `${selected ? '>' : ' '} ${run.name}  ${t.runSummary(done, run.nodes.length, running, waiting)}`
+    // A held run has started nothing; its nodes are not "waiting" for a slot, so it reads as waiting for the person instead.
+    const counts = awaitingApproval(run) ? `${t.done(done, run.nodes.length)} · ${t.awaitingApproval}` : t.runSummary(done, run.nodes.length, running, waiting)
+    const text = `${selected ? '>' : ' '} ${run.name}  ${counts}`
     return { index: i, selected, line: [selected ? { text, color: ACCENT, bold: true as const } : { text }] }
   })
   return {
@@ -275,7 +278,7 @@ export function buildPane(runs: Run[], view: ViewState, now: number, context: Vi
     top,
     [{ text: run.name, bold: true }, { text: `  ${t.runOf(index + 1, runs.length, run.runId)}`, dim: true }],
     [
-      styled(t.state[run.status], run.status),
+      awaitingApproval(run) ? { text: t.awaitingApproval, color: WAITING_COLOR } : styled(t.state[run.status], run.status),
       { text: ` · ${t.done(done, run.nodes.length)}` },
       ...(failed ? [{ text: ` · ${t.failedCount(failed)}`, color: 'red' }] : []),
     ],

@@ -1,4 +1,5 @@
 import { truncate } from './node-prompt.ts'
+import type { Preview, WriteConflict } from './preview.ts'
 import { snapshotOf } from './run.ts'
 import type { EngineError, Run } from './types.ts'
 
@@ -42,6 +43,44 @@ export function statusText(run: Run, currentSession: string): string {
     const error = node.last_error ? `  (${node.last_error.message})` : ''
     lines.push(`  ${node.state.padEnd(9)}  ${node.id}${deps}${error}`)
   }
+  return lines.join('\n')
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+// `id (category -> model)` for each node of one wave, in the wave's order. The pane's approval block takes these two
+// pieces from here too, so /dag preview, /dag status and the pane cannot disagree about which node runs on which model
+// or which paths clash.
+export function waveEntries(preview: Preview, ids: string[]): string {
+  const byId = new Map(preview.nodes.map(node => [node.id, node]))
+  return ids.map(id => {
+    const node = byId.get(id)
+    return node ? `${id} (${node.category} -> ${node.model})` : id
+  }).join(', ')
+}
+
+export function conflictEntry(conflict: WriteConflict): string {
+  return `${conflict.a} <-> ${conflict.b}: ${conflict.paths.join(', ')}`
+}
+
+// The text of /dag preview and of /dag status for a held run, plain English like /dag status. previewRequest adds no
+// planning-skill warning, since a command is not gated by that skill, so the warnings are the preview's own.
+export function previewText(preview: Preview, existingRunId: string | undefined): string {
+  const lines = [
+    `Preview (nothing started): ${plural(preview.node_count, 'node')}, ${plural(preview.waves.length, 'wave')}, widest wave ${preview.widest_wave}, max concurrent ${preview.max_concurrent}`,
+    preview.routing_note,
+    ...(existingRunId ? [`This definition is already run ${existingRunId}; /dag run would reuse it.`] : []),
+    ...preview.waves.map((ids, index) => `  wave ${index + 1}: ${waveEntries(preview, ids)}`),
+    `Critical path: ${preview.critical_path.join(' -> ')}`,
+  ]
+  if (preview.write_conflicts.length) {
+    lines.push('Write conflicts (can run at the same time):')
+    for (const conflict of preview.write_conflicts) lines.push(`  ${conflictEntry(conflict)}`)
+  }
+  if (preview.unchecked_writes.length) lines.push(`unchecked write scope (no writes declared): ${preview.unchecked_writes.join(', ')}`)
+  if (preview.warnings.length) lines.push('Warnings:', ...preview.warnings.map(warning => `- ${warning}`))
   return lines.join('\n')
 }
 
