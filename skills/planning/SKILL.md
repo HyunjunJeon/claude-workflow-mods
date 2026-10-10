@@ -226,6 +226,7 @@ You cannot issue these commands.
 
 The plugin keeps the session's last 8 user requests and pinned notes.
 It re-injects a bounded context snapshot with source paths at these points: first prompt, after compaction, after `/clear`, and resume.
+Later prompts carry it only when run or note state changed since you last saw it; progress and settle messages carry their own news.
 
 | Action | Reads |
 | --- | --- |
