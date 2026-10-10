@@ -93,11 +93,12 @@ Each node has these fields:
 
 Each check uses one of these forms:
 
-- `{"kind": "file", "path": "<project-relative>", "contains": "<nonempty text>"}`; `contains` is optional.
-- `{"kind": "command", "argv": ["<program>", "<arg>"]}`.
+- `{"kind": "file", "path": "<path>", "contains"?, "absent"?, "matches"?, "lastLine"?, "equals"?}`; every given text field must hold.
+- `{"kind": "command", "argv": ["<program>", "<arg>"], "expect"?: {"exit"?, "stdout"?, "stderr"?}}`; without `expect.exit` only exit 0 passes.
 
 `start` and `amend` refuse nodes without checks (`verification_required`).
-Paths in `verify` and `writes` cannot be absolute, contain `..`, or point inside `.claude`.
+Paths in `writes` cannot be absolute, contain `..`, or point inside `.claude`.
+A relative verify path may not contain a `.claude` segment in any case; an absolute one is read-only and may not reach `.claude/dag`.
 
 Optional extras are `agent`, `label`, `task_summary`, `description` and `load_skills`.
 `agent` selects a subagent type, such as `Explore`.
@@ -132,9 +133,9 @@ List as dependencies exactly the nodes whose results a node consumes - no more, 
       { "id": "verify", "category": "unspecified-low", "dependsOn": ["rewrite"], "writes": ["notes/docs-verify.md"],
         "verify": [
           { "kind": "command", "argv": ["claude", "plugin", "validate", "."] },
-          { "kind": "file", "path": "notes/docs-verify.md", "contains": "Action audit: PASS" }
+          { "kind": "file", "path": "notes/docs-verify.md", "lastLine": "Action audit: PASS" }
         ],
-        "prompt": "TASK: Independently compare every documented action with hooks/engine/tool-spec.ts. DELIVERABLE: notes/docs-verify.md with evidence per action; write Action audit: PASS only if all match. SCOPE: read README.md and hooks/engine/tool-spec.ts, write only the report. VERIFY: run claude plugin validate . and record its result. STOP WHEN: every action has a supported verdict; report failed if any mismatch remains." }
+        "prompt": "TASK: Independently compare every documented action with hooks/engine/tool-spec.ts. DELIVERABLE: notes/docs-verify.md with evidence per action; end the file with Action audit: PASS only if all match. SCOPE: read README.md and hooks/engine/tool-spec.ts, write only the report. VERIFY: run claude plugin validate . and record its result. STOP WHEN: every action has a supported verdict; report failed if any mismatch remains." }
     ]
   }
 }
@@ -161,6 +162,7 @@ The run is done when the goal's observable condition holds, not merely when the 
 - Do not poll. Each finished node sends a short progress note with an output excerpt. The plugin sends the run-settled message as a prompt with every node's output and report path. Between messages, plan or read independently, or end your turn.
 - `snapshot {run_id}` is a one-off read for a midpoint decision. `wait {run_id}` returns the same snapshot and cannot block.
 - One run covers one phase. If the next phase depends on this one's findings, read the settled outputs. Then `start` a run under a new key, with the needed facts in its prompts.
+- Group related changes into one phase run with one verification wave at the end (one review pair for code), not a review pair per small change.
 - The user can execute definition files with `/dag run <file.yaml|json>` and watch runs in the `/dag` pane.
 - To run a definition that already exists as a file (for example `flows/<name>.yaml`), call `start {path}` with the project-relative `.yaml`, `.yml` or `.json` path instead of transcribing it into `definition`. Pass exactly one of `path` and `definition`. The same planning gate, lint `warnings` and key reuse apply. A bad path returns `invalid_request`; an unreadable or unparsable file returns `definition_unreadable`.
 - To check the waves, models, write conflicts and lint warnings before starting, call `start` with `dryRun: true` (with `definition` or `path`); it validates and returns a preview but creates no run. Nodes without `writes` that can run beside another node are listed in `unchecked_writes`.
@@ -177,12 +179,14 @@ You can recover a settled run. Completed nodes keep their results:
 ## Verification and automatic recovery
 
 After a node reports completion, the runtime executes its `verify` checks.
-Commands run from the project root without a shell, with a 30-second limit. Exit code 0 passes.
+Commands run from the project root without a shell, with a 30-second limit. Exit code 0 passes unless `expect.exit` names other codes.
 The runtime saves evidence to `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking the node `completed`.
 A failed check or missing evidence makes the node `failed` and prevents its dependents from starting.
 
 A passing check proves only what it checks, not semantic correctness.
 Choose checks that fail when the deliverable is wrong. Never use a no-op such as `true`.
+Use `lastLine` for a verdict line, `absent` on a file or folder for text that must be gone, and `expect` for a command that must fail with a named symptom.
+The reference's verify contract lists the fields and their rules; a Bash wrapper is needed only for pipelines.
 
 Never name deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name.
 Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295).

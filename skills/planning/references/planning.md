@@ -113,7 +113,7 @@ Thus `verify-repro` is run 1's whole verification wave. The two-axis review belo
   - `Observed failure:` Exit code and symptom line, with secrets redacted.
   - `Hypotheses:` 3 to 5, ranked and falsifiable: "If X is the cause, changing Y will make the bug disappear (or changing Z will make it worse)". Refine or discard hypotheses without predictions.
   - `Root cause:` File and line, or "not yet determined".
-- Use one verification node (`quick`, id `verify-repro`) that depends on diagnosis. It runs the recorded command exactly. It checks for a non-zero exit and the user's symptom line. It writes `Reproduction confirmed: exit <n>` to `notes/<bug>-repro-check.md`; this is its `verify` file check. If the command exits 0 or fails differently, end with `DAG_NODE_STATUS: failed: <what differs>`. The runtime directly accepts only exit 0. A wrapper can check an expected failure and return 0 (see "Checks for absence or expected failure"). This node independently checks both symptom and exit code. An unrelated command error is not a reproduction.
+- Use one verification node (`quick`, id `verify-repro`) that depends on diagnosis. It runs the recorded command exactly. It checks for a non-zero exit and the user's symptom line. It writes `Reproduction confirmed: exit <n>` to `notes/<bug>-repro-check.md`; this is its `verify` file check. If the command exits 0 or fails differently, end with `DAG_NODE_STATUS: failed: <what differs>`. Without `expect.exit` the runtime accepts only exit 0, so declare the expected failure natively: `expect` with the recorded exit code and a `stdout` or `stderr` text field naming the symptom (see "Checks for absence or expected failure"). This node independently checks both symptom and exit code. An unrelated command error is not a reproduction.
 - **Red-capable rule.** Diagnosis must already have run the command and observed failure. A command that exits 0 before the fix proves nothing. The failure must be the user's symptom, not another failure. Keep the verdict the same on every run: pin the clock, seed randomness and isolate files. For intermittent bugs, repeat the trigger inside the command and exit non-zero if any iteration fails. Remove inputs, steps and configuration one at a time until each remaining element is required to reproduce the failure.
 - **Fast.** The runtime kills checks after 30 seconds. First narrow slower loops to one test, a fixture or smaller input. Aim for seconds.
 - **No loop.** If no red-capable loop can be built, do not guess hypotheses. List the attempts and end with `DAG_NODE_STATUS: failed: clarification: <what is needed>`. The main conversation asks for a reproducing environment, redacted artifact (log, HAR, payload), or permission for temporary instrumentation. Then it `retry`s the node with the answer.
@@ -134,11 +134,11 @@ Put it in every prompt that may add logs and in the final audit.
 Prefer a debugger or one targeted log that distinguishes hypotheses. Do not log everything.
 Every added log line uses the tag, so one search can check cleanup.
 
-Add the absence check from "Checks for absence or expected failure" to the fix node's `verify`, alongside the reproduction command.
+Add the absence checks from "Checks for absence or expected failure" to the fix node's `verify`, alongside the reproduction command: one `absent` file check per path.
 Name every source or test path where instrumentation could have been added.
-Exclude workflow metadata, notes and the checker itself; these legitimately contain the tag.
+Exclude workflow metadata, notes and the check's own inputs; these legitimately contain the tag.
 Report the checked paths and result in `## Output`.
-The final audit independently reruns both checks. No native `expectExit` field is required.
+The final audit independently reruns both checks.
 
 **Secrets.** Redact every command, output excerpt and hypothesis before putting it in a prompt, Output or notes file.
 Replace tokens, keys and credentials with `<REDACTED>`.
@@ -173,7 +173,7 @@ The chain is one component in the topology lock, with three node types:
 
 - `expand` adds the new form beside the old form without breaking callers. Its `verify` includes a build or test command and a file check for the new form.
 - `migrate` nodes update callers in batches by affected package or directory. Limit each batch to what one node can edit and recheck. First count callers with read-only Bash (`git grep -l <name> -- <package> | wc -l` per package); do not guess. Each node depends on `expand` and runs the build or tests. The old form keeps those checks passing. Only batches with disjoint write scopes run in parallel. Use `dependsOn` to serialize batches that share files.
-- `contract` deletes the old form after all callers migrate. It depends on every `migrate` node. Its `verify` runs the build or tests; remaining callers fail once the old form is gone. For callers outside build coverage, add a scoped absence check with the wrapper below. Select patterns and caller paths that exclude unrelated text.
+- `contract` deletes the old form after all callers migrate. It depends on every `migrate` node. Its `verify` runs the build or tests; remaining callers fail once the old form is gone. For callers outside build coverage, add one `absent` file check per caller folder for the old name (see "Checks for absence or expected failure"). Select the old name and the folders so they exclude unrelated text.
 
 Example chain for retyping a shared `userId` as `accountId`:
 
@@ -263,6 +263,7 @@ For example, use `Explore` for read-only investigation.
 The main conversation coordinates runs:
 
 - **One run per phase.** If phase 2 depends on phase 1's findings, first let phase 1 settle. Read its summary outputs and full reports when excerpts are insufficient. Then `start` phase 2 under a new key with the needed facts in its prompts.
+- **One verification wave per phase.** Group related changes into one phase run and give that run one verification wave at the end (one review pair for code), rather than a review pair per small change. Prove the phase with an end-to-end scenario test where the project has one, not only each change's own case.
 - **Unknown cause with a reproduction to build.** Diagnose in one run. Fix in another whose `verify` is the reproduction command. See "Debug chain (diagnose run, then fix run)" under "Decomposition doctrine".
 - **Data-driven width.** First list actual files or items with Read and read-only Bash. Then define one node per piece instead of guessing the fan-out.
 - **Concurrent runs.** Distinct keys run concurrently. Start independent graphs together; each settles independently.
@@ -302,7 +303,7 @@ Rules that make node prompts obeyed:
 | Files | One producer owns three or more files, counting `writes` and file `verify` paths. |
 | Sections | The only producer names three or more `## Section` headings in its prompt. |
 
-A verification node depends on other nodes and has verify, validate, check, test, review or audit in its id, label or summary.
+A verification node depends on other nodes and has a word starting with verify, validate, check, test, review or audit in its id, label or summary. Matching is by word start only, so `preview` does not count.
 A final audit is a verification node with two or more inputs and no dependents.
 
 Warnings do not block execution. Treat them as defects.
@@ -315,19 +316,28 @@ The lint cannot distinguish a slice from independent files (see Vertical slices 
 Every node in `start` and `amend` requires `verify` with 1-16 checks.
 Each check has one of these forms:
 
-- `{"kind": "file", "path": "<project-relative>", "contains": "<nonempty text>"}`; `contains` is optional.
-- `{"kind": "command", "argv": [...]}`.
+- `{"kind": "file", "path": "<path>", "contains": "<text>", "absent": "<text>", "matches": "<regex>", "lastLine": "<text>", "equals": "<text>"}`; every text field is optional.
+- `{"kind": "command", "argv": [...], "expect": {"exit": 0, "stdout": {...}, "stderr": {...}}}`; `expect` and each of its keys are optional.
 
 Missing checks return `verification_required`. Malformed checks return `invalid_verification`.
 After the worker reports completion, the runtime executes the checks itself.
-Commands run from the project root without a shell, with a 30-second limit. Exit 0 passes.
+Commands run from the project root without a shell, with a 30-second limit. Exit 0 passes unless `expect.exit` names other codes.
 The runtime writes `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking the node `completed`.
 A failed check or missing evidence fails the node and blocks its dependents.
 
+- **File text fields.** Every field you give must hold:
+  - `contains` and `absent` are substrings that must be present or must be missing.
+  - `matches` is a JavaScript regular expression, applied in multi-line mode.
+  - `lastLine` must equal the file's last line after trailing whitespace is removed.
+  - `equals` must equal the whole text after trailing whitespace is removed.
+- **File paths.** A path is project-relative, or absolute for a read-only check outside the project, such as review notes under `/tmp`. A relative path may not contain a `.claude` segment in any case; an absolute one is read-only and may not reach `.claude/dag`. A missing path fails, also for `absent`. `writes` stays project-relative.
+- **Folder paths.** A folder path allows only `contains` and `absent`. They apply over every regular file under it, hidden and ignored files included, up to 2,000 files and 20 MB; the walk skips the project's own `.claude/dag`. A folder `contains` passes when any one file has the text, not every file; a folder `absent` passes only when no file has it. Keep the folder narrow enough to stay inside those limits.
+- **Command `expect`.** `exit` is one accepted exit code or a list of them. `stdout` and `stderr` each take the same text fields as a file check, applied to that stream. Without `expect.exit` only exit 0 passes. A program that cannot start or times out always fails, whatever `expect` says.
 - Choose checks that fail when the deliverable is wrong. Use the relevant test command, or a file check for a heading or value consumers parse. `true`, `echo ok` and existence checks on existing files prove nothing.
+- Use the narrowest field that fails on a wrong deliverable: `lastLine` for a verdict line, `equals` for a short value file, `matches` for a shape, `absent` for text that must be gone.
 - `start` and `amend` return one `vacuous verify` warning per node. It lists offending checks by their 1-based positions in `verify`. The warning does not prevent execution. Treat it as a defect: `amend` the definition or start a corrected one under a new key.
-- Vacuous means: a file check without `contains` (it only proves the file exists; `touch` passes it); a command whose program basename is `true`, `:`, `echo`, `printf`, `exit`, `yes` or `sleep` (always passes; a directory prefix such as `/bin/true` is stripped, arguments are ignored); `test` or `[` that uses only `-e`, `-f`, `-d` or `-s`, or `ls`, `stat` or `cat` (only proves a path exists). `test` with any other operator (`-n`, `-r`, `-z`) or without a dash flag, such as `test a = b`, is not flagged.
-- Instead, use a file check with nonempty `contains` text consumed downstream, or a command that fails on a wrong deliverable.
+- Vacuous means: a file check with none of the text fields `contains`, `absent`, `matches`, `lastLine` or `equals` (it only proves the file exists; `touch` passes it); a command whose `expect.exit` accepts several exit codes without a `stdout` or `stderr` expectation (any of those exits passes unseen); a command whose program basename is `true`, `:`, `echo`, `printf`, `exit`, `yes` or `sleep` (always passes; a directory prefix such as `/bin/true` is stripped, arguments are ignored); `test` or `[` that uses only `-e`, `-f`, `-d` or `-s`, or `ls`, `stat` or `cat` (only proves a path exists). `test` with any other operator (`-n`, `-r`, `-z`) or without a dash flag, such as `test a = b`, is not flagged.
+- Instead, use a file check with a text field consumed downstream, or a command that fails on a wrong deliverable.
 - Lint reads only `argv[0]` and, for `test` and `[`, their dash flags. It does not inspect shell wrappers such as `sh -c '...'`. Do not use a wrapper to hide a vacuous check.
 - Command checks run on the user's machine without a shell, so aliases and shell functions do not apply. `argv[0]` must be a program every machine has, such as `grep`, `git`, `test`, `bash` or the project's own runner. Optional tools such as ripgrep may be missing, and a missing program fails the check.
 - A passing check proves only its declared condition. The verification wave below checks further semantic correctness.
@@ -339,35 +349,37 @@ A failed check or missing evidence fails the node and blocks its dependents.
 
 ### Checks for absence or expected failure
 
-The schema has no native expected-exit field.
-A `command` check can explicitly invoke a shell or script.
-The wrapper must exit 0 only when the expected condition holds.
-Command and input errors must fail.
+Both need no shell wrapper: the `verify` grammar covers them natively.
+A check passes only when every field it gives holds.
 
-For example, to assert that a debug tag is absent, adapt the tag and paths to the actual instrumentation scope before `start`:
+**Absence** is one file check per path, with `absent`.
+A folder path searches every regular file under it, hidden and ignored files included, up to 2,000 files and 20 MB.
+A missing path fails the check, so a mistyped path cannot pass as clean.
+To assert that a debug tag is absent, adapt the tag and paths to the actual instrumentation scope before `start`:
 
 ```json
-{"kind":"command","argv":["bash","-c","if grep -rF -- \"$1\" \"${@:2}\" >/dev/null; then exit 1; else code=$?; test \"$code\" -eq 1; fi","absence-check","DEBUG-a4f2","src","tests"]}
+{"kind":"file","path":"src","absent":"DEBUG-a4f2"}
+{"kind":"file","path":"tests","absent":"DEBUG-a4f2"}
 ```
 
-`absence-check` is Bash's `$0`, the tag is `$1`, and later arguments name explicit existing source/test paths.
-The search includes hidden and ignored files in those paths.
+Keep each folder narrow enough to stay inside the limits and to exclude generated files, dependencies, notes and the check's own inputs.
 
-| `grep` result | Check result |
-| --- | --- |
-| Exit 1: no match | Pass. |
-| Exit 0: match | Fail. |
-| Any other exit, such as a missing path or an unreadable file | Fail. |
+**Expected failure** is a command check with `expect`:
 
-Do not substitute `! grep` or `|| true`; they can accept search errors.
-Keep paths narrow enough to exclude generated files, dependencies, notes and the wrapper.
-For more involved checks, use a script file.
-Keep the script and its inputs through final verification.
+```json
+{"kind":"command","argv":[...],"expect":{"exit":[1],"stderr":{"contains":"<symptom>"}}}
+```
 
-For an expected failure, the wrapper must check the recorded exit code and specific symptom before returning 0.
-A non-zero exit alone could be a setup failure.
-Validate the wrapper with matching, non-matching and missing-input cases.
+A non-zero exit alone could be a setup failure, such as a typo in a path or a missing input.
+So an expected failure names its symptom with a `stdout` or `stderr` field, as above, and lists the recorded exit code.
+A program that cannot start or times out always fails, so a missing tool cannot pass as an expected failure.
 The independent reviewer still checks that the symptom is the requested bug.
+
+A Bash wrapper is now needed only for pipelines, redirects or environment setup.
+Prefer a script file for those, named in argv, such as `["bash","scripts/check-a4f2.sh"]`.
+The script must propagate failure exit codes; `! grep` and `|| true` can accept search errors.
+Keep the script and its inputs through final verification.
+Validate the script with matching, non-matching and missing-input cases.
 
 ## Verification wave
 
@@ -392,7 +404,8 @@ Replace the single verification node with two end nodes: `review-spec` and `revi
 - **`review-spec` judges the result against the goal and the request.** Report (a) missing or partial implementation, (b) unrequested behavior (scope creep), and (c) implemented but wrong-looking behavior. Each finding quotes its request sentence and cites evidence as file:line. For (b), quote the nearest sentence it exceeds, or state that no sentence covers it. The spec is the run's `goal` plus request text pasted into the prompt. "See the goal" is not a quote. Rerun the producers' real check from `verify`; record its exit code as evidence for (c). Use `## Request sentences`, `## Findings`, and `## Real check` in the notes file. Under Findings, include groups (a), (b), (c), each `none` when empty. Include the Safe-but-wrong audit checklist below in the prompt.
 - **`review-standards` judges the result against the repository's rule files** and the Fowler code-smell baseline. Name known files, such as CONTRIBUTING and CLAUDE.md, in the prompt; the node searches for more. Load the baseline with `load_skills: ["dag-workflow:review-standards"]`, using skill `dag-workflow:review-standards`. `load_skills` is outside the fingerprint; adding it through `amend` re-runs nothing. Quote the rule for every documented breach. Label smells as judgment calls, never hard violations. Repository rules override the baseline. Skip what a linter or compiler already enforces. Use `## Rule sources`, `## Rule breaches`, and `## Judgment calls` in the notes file, each `none` when empty. If no rule files exist, say so and use only the baseline. If the baseline is missing from context, write "baseline unavailable" and judge only documented rules.
 - **Verdict lines.** Write each notes file once, in full, with exactly one final verdict line. Use `Spec verdict: PASS` or `Spec verdict: FAIL`, and `Standards verdict: PASS` or `Standards verdict: FAIL`. Spec passes only when (a), (b), (c) are empty, the real check exits 0, and the checklist holds. Standards fails only for documented-rule breaches; judgment calls alone pass. On FAIL, end the node with `DAG_NODE_STATUS: failed: <what failed>`.
-- **The verdict is machine-checked.** Each reviewer declares a `verify` file check with `contains` set to its PASS line: `Spec verdict: PASS` or `Standards verdict: PASS`. Add a check for its findings heading: `## Findings` or `## Rule breaches`. Thus a FAIL report fails verification even if the node claims completion. Tell the node to put PASS text only on the final line. Quoting PASS elsewhere in a FAIL report would satisfy the check.
+- **The verdict is machine-checked.** Each reviewer declares a `verify` file check with `lastLine` set to its PASS line, for example `{"kind":"file","path":"<notes path>","lastLine":"Spec verdict: PASS"}` or, for the rules axis, `{"kind":"file","path":"<notes path>","lastLine":"Standards verdict: PASS"}`. Add a `contains` check for its findings heading, for example `{"kind":"file","path":"<notes path>","contains":"## Findings"}` (`## Rule breaches` for the rules axis). Thus a FAIL report fails verification even if the node claims completion. Only the final line counts, so quoting PASS earlier in a FAIL report cannot satisfy the check. Tell the node to end the file with the verdict line and write nothing after it.
+- **Notes may live outside the project.** Because `verify` allows absolute read-only paths, a reviewer can write its notes to a path such as `/tmp/<run>/review-spec-notes.md`, so working notes never land in the repository. Give the node that exact absolute path in its prompt and in `verify`, and leave it out of `writes`, which stays project-relative.
 - **Self-contained prompts.** Reviewers cannot spawn sub-agents or ask questions. Before `start`, pin the fixed point: `git rev-parse HEAD` for uncommitted work, or the base commit. Paste it, the goal and the request text verbatim into both prompts. Missing input ends with `DAG_NODE_STATUS: failed: missing-input: <what>`, never a question. Reviewers read their targets and write only their own notes files. Use names such as `<node-id>-notes.md`, never names starting with REPORT, SUMMARY, FINDINGS or ANALYSIS. Each prompt marks the other axis out of scope.
 - **Reading and recovery.** Read the reports side by side. Never merge findings or rank across axes; name the worst finding separately for each axis. To clear FAIL, `amend` the faulty producer so both dependent reviewers re-run. Retry only the reviewer after a transient failure; otherwise it would review the same code again.
 
