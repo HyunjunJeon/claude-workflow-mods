@@ -22,7 +22,7 @@ export function isFinalAudit(definition: Definition, node: NodeDef): boolean {
 const MIN_SPLIT_FILES = 3
 const MIN_SPLIT_SECTIONS = 3
 // A change and its own tests are one deliverable (the doctrine keeps them in one node), so tests do not count.
-// A tests folder on its own counts as tests too: normalizePath strips the trailing slash, so writes: ['tests/'] reaches this test as "tests".
+// A tests folder on its own counts as tests too: normalizePath strips the trailing slash, so writes: ['tests/'] reaches this regex as "tests".
 const TEST_PATH = /(^|\/)(tests?|__tests__)(\/|$)|\.(test|spec)\.[^/]+$/
 
 // ./src/, src//a.ts, src/./a.ts and src\a.ts name the same place as src and src/a.ts, so every path is spelled one way before it is compared.

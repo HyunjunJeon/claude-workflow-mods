@@ -168,12 +168,24 @@ test('under-split lint treats a bare tests folder as tests, not as a deliverable
   expect(underSplit({ writes: ['tests/', 'a.ts', 'b.md'] })).toEqual([])
 })
 
-test('under-split lint treats a nested tests or __tests__ folder as tests', async () => {
-  expect(underSplit({ writes: ['src/tests', 'src/__tests__/', 'a.ts', 'b.md'] })).toEqual([])
+test('under-split lint treats a nested tests folder as tests', async () => {
+  expect(underSplit({ writes: ['src/tests', 'a.ts', 'b.md'] })).toEqual([])
 })
 
-test('under-split lint treats test, tests/x.ts and a spec file as tests', async () => {
-  expect(underSplit({ writes: ['test', 'tests/x.ts', 'src/a.spec.ts', 'a.ts', 'b.md'] })).toEqual([])
+test('under-split lint treats a nested __tests__ folder as tests', async () => {
+  expect(underSplit({ writes: ['src/__tests__/', 'a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint treats a bare test folder as tests', async () => {
+  expect(underSplit({ writes: ['test', 'a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint treats a file inside a tests folder as tests', async () => {
+  expect(underSplit({ writes: ['tests/x.ts', 'a.ts', 'b.md'] })).toEqual([])
+})
+
+test('under-split lint treats a spec file as tests', async () => {
+  expect(underSplit({ writes: ['src/a.spec.ts', 'a.ts', 'b.md'] })).toEqual([])
 })
 
 test('under-split lint does not treat names that merely contain test as tests', async () => {
