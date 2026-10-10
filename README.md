@@ -111,7 +111,7 @@ that prints OK when run with python3 test_app.py.
    - DAG 노드 에이전트와 플러그인 자신의 호출(노드 spawn, TaskStop)은 제한하지 않습니다.
 2. **프로토콜 주입**: 사용자 프롬프트마다 "계획을 DAG로 짜서 실행하고, 의존 관계를 정확히 적고, 정착 요약을 확인하라"는 짧은 지침을 붙입니다. 비대화형 세션(`session.start`의 `isInteractive`가 false인 경우, 예: `claude -p`)에서는 지침이 한 줄 더 붙어, 사용자에게 묻지 말고(AskUserQuestion도, 확인 질문도 안 됨) 스스로 결정하되 가정을 정의의 `goal`과 노드 프롬프트에 적으라고 알립니다.
 3. **도구 설명**: dag 도구 설명에 같은 원칙을 넣습니다.
-4. **계획 스킬 게이트**: 세션의 첫 `start`/`amend`는 `dag-workflow:planning` 스킬을 불러오기 전까지 `planning_skill_required`로 거부됩니다([계획 스킬](#계획-스킬)). 게이트가 인정하는 스킬 이름은 `dag-workflow:planning`과 접두사 없는 `planning`뿐이며, 다른 플러그인의 같은 이름 스킬은 인정하지 않습니다. `/clear`하면 다시 불러와야 합니다. `/reload-plugins`는 게이트를 다시 닫지 않습니다(불러옴 여부를 호스트 세션 상태 `$.state`에 보관하므로 핫 리로드를 지나도 남고, 대화를 비우는 `/clear`만 게이트를 닫습니다). 사용자가 직접 실행하는 `/dag run`은 게이트하지 않습니다.
+4. **계획 스킬 게이트**: 세션의 첫 `start`/`amend`는 `dag-workflow:planning` 스킬을 불러오기 전까지 `planning_skill_required`로 거부됩니다([계획 스킬](#계획-스킬)). 게이트가 인정하는 스킬 이름은 `dag-workflow:planning`과 접두사 없는 `planning`뿐이며, 다른 플러그인의 같은 이름 스킬은 인정하지 않습니다. `/clear`하면 다시 불러와야 합니다. `/reload-plugins`는 게이트를 다시 닫지 않습니다(불러옴 여부를 호스트 세션 상태 `$.state`에 보관하므로 핫 리로드를 지나도 남고, 대화를 비우는 `/clear`만 게이트를 닫습니다). `claude --resume`으로 같은 세션을 새 프로세스에서 이어 가도 게이트는 열린 채로 남는데, 플러그인이 불러옴 표시를 세션 컨텍스트 파일 `.claude/dag/context/<세션 id>.json`에도 함께 기록하기 때문입니다. 이 파일은 세션이 DAG를 쓴 뒤(실행을 소유했거나 메모를 고정한 뒤)에야 생기므로, 스킬만 불러온 세션, 새 세션 id를 받는 포크(`--fork-session`), `retention_days`가 지나 컨텍스트 파일이 지워진 세션은 스킬을 다시 불러와야 합니다. 사용자가 직접 실행하는 `/dag run`은 게이트하지 않습니다.
 
 `guide`는 2·3만 적용하고 스킬을 안 불렀으면 경고만 남기며, `off`는 아무것도 하지 않습니다. 다른 도구를 메인에서 계속 쓰려면 `main_allowed_tools` 설정에 이름을 추가합니다.
 
