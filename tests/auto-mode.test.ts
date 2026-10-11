@@ -37,6 +37,22 @@ function jevModel(on: On, h: Harness, answer: Answer = SMALL) {
   return jev
 }
 
+type Row = { role: 'user' | 'assistant'; text: string; toolUses: [] }
+
+// The host's transcript for these tests. `reads` counts reads of the main conversation (a node's recovery passes an
+// agentId and is not counted); `backend` makes the host throw or refuse.
+function transcript(on: On, rows: Row[] = []) {
+  const host = { rows, reads: 0, backend: 'rows' as 'rows' | 'throws' | 'deny' }
+  on('session.messages', (_$, e) => {
+    if (e.agentId === undefined) host.reads += 1
+    if (host.backend === 'throws') throw new Error('transcript unavailable')
+    return { value: host.backend === 'deny' ? { deny: 'transcript refused' } : host.rows }
+  })
+  return host
+}
+
+const OPTIONS = 'Pick one:\n1. Add the feature across four files\n2. Leave it'
+
 async function ask($: Engine, text: string): Promise<void> {
   await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 }
@@ -224,4 +240,63 @@ test('/dag enforce accepts auto and shows the turn mode', async ($, on) => {
   expect(await edit($)).toBeUndefined()
   expect((await command($, 'enforce loose')).text).toBe('Unknown enforcement level "loose". Use strict, auto, guide or off.')
   expect((await command($, 'enforce')).text).toBe('DAG enforcement: auto (this turn: direct)')
+})
+
+test('the mode question carries the end of the assistant\'s last reply', async ($, on) => {
+  const h = harness(on)
+  jevModel(on, h, { choice: 'dag', confidence: 0.9 })
+  transcript(on, [
+    { role: 'user', text: 'Plan the settings page', toolUses: [] },
+    { role: 'assistant', text: OPTIONS, toolUses: [] },
+  ])
+  await boot($, null)
+  await ask($, '1')
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(modeRequests(h)[0]?.state).toEqual({ request: '1', recent: [], previousReply: OPTIONS })
+  expect(h.submits[0]?.context[0]).toBe(AUTO_DAG)
+})
+
+test('the mode question skips a newest assistant message that has no text', async ($, on) => {
+  const h = harness(on)
+  jevModel(on, h)
+  transcript(on, [
+    { role: 'assistant', text: OPTIONS, toolUses: [] },
+    { role: 'user', text: 'Show me', toolUses: [] },
+    { role: 'assistant', text: '  \n', toolUses: [] },
+  ])
+  await boot($, null)
+  await ask($, '2')
+  expect((modeRequests(h)[0]?.state as { previousReply?: string }).previousReply).toBe(OPTIONS)
+})
+
+test('the mode question is still asked, and a direct answer still opens a direct turn, when the transcript is unreadable', async ($, on) => {
+  const h = harness(on)
+  jevModel(on, h)
+  const host = transcript(on, [{ role: 'assistant', text: OPTIONS, toolUses: [] }])
+  await boot($, null)
+
+  host.backend = 'throws'
+  await ask($, 'Fix the typo in a.ts')
+  expect(await edit($)).toBeUndefined()
+
+  host.backend = 'deny'
+  await ask($, 'Fix the typo in b.ts')
+  expect(await edit($)).toBeUndefined()
+
+  expect(modeRequests(h)).toHaveLength(2)
+  expect(modeRequests(h)[0]?.state).toEqual({ request: 'Fix the typo in a.ts', recent: [] })
+  expect(modeRequests(h)[1]?.state).toEqual({ request: 'Fix the typo in b.ts', recent: ['Fix the typo in a.ts'] })
+  expect(protocols(h)).toEqual(['direct', 'direct'])
+})
+
+test('the mode question reads no transcript while this session has an active run', async ($, on) => {
+  const h = harness(on)
+  jevModel(on, h)
+  const host = transcript(on, [{ role: 'assistant', text: OPTIONS, toolUses: [] }])
+  await boot($, null)
+  await start($, DEFINITION)
+  await ask($, '1')
+  expect(modeRequests(h)).toHaveLength(0)
+  expect(host.reads).toBe(0)
+  expect(h.submits[0]?.context[0]).toBe(AUTO_DAG)
 })

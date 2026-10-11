@@ -1,4 +1,4 @@
-import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, Timer } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
@@ -496,6 +496,23 @@ function ownsUnsettledRun(): boolean {
   return [...runs.values()].some(run => run.sessionId === sessionId && !isSettled(run))
 }
 
+// The text of the assistant's last reply, where a short answer such as '1' finds the options it picks. A transcript the
+// host refuses or cannot read leaves the mode question as it was, without the reply.
+async function lastAssistantReply($: EngineInterface): Promise<string | undefined> {
+  try {
+    // Typed for a main-conversation read, which always resolves to messages; the host's contract still allows a refusal.
+    const rows = (await $.session.messages()) as SessionMessage[] | { deny: string }
+    if (!Array.isArray(rows)) {
+      debug($, `turn mode asked without the last reply: ${rows.deny}`)
+      return undefined
+    }
+    return rows.findLast(row => row.role === 'assistant' && row.text.trim())?.text
+  } catch (error) {
+    debug($, `turn mode asked without the last reply: ${message(error)}`)
+    return undefined
+  }
+}
+
 // How a user turn runs under enforcement auto. Only a confident Jev answer picks the mode; every other path gives 'dag',
 // the strict rules. `recent` holds the user's requests before this one, oldest first.
 async function decideTurnMode($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnMode> {
@@ -507,7 +524,7 @@ async function decideTurnMode($: EngineInterface, text: string, recent: readonly
     debug($, `turn mode dag without asking Jev: ${jevEnabled ? 'no Jev backend (no TYPESAFE_API_KEY and jev_model_fallback off)' : 'jev_enabled is off'}`)
     return 'dag'
   }
-  const request = modeRequest(text, recent)
+  const request = modeRequest(text, recent, await lastAssistantReply($))
   const evaluation = await evaluateJevWithin($, request, MODE_BUDGET_MS, signal)
   const choice = evaluation.choices.get('mode')
   const outcome = decisionOutcome(evaluation, choice, 'mode', MODE_CONFIDENCE)

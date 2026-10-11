@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { MODE_CONFIDENCE, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, routingParts, routingRequest } from '../hooks/engine/jev.ts'
+import { MODE_CONFIDENCE, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, routingParts, routingRequest } from '../hooks/engine/jev.ts'
 import { hash } from '../hooks/engine/hash.ts'
 import { createRun } from '../hooks/engine/run.ts'
 
@@ -310,4 +310,39 @@ test('the mode request caps a long request and each earlier request, keeping the
   const many = modeRequest('now', ['r1', 'r2', 'r3', 'r4', 'r5'])
   expect((many.state as { recent: string[] }).recent).toEqual(['r3', 'r4', 'r5'])
   expect((modeRequest('now', ['only']).state as { recent: string[] }).recent).toEqual(['only'])
+})
+
+test('the mode request carries the last reply and tells Jev to read a short answer by the work it selects', () => {
+  const reply = 'Pick one:\n1. Add the feature across four files\n2. Leave it'
+  const request = modeRequest('1', ['Plan the feature'], reply)
+  expect(request.state).toEqual({ request: '1', recent: ['Plan the feature'], previousReply: reply })
+  const question = request.questions.mode
+  expect(question?.instructions).toContain('state.previousReply')
+  expect(question?.instructions).toContain('the size of that selected work decides the mode, not the length of the reply')
+  expect(question?.criteria?.direct).not.toContain('continues the previous step')
+  expect(question?.criteria?.direct).toContain('a short reply that selects or approves work that is itself this small')
+  expect(question?.criteria?.dag).toContain('A short reply that selects or approves such work counts as dag too.')
+})
+
+test('the mode request keeps the last 1,000 characters of a long reply and says how many came before', () => {
+  const reply = `${'a'.repeat(500)}${'b'.repeat(1_000)}`
+  const state = modeRequest('1', [], reply).state as { previousReply: string }
+  expect(state.previousReply).toBe(`[truncated: first 500 of 1500 characters omitted]\n${'b'.repeat(1_000)}`)
+  expect(capTail('short', 1_000)).toBe('short')
+  expect(capTail('x'.repeat(1_000), 1_000)).toBe('x'.repeat(1_000))
+})
+
+test('the mode request masks secrets in the last reply before it keeps the end', () => {
+  const key = `sk-${'a'.repeat(24)}`
+  const reply = `${'padding '.repeat(200)}\nexport API_KEY=${key}\n1. Rotate it`
+  const state = modeRequest('1', [], reply).state as { previousReply: string }
+  expect(JSON.stringify(state)).not.toContain(key)
+  expect(state.previousReply).toContain('[REDACTED:assignment]')
+  expect(state.previousReply.endsWith('1. Rotate it')).toBe(true)
+})
+
+test('the mode request leaves out previousReply when there is no reply text', () => {
+  expect(modeRequest('1', [], undefined).state).toEqual({ request: '1', recent: [] })
+  expect(modeRequest('1', [], '').state).toEqual({ request: '1', recent: [] })
+  expect(Object.keys(modeRequest('1', [], ' \n\t ').state as object)).toEqual(['request', 'recent'])
 })
