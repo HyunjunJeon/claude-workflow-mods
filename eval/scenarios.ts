@@ -1,5 +1,6 @@
 export type Scenario = {
   id: string
+  // a DAG shape name, or 'direct' when the request should finish in the main conversation without any DAG run
   expect: string
   prompt: string
   files: Record<string, string>
@@ -20,7 +21,7 @@ const todoFiles = Object.fromEntries(
 export const SCENARIOS: Scenario[] = [
   {
     id: 'single-edit',
-    expect: 'single',
+    expect: 'direct',
     prompt: 'In counter.py, rename the local variable x to count without changing behavior.',
     files: {
       'counter.py': 'def tally(items):\n    x = 0\n    for item in items:\n        if item:\n            x += 1\n    return x\n\n\nif __name__ == "__main__":\n    print(tally([1, 0, 2, None, 3]))\n',
@@ -64,7 +65,7 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: 'debug-fix',
-    expect: 'chain',
+    expect: 'direct',
     prompt: 'python3 test_mathutil.py fails. Find out why and fix mathutil.py; do not change the test.',
     files: {
       'mathutil.py': 'def average(values):\n    if not values:\n        return 0\n    return sum(values) // len(values)\n\n\ndef clamp(value, low, high):\n    return max(low, min(value, high))\n',

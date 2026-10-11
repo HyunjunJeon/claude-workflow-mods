@@ -179,7 +179,7 @@ async function pool<T, R>(items: T[], size: number, work: (item: T) => Promise<R
 function markdown(results: ScenarioResult[], stamp: string, options: Options): string {
   const shapes = new Set(results.flatMap(r => r.runs.map(run => run.shape)))
   const producerShapes = new Set(results.flatMap(r => r.runs.map(run => run.producerShape)))
-  const matches = results.filter(r => r.runs.some(run => run.shape === r.expect || run.producerShape === r.expect)).length
+  const matches = results.filter(r => (r.expect === 'direct' ? r.runs.length === 0 : r.runs.some(run => run.shape === r.expect || run.producerShape === r.expect))).length
   const rows = results.map(r => {
     const main = r.runs[0]
     const shape = r.runs.map(run => `${run.shape} (producers: ${run.producerShape})`).join('; ') || 'no run'
