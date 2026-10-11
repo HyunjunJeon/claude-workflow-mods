@@ -11,7 +11,10 @@ Use `mcp__dag-workflow__dag` to run every task as a DAG of subagent nodes.
 The main conversation plans, reads, orchestrates and verifies.
 Edit, Write, mutating Bash, Agent and other work tools run inside nodes.
 This skill explains how to plan those nodes.
-A one-step task uses one node and follows the same rules.
+Under enforcement auto (the default), the protocol line that comes with each prompt says whether the request runs directly or as a DAG.
+This skill governs the DAG turns, so "every task" above means every task in a DAG turn.
+A direct turn becomes a DAG turn when you start a run, for example because the work grew to three or more independent pieces.
+Under enforcement strict, every request is a DAG, and a one-step task is a one-node DAG that follows the same rules.
 
 If `mcp__dag-workflow__dag` is unavailable, the mod is off.
 `--safe-mode`, `disableAllHooks` and `allowManagedModsOnly` keep skills loaded but remove the tool and hooks.
@@ -257,7 +260,7 @@ Correcting drift during the run can take one message. Discovering it during synt
 
 ## What the main conversation may do
 
-Under strict enforcement, the main conversation can use:
+Under strict enforcement, and in DAG turns under enforcement auto, the main conversation can use:
 
 - Read, LSP, web search/fetch, AskUserQuestion and plan mode.
 - Task listing and stopping, plus the dag tool.

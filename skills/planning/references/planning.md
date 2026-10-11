@@ -46,7 +46,8 @@ Then use one synthesis node that depends on all lanes and receives their outputs
 Start synthesis at `quick` or `unspecified-low`: merging verified results is mechanical unless the merge needs judgment.
 A wide refactor is the exception. Its lanes depend on `expand` (see Vertical slices and wide refactors).
 
-**One-step tasks are one-node DAGs.** The main conversation cannot do the work itself.
+**One-step tasks are one-node DAGs.** Under enforcement auto (the default), a small request can run directly in the main conversation when the protocol line says so, and then no DAG is planned.
+Under enforcement strict, and in DAG turns, the main conversation cannot do the work itself, so one step is one node.
 A single edit still needs a node with the full prompt contract and a VERIFY step.
 Do not invent extra nodes.
 
