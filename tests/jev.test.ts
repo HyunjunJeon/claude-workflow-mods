@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { MODE_CONFIDENCE, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, routingParts, routingRequest } from '../hooks/engine/jev.ts'
+import { MODE_CONFIDENCE, answerModeRequest, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, popupAnswer, routingParts, routingRequest } from '../hooks/engine/jev.ts'
 import { hash } from '../hooks/engine/hash.ts'
 import { createRun } from '../hooks/engine/run.ts'
 
@@ -345,4 +345,109 @@ test('the mode request leaves out previousReply when there is no reply text', ()
   expect(modeRequest('1', [], undefined).state).toEqual({ request: '1', recent: [] })
   expect(modeRequest('1', [], '').state).toEqual({ request: '1', recent: [] })
   expect(Object.keys(modeRequest('1', [], ' \n\t ').state as object)).toEqual(['request', 'recent'])
+})
+
+const FEATURE = [{
+  question: 'Which task should I do next?',
+  options: [
+    { label: 'Add the feature', description: 'Four files plus tests and docs' },
+    { label: 'Push main' },
+  ],
+}]
+
+test('the answer mode request reads the chosen answer as the request and the question as the reply it answers', () => {
+  const request = answerModeRequest(FEATURE, { 'Which task should I do next?': 'Add the feature' }, ['what next?'])
+  expect(request.state).toEqual({
+    request: 'Answer to "Which task should I do next?": Add the feature',
+    recent: ['what next?'],
+    previousReply: 'Question: Which task should I do next?\n- Add the feature: Four files plus tests and docs\n- Push main',
+  })
+  // It is the mode question as it is, so the session-model fallback and the confidence bar need nothing new.
+  expect(Object.keys(request.questions)).toEqual(['mode'])
+  expect(request.questions.mode).toEqual(modeRequest('', []).questions.mode)
+})
+
+test('the answer mode request has one line per answered question and leaves an unanswered one out', () => {
+  const questions = [
+    { question: 'Which area?', options: [{ label: 'Hooks' }, { label: 'Tests' }] },
+    { question: 'Which checks?', options: [{ label: 'Unit', description: 'Fast' }, { label: 'Lint' }] },
+    { question: 'Any name?', options: [] },
+  ]
+  const state = answerModeRequest(questions, { 'Which area?': 'Hooks', 'Which checks?': 'Unit, Lint', 'Any name?': '  ' }, []).state as { request: string; previousReply: string }
+  expect(state.request).toBe('Answer to "Which area?": Hooks\nAnswer to "Which checks?": Unit, Lint')
+  expect(state.previousReply).toBe([
+    'Question: Which area?\n- Hooks\n- Tests',
+    'Question: Which checks?\n- Unit: Fast\n- Lint',
+    'Question: Any name?',
+  ].join('\n\n'))
+})
+
+test('the answer mode request adds the typed reply, alone or after the chosen answers', () => {
+  const alone = answerModeRequest([{ question: 'Which area?' }], {}, [], 'Refactor every hook module')
+  expect((alone.state as { request: string }).request).toBe('Typed reply: Refactor every hook module')
+  const both = answerModeRequest(FEATURE, { 'Which task should I do next?': 'Push main' }, [], 'and tag it')
+  expect((both.state as { request: string }).request).toBe('Answer to "Which task should I do next?": Push main\nTyped reply: and tag it')
+  expect((answerModeRequest(FEATURE, { 'Which task should I do next?': 'Push main' }, [], ' \n').state as { request: string }).request).toBe('Answer to "Which task should I do next?": Push main')
+})
+
+test('the answer mode request leaves option previews out and keeps only the last three earlier requests', () => {
+  const questions = [{ question: 'Layout?', options: [{ label: 'Wide', description: 'Two columns', preview: 'SECRET-MOCKUP' }] }]
+  const request = answerModeRequest(questions, { 'Layout?': 'Wide' }, ['r1', 'r2', 'r3', 'r4'])
+  expect(JSON.stringify(request)).not.toContain('SECRET-MOCKUP')
+  expect((request.state as { recent: string[] }).recent).toEqual(['r2', 'r3', 'r4'])
+})
+
+test('the answer mode request keeps the end of a long question block, where the options sit', () => {
+  const options = Array.from({ length: 4 }, (_, i) => ({ label: `Option ${i}`, description: `${'d'.repeat(300)}${i}` }))
+  const state = answerModeRequest([{ question: 'Which one?', options }], { 'Which one?': 'Option 3' }, []).state as { previousReply: string }
+  expect(state.previousReply.startsWith('[truncated: first ')).toBe(true)
+  expect(state.previousReply.endsWith(`${'d'.repeat(300)}3`)).toBe(true)
+  expect(state.previousReply).not.toContain('Question: Which one?')
+})
+
+test('the answer mode request masks secrets in the answer, the typed reply and the question block', () => {
+  const key = `sk-${'a'.repeat(24)}`
+  const request = answerModeRequest([{ question: `Use ${key}?`, options: [{ label: 'Yes', description: `API_KEY=${key}` }] }], { [`Use ${key}?`]: 'Yes' }, [], `token: ghp_${'b'.repeat(24)}`)
+  const text = JSON.stringify(request)
+  expect(text).not.toContain(key)
+  expect(text).not.toContain('ghp_')
+})
+
+test('the mode instructions name the question and options as what a short answer picks from', () => {
+  const instructions = modeRequest('1', [], 'Pick one').questions.mode?.instructions ?? ''
+  expect(instructions).toContain('the question and options the assistant asked')
+  expect(instructions).toContain('the size of that selected work decides the mode, not the length of the reply')
+})
+
+test('popupAnswer reads the questions, the answers and the typed reply, and leaves previews out', () => {
+  const result = {
+    questions: [
+      { question: 'Layout?', header: 'Layout', multiSelect: false, options: [{ label: 'Wide', description: 'Two columns', preview: 'MOCKUP' }, { label: 'Narrow' }] },
+      { question: 'Name?', header: 'Name', multiSelect: false, kind: 'text' },
+    ],
+    answers: { 'Layout?': 'Wide', 'Name?': '' },
+    response: 'and a dark theme',
+  }
+  const read = popupAnswer(result)
+  expect(read).toEqual({
+    questions: [
+      { question: 'Layout?', options: [{ label: 'Wide', description: 'Two columns' }, { label: 'Narrow' }] },
+      { question: 'Name?', options: [] },
+    ],
+    answers: { 'Layout?': 'Wide' },
+    response: 'and a dark theme',
+  })
+  expect(JSON.stringify(read)).not.toContain('MOCKUP')
+})
+
+test('popupAnswer finds nothing to judge in a dismissed popup or a result of another shape', () => {
+  const questions = [{ question: 'Layout?', header: 'Layout', multiSelect: false, options: [{ label: 'Wide' }, { label: 'Narrow' }] }]
+  expect(popupAnswer({ questions, answers: {} })).toBeUndefined()
+  expect(popupAnswer({ questions, answers: { 'Layout?': '  ' }, response: ' \n' })).toBeUndefined()
+  expect(popupAnswer({ questions, answers: { 'Layout?': 3 } })).toBeUndefined()
+  expect(popupAnswer({ questions, answers: ['Wide'] })).toBeUndefined()
+  expect(popupAnswer({ answers: { 'Layout?': 'Wide' } })).toBeUndefined()
+  expect(popupAnswer('Wide')).toBeUndefined()
+  expect(popupAnswer(undefined)).toBeUndefined()
+  expect(popupAnswer({ questions, answers: {}, response: 'Neither' })).toEqual({ questions: [{ question: 'Layout?', options: [{ label: 'Wide' }, { label: 'Narrow' }] }], answers: {}, response: 'Neither' })
 })

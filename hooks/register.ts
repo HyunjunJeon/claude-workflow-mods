@@ -1,10 +1,10 @@
-import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { MODE_CONFIDENCE, modeRequest, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
+import { answerModeRequest, MODE_CONFIDENCE, modeRequest, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
@@ -87,6 +87,8 @@ const JEV_MODEL_CALLS = 8
 // It bounds the person's wait: the host's 10 s hook budget (HookBudget.ms) counts only the hook's own code, not its
 // $ calls, and 8 s stays under it even if the whole wait counted.
 const MODE_BUDGET_MS = 8_000
+// The reminder after an AskUserQuestion result that turns a direct turn into a dag one; the dag protocol follows it.
+const ANSWER_DAG_LINE = '[dag-workflow] This answer selects work that runs as a DAG under enforcement auto, so the main-loop tools are now gated for the rest of this turn: plan it with the dag-workflow:planning skill and start a run.'
 // The planning skill's final audit never runs on quick; the plugin holds it to that whatever the proposal or Jev said.
 const FINAL_AUDIT_CATEGORY = 'unspecified-low'
 const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
@@ -513,9 +515,8 @@ async function lastAssistantReply($: EngineInterface): Promise<string | undefine
   }
 }
 
-// How a user turn runs under enforcement auto. Only a confident Jev answer picks the mode; every other path gives 'dag',
-// the strict rules. `recent` holds the user's requests before this one, oldest first.
-async function decideTurnMode($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnMode> {
+// The paths that give a turn the strict rules without asking Jev, or undefined when Jev is to be asked.
+function turnModeWithoutJev($: EngineInterface): TurnMode | undefined {
   if (ownsUnsettledRun()) {
     debug($, 'turn mode dag without asking Jev: this session has a run that has not settled, and a direct turn could edit files its nodes write')
     return 'dag'
@@ -524,20 +525,54 @@ async function decideTurnMode($: EngineInterface, text: string, recent: readonly
     debug($, `turn mode dag without asking Jev: ${jevEnabled ? 'no Jev backend (no TYPESAFE_API_KEY and jev_model_fallback off)' : 'jev_enabled is off'}`)
     return 'dag'
   }
-  const request = modeRequest(text, recent, await lastAssistantReply($))
+  return undefined
+}
+
+// Asks Jev the mode question and records the decision under `subject`: the user's 'request' or the 'answer' to a popup.
+// Only a confident Jev 'direct' gives a direct turn; every other outcome gives 'dag', the strict rules.
+async function judgeTurnMode($: EngineInterface, request: JevRequest, subject: 'request' | 'answer', signal: AbortSignal): Promise<TurnMode> {
   const evaluation = await evaluateJevWithin($, request, MODE_BUDGET_MS, signal)
   const choice = evaluation.choices.get('mode')
   const outcome = decisionOutcome(evaluation, choice, 'mode', MODE_CONFIDENCE)
   const applied = outcome === 'applied' && (choice?.choice === 'direct' || choice?.choice === 'dag')
   const mode: TurnMode = applied && choice.choice === 'direct' ? 'direct' : 'dag'
   await persistDecisions($, [decisionRecord({
-    at: await $.clock.now(), kind: 'mode', subject: 'request',
+    at: await $.clock.now(), kind: 'mode', subject,
     proposed: 'dag', selected: mode, source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
     stateHash: hash(stableStringify(request.state)),
     ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
   }, evaluation, MODE_CONFIDENCE)])
-  debug($, `turn mode ${mode}: Jev ${outcome}${choice ? ` (${choice.choice} at ${choice.confidence}, bar ${MODE_CONFIDENCE})` : ''}`)
+  debug($, `turn mode ${mode}${subject === 'answer' ? ' for the popup answer' : ''}: Jev ${outcome}${choice ? ` (${choice.choice} at ${choice.confidence}, bar ${MODE_CONFIDENCE})` : ''}`)
   return mode
+}
+
+// How a user turn runs under enforcement auto. Only a confident Jev answer picks the mode; every other path gives 'dag',
+// the strict rules. `recent` holds the user's requests before this one, oldest first.
+async function decideTurnMode($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnMode> {
+  return turnModeWithoutJev($) ?? await judgeTurnMode($, modeRequest(text, recent, await lastAssistantReply($)), 'request', signal)
+}
+
+// An AskUserQuestion answer comes back inside the turn that asked it, so Jev never sees it as a prompt: "what next?" is
+// judged small, then the person picks a multi-file task in the popup and it would run with the main-loop gate open.
+// Under auto a direct turn is judged again on the answer, toward dag only: a dag turn stays strict, and an answer Jev
+// does not confidently call small closes the gate as an undecided prompt does. A turn that stays direct returns the
+// reply as it came. A failure here leaves the turn as it was, because the person's answer is no place to lose the call.
+async function reconsiderAfterAnswer($: EngineInterface, reply: ToolCallResult<'AskUserQuestion'>, signal: AbortSignal): Promise<ToolCallResult<'AskUserQuestion'>> {
+  if (reply.deny !== undefined || reply.isError === true) return reply
+  const popup = popupAnswer(reply.result)
+  if (!popup) return reply
+  try {
+    const mode = turnModeWithoutJev($) ?? await judgeTurnMode($, answerModeRequest(popup.questions, popup.answers, workflowContext.requests.slice(-3).map(entry => entry.text), popup.response), 'answer', signal)
+    // The popup stayed open for as long as the person took: the turn may have changed meanwhile.
+    if (mode !== 'dag' || enforcement !== 'auto' || turnMode !== 'direct') return reply
+    turnMode = 'dag'
+    debug($, 'turn mode dag: the popup answer selects work Jev did not call small')
+    // Spread, not rebuilt, so core's own messages for the call (ref, text) stay with the result.
+    return { ...reply, context: [...(reply.context ?? []), `${ANSWER_DAG_LINE}\n${protocolFor('auto', interactive, 'dag')}`] }
+  } catch (error) {
+    debug($, `popup answer not judged: ${message(error)}`)
+    return reply
+  }
 }
 
 function contextPath(): string {
@@ -2535,6 +2570,10 @@ export function register(on: On, options: PluginOptions) {
     try {
       if (!agentId) {
         if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) await setPlanningLoaded($, true)
+        // A direct turn is judged again on the person's answer to a popup, before the gate below is looked at.
+        if (e.tool === 'AskUserQuestion' && enforcement === 'auto' && turnMode === 'direct' && next.origin.plugin === 'engine') {
+          return await reconsiderAfterAnswer($, await next(e), next.signal)
+        }
         if (!gatesMainLoop(enforcement, turnMode) || next.origin.plugin !== 'engine') return await next(e)
         const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
         if (verdict.allowed) return await next(e)

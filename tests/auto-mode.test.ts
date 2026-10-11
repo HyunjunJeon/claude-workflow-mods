@@ -300,3 +300,172 @@ test('the mode question reads no transcript while this session has an active run
   expect(host.reads).toBe(0)
   expect(h.submits[0]?.context[0]).toBe(AUTO_DAG)
 })
+
+const QUESTION = 'Which task should I do next?'
+const POPUP = {
+  tool: 'AskUserQuestion' as const,
+  questions: [{
+    question: QUESTION,
+    header: 'Next task',
+    multiSelect: false,
+    options: [{ label: 'Add the feature', description: 'Four files plus tests and docs' }, { label: 'Push main', description: 'One git push' }],
+  }],
+}
+const POPUP_STATE = {
+  request: `Answer to "${QUESTION}": Add the feature`,
+  recent: ['What next?'],
+  previousReply: `Question: ${QUESTION}\n- Add the feature: Four files plus tests and docs\n- Push main: One git push`,
+}
+
+// The host's popup: the person's answer arrives as the AskUserQuestion result. Registered before the harness so this
+// hook, not its catch-all tool.call, answers the call. `reply` is what the person did; `calls` counts popups shown.
+function popup(on: On, reply: { answers?: Record<string, string>; response?: string; deny?: string } = { answers: { [QUESTION]: 'Add the feature' } }) {
+  const person = { reply, calls: 0 }
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    person.calls += 1
+    if (person.reply.deny !== undefined) return { deny: person.reply.deny }
+    return { result: { questions: e.questions, answers: person.reply.answers ?? {}, ...(person.reply.response === undefined ? {} : { response: person.reply.response }) } }
+  })
+  return person
+}
+
+function answerRecords(h: Harness): DecisionRecord[] {
+  return modeRecords(h).filter(record => record.subject === 'answer')
+}
+
+test('an answer that selects large work in a direct turn closes the gate and tells the model to plan a DAG', async ($, on) => {
+  const person = popup(on)
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  await boot($, null)
+  await ask($, 'What next?')
+  expect(await edit($)).toBeUndefined()
+
+  jev.answer = { choice: 'dag', confidence: 0.9 }
+  const reply = await $.tool.call(POPUP)
+  expect(reply.deny).toBeUndefined()
+  // The tool's own result reaches the model as it was; only a reminder after it is new.
+  expect(reply.result).toEqual({ questions: POPUP.questions, answers: { [QUESTION]: 'Add the feature' } })
+  expect(reply.context).toHaveLength(1)
+  expect(reply.context?.[0]).toContain('This answer selects work that runs as a DAG under enforcement auto')
+  expect(reply.context?.[0]).toContain(AUTO_DAG)
+
+  expect(modeRequests(h)).toHaveLength(2)
+  expect(modeRequests(h)[1]?.state).toEqual(POPUP_STATE)
+  expect(await edit($)).toContain(REFUSED)
+  expect((await command($, 'enforce')).text).toBe('DAG enforcement: auto (this turn: dag)')
+  expect(answerRecords(h)).toHaveLength(1)
+  expect(answerRecords(h)[0]).toMatchObject({ kind: 'mode', subject: 'answer', proposed: 'dag', selected: 'dag', source: 'jev', outcome: 'applied', confidence: 0.9 })
+  expect(modeRecords(h).map(record => record.subject)).toEqual(['request', 'answer'])
+
+  // The turn is dag now: a later popup is not judged again, and its reply carries no reminder.
+  jev.answer = SMALL
+  const later = await $.tool.call(POPUP)
+  expect(later.context).toBeUndefined()
+  expect(modeRequests(h)).toHaveLength(2)
+  expect(person.calls).toBe(2)
+  expect(await edit($)).toContain(REFUSED)
+})
+
+test('an answer Jev judges small leaves the direct turn and the reply alone', async ($, on) => {
+  popup(on, { answers: { [QUESTION]: 'Push main' } })
+  const h = harness(on)
+  jevModel(on, h)
+  await boot($, null)
+  await ask($, 'What next?')
+  const reply = await $.tool.call(POPUP)
+  expect(reply.result).toEqual({ questions: POPUP.questions, answers: { [QUESTION]: 'Push main' } })
+  expect(reply.context).toBeUndefined()
+  expect(modeRequests(h)).toHaveLength(2)
+  expect((modeRequests(h)[1]?.state as { request: string }).request).toBe(`Answer to "${QUESTION}": Push main`)
+  expect(await edit($)).toBeUndefined()
+  expect(answerRecords(h)).toHaveLength(1)
+  expect(answerRecords(h)[0]).toMatchObject({ subject: 'answer', proposed: 'dag', selected: 'direct', source: 'jev', outcome: 'applied', confidence: 0.9 })
+})
+
+test('an answer in a dag turn is not judged and never opens the gate', async ($, on) => {
+  popup(on, { answers: { [QUESTION]: 'Push main' } })
+  const h = harness(on)
+  const jev = jevModel(on, h, { choice: 'dag', confidence: 0.9 })
+  await boot($, null)
+  await ask($, 'Add a settings page with its API, tests and docs')
+  jev.answer = SMALL
+  const reply = await $.tool.call(POPUP)
+  expect(reply.context).toBeUndefined()
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(answerRecords(h)).toHaveLength(0)
+  expect(await edit($)).toContain(REFUSED)
+})
+
+test('an answer is not judged under enforcement strict', async ($, on) => {
+  popup(on)
+  const h = harness(on)
+  jevModel(on, h, { choice: 'dag', confidence: 0.9 })
+  await boot($)
+  const reply = await $.tool.call(POPUP)
+  expect(reply.context).toBeUndefined()
+  expect(modeRequests(h)).toHaveLength(0)
+  expect(await edit($)).toContain(REFUSED)
+})
+
+test('an answer Jev cannot judge confidently closes the gate, as an undecided prompt does', async ($, on) => {
+  popup(on)
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  await boot($, null)
+  await ask($, 'What next?')
+  jev.answer = { choice: 'direct', confidence: 0.7 }
+  const reply = await $.tool.call(POPUP)
+  expect(reply.context).toHaveLength(1)
+  expect(await edit($)).toContain(REFUSED)
+  expect(answerRecords(h)[0]).toMatchObject({ subject: 'answer', selected: 'dag', source: 'baseline', outcome: 'low-confidence', confidence: 0.7 })
+
+  // A backend that fails does the same.
+  jev.answer = SMALL
+  await ask($, 'And then?')
+  expect(await edit($)).toBeUndefined()
+  jev.backend = 'down'
+  const failed = await $.tool.call(POPUP)
+  expect(failed.context).toHaveLength(1)
+  expect(await edit($)).toContain(REFUSED)
+  expect(answerRecords(h)[1]).toMatchObject({ selected: 'dag', source: 'baseline', outcome: 'transport-error' })
+})
+
+test('a typed reply instead of an option is judged as the answer', async ($, on) => {
+  popup(on, { answers: {}, response: 'Rename the hooks across every module' })
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  await boot($, null)
+  await ask($, 'What next?')
+  jev.answer = { choice: 'dag', confidence: 0.9 }
+  const reply = await $.tool.call(POPUP)
+  expect(reply.context).toHaveLength(1)
+  expect((modeRequests(h)[1]?.state as { request: string }).request).toBe('Typed reply: Rename the hooks across every module')
+  expect(await edit($)).toContain(REFUSED)
+})
+
+test('a popup with no answer asks Jev nothing', async ($, on) => {
+  popup(on, { answers: {}, response: '  ' })
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  await boot($, null)
+  await ask($, 'What next?')
+  jev.answer = { choice: 'dag', confidence: 0.9 }
+  const reply = await $.tool.call(POPUP)
+  expect(reply.context).toBeUndefined()
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(await edit($)).toBeUndefined()
+})
+
+test('a declined popup asks Jev nothing and keeps the direct turn', async ($, on) => {
+  popup(on, { deny: 'The user declined to answer' })
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  await boot($, null)
+  await ask($, 'What next?')
+  jev.answer = { choice: 'dag', confidence: 0.9 }
+  const reply = await $.tool.call(POPUP)
+  expect(reply.deny).toBe('The user declined to answer')
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(await edit($)).toBeUndefined()
+})
