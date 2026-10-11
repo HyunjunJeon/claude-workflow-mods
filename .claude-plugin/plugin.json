@@ -49,9 +49,9 @@
     "enforcement": {
       "type": "string",
       "title": "DAG enforcement",
-      "description": "strict: the main conversation may only plan, read and orchestrate, and all work runs in DAG nodes; guide: only instruct; off: no enforcement",
-      "options": ["strict", "guide", "off"],
-      "default": "strict"
+      "description": "auto: Jev decides per request; small requests run directly in the main conversation and requests that need three or more nodes run as DAGs under the strict rules; strict: the main conversation may only plan, read and orchestrate, and all work runs in DAG nodes; guide: only instruct; off: no enforcement",
+      "options": ["strict", "auto", "guide", "off"],
+      "default": "auto"
     },
     "start_approval": {
       "type": "string",

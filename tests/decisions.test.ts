@@ -32,3 +32,10 @@ test('a permission note survives a reload and a note that is not text drops the 
   expect(parseDecisionLog(log([noted]), '/p', 's')).toEqual([noted])
   expect(parseDecisionLog(log([{ ...noted, note: 7 }]), '/p', 's')).toEqual([])
 })
+
+test('a mode decision survives a reload', () => {
+  const mode: DecisionRecord = { ...record, kind: 'mode', subject: 'request', proposed: 'dag', selected: 'direct', source: 'jev', outcome: 'applied', confidence: 0.86, probabilities: { direct: 0.86, dag: 0.14 } }
+  const log = (records: unknown[]) => ({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records })
+  expect(parseDecisionLog(log([mode]), '/p', 's')).toEqual([mode])
+  expect(parseDecisionLog(log([{ ...mode, kind: 'unknown' }]), '/p', 's')).toEqual([])
+})

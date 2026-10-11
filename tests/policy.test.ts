@@ -3,7 +3,7 @@ import { SCENARIOS } from '../eval/scenarios.ts'
 import { extractOutput } from '../hooks/engine/node-prompt.ts'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { isVerificationNode, lintDefinition } from '../hooks/engine/lint.ts'
-import { isPlanningSkill, mainLoopVerdict, protocolFor, readOnlyBashProblem } from '../hooks/engine/policy.ts'
+import { gatesMainLoop, gatesPlanning, isPlanningSkill, mainLoopVerdict, protocolFor, readOnlyBashProblem, type Enforcement, type TurnMode } from '../hooks/engine/policy.ts'
 
 const NONE = new Set<string>()
 
@@ -311,6 +311,42 @@ test('a non-interactive session is told not to ask the user, an interactive one 
     expect(protocolFor(level)).not.toContain('Non-interactive session')
     expect(quiet.startsWith(protocolFor(level))).toBe(true)
   }
+})
+
+test('only strict, and auto on a DAG turn, gate the main loop; strict and auto gate the planning skill', async () => {
+  const levels: Enforcement[] = ['strict', 'auto', 'guide', 'off']
+  const gates = (mode: TurnMode) => levels.map(level => gatesMainLoop(level, mode))
+  expect(gates('dag')).toEqual([true, true, false, false])
+  expect(gates('direct')).toEqual([true, false, false, false])
+  expect(levels.map(gatesPlanning)).toEqual([true, true, false, false])
+})
+
+test('under auto a DAG turn reads like strict plus one line saying why, and a direct turn is told to just do it', async () => {
+  const strict = protocolFor('strict').split('\n')
+  const why = '- This request runs as a DAG: under enforcement auto, Jev judged it to need three or more nodes that gain from parallel or isolated work, or could not decide.'
+  expect(protocolFor('auto', true, 'dag').split('\n')).toEqual([strict[0], why, ...strict.slice(1)])
+  expect(protocolFor('auto')).toBe(protocolFor('auto', true, 'dag'))
+  expect(protocolFor('auto', false, 'dag').split('\n')).toEqual([strict[0], why, ...strict.slice(1), protocolFor('strict', false).split('\n').at(-1)])
+
+  const direct = [
+    '[dag-workflow] This request is small: do it directly in this conversation; no DAG is needed.',
+    '- If it turns out to need three or more independent pieces of work that gain from running in parallel or in isolated contexts, load the dag-workflow:planning skill and run it as a DAG instead.',
+  ]
+  expect(protocolFor('auto', true, 'direct').split('\n')).toEqual(direct)
+  const quiet = protocolFor('auto', false, 'direct').split('\n')
+  expect(quiet.slice(0, 2)).toEqual(direct)
+  expect(quiet).toHaveLength(3)
+  expect(quiet[2]).toBe(protocolFor('strict', false).split('\n').at(-1))
+  expect(quiet[2]).toContain('Non-interactive session: do not ask the user')
+  expect(protocolFor('auto', true, 'direct')).not.toContain('are refused here')
+})
+
+test('the mode only changes the text under auto: strict and guide ignore it', async () => {
+  for (const level of ['strict', 'guide'] as const) {
+    for (const interactive of [true, false]) expect(protocolFor(level, interactive, 'direct')).toBe(protocolFor(level, interactive))
+  }
+  expect(protocolFor('guide', true, 'dag')).not.toContain('under enforcement auto')
+  expect(protocolFor('strict', true, 'dag')).not.toContain('under enforcement auto')
 })
 
 test('a node output is its "## Output" section, else its report without the status line', async () => {

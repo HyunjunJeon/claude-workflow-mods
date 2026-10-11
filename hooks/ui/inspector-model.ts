@@ -126,7 +126,7 @@ const EN: InspectorStrings = {
   hiddenSessions: count => `other projects: ${count} hidden`,
   noDecisions: 'No decisions recorded in this session.',
   decisionMissing: 'That decision is no longer in the log.',
-  kind: { routing: 'routing', permission: 'permission', recovery: 'recovery' },
+  kind: { routing: 'routing', permission: 'permission', recovery: 'recovery', mode: 'mode' },
   source: { jev: 'Jev', baseline: 'baseline', rule: 'final-audit rule' },
   outcome: {
     applied: 'applied',
@@ -208,7 +208,7 @@ const KO: InspectorStrings = {
   hiddenSessions: count => `다른 프로젝트의 세션 ${count}개 숨김`,
   noDecisions: '이 세션에 기록된 결정이 없습니다.',
   decisionMissing: '해당 결정은 더 이상 로그에 없습니다.',
-  kind: { routing: '라우팅', permission: '권한', recovery: '복구' },
+  kind: { routing: '라우팅', permission: '권한', recovery: '복구', mode: '실행 방식' },
   source: { jev: 'Jev', baseline: '기본 규칙', rule: '최종 감사 규칙' },
   outcome: {
     applied: '적용',

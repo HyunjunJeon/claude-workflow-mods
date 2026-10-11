@@ -51,6 +51,7 @@ function userPrompts(h: ReturnType<typeof harness>): Submit[] {
 async function bootWithoutPane($: Engine): Promise<void> {
   await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
+  await command($, 'enforce strict')
 }
 
 function compactor(on: On): void {
@@ -227,7 +228,7 @@ test('a /clear makes the next user prompt carry the block again', async ($, on) 
 for (const level of ['strict', 'guide'] as const) {
   test(`the ${level} protocol rides on every user and plugin prompt`, { options: { enforcement: level } }, async ($, on) => {
     const h = harness(on)
-    await boot($)
+    await boot($, null)
     const runId = await start($, DEFINITION)
     await ask($, 'Build the artifact')
     await ask($, 'Continue')
@@ -240,7 +241,7 @@ for (const level of ['strict', 'guide'] as const) {
 
 test('under enforcement off a prompt with no unseen state change gets nothing appended', { options: { enforcement: 'off' } }, async ($, on) => {
   const h = harness(on)
-  await boot($)
+  await boot($, null)
   const runId = await start($, DEFINITION)
   await ask($, 'Build the artifact')
   await ask($, 'Continue')

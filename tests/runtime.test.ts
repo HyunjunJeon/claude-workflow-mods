@@ -119,9 +119,11 @@ const PANE = {
   props: { title: 'DAG', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
 
+// These tests were written for strict, the default before auto; boot pins it.
 async function boot($: any, withPlanningSkill = true) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   if (withPlanningSkill) await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
+  await $.command.run({ command: 'dag', args: 'enforce strict', ...COMMAND_CONTEXT })
 }
 
 async function callDag($: any, input: Record<string, unknown>) {

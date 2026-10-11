@@ -1,7 +1,21 @@
 import { isBlockedReportPath } from './lint.ts'
 import type { EngineError } from './types.ts'
 
-export type Enforcement = 'strict' | 'guide' | 'off'
+export type Enforcement = 'strict' | 'auto' | 'guide' | 'off'
+// How one user turn runs under `auto`: Jev's answer, or 'dag' (the strict rules) whenever it gave none.
+export type TurnMode = 'dag' | 'direct'
+
+// Only a direct turn under auto lifts the main-loop gate; an unanswered one is passed in as 'dag', so
+// auto never opens the gate on its own.
+export function gatesMainLoop(level: Enforcement, mode: TurnMode): boolean {
+  return level === 'strict' || (level === 'auto' && mode === 'dag')
+}
+
+// A DAG opened under auto is the same DAG as under strict, so its start needs the planning skill too, even
+// when the turn that opens it began as a direct one.
+export function gatesPlanning(level: Enforcement): boolean {
+  return level === 'strict' || level === 'auto'
+}
 
 export const DAG_TOOL = 'mcp__dag-workflow__dag'
 export const PLANNING_SKILL = 'dag-workflow:planning'
@@ -288,13 +302,25 @@ export function denyMessage(tool: string, reason: string): string {
   ].join('\n')
 }
 
-export function protocolFor(level: Enforcement, interactive = true): string {
-  const rule = level === 'strict'
+const NON_INTERACTIVE_LINE = '- Non-interactive session: do not ask the user (no AskUserQuestion, no clarifying questions); decide, and record every assumption in the definition\'s goal and in the node prompts.'
+
+export function protocolFor(level: Enforcement, interactive = true, mode: TurnMode = 'dag'): string {
+  if (level === 'auto' && mode === 'direct') {
+    const lines = [
+      '[dag-workflow] This request is small: do it directly in this conversation; no DAG is needed.',
+      '- If it turns out to need three or more independent pieces of work that gain from running in parallel or in isolated contexts, load the dag-workflow:planning skill and run it as a DAG instead.',
+    ]
+    if (!interactive) lines.push(NON_INTERACTIVE_LINE)
+    return lines.join('\n')
+  }
+  // auto reads like strict: a DAG turn under auto is held to the strict rules, with one line saying why.
+  const rule = level === 'strict' || level === 'auto'
     ? 'In this main conversation you only plan, read (Read, LSP, read-only Bash, web), ask, orchestrate and verify; Edit, Write, mutating Bash, Agent, Workflow, TodoWrite and other tools are refused here and belong inside DAG nodes. The one exception: Write to a REPORT*, SUMMARY*, FINDINGS* or ANALYSIS* .md file the user asked for, which Claude Code refuses to subagents, only to copy a settled node\'s Output or notes verbatim.'
     : 'Prefer doing all work inside DAG nodes; this main conversation should plan, orchestrate and verify.'
   const lines = [
     '[dag-workflow] DAG orchestration is mandatory for this task.',
-    level === 'strict'
+    ...(level === 'auto' ? ['- This request runs as a DAG: under enforcement auto, Jev judged it to need three or more nodes that gain from parallel or isolated work, or could not decide.'] : []),
+    gatesPlanning(level)
       ? `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it; start is refused until you do.`
       : `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it.`,
     `- Plan the task as a DAG and run it with ${DAG_TOOL} (action "start"); a one-step task is a one-node DAG. Do not keep plans in TodoWrite or TaskCreate.`,
@@ -303,6 +329,6 @@ export function protocolFor(level: Enforcement, interactive = true): string {
     '- Every node automatically receives the outputs of the nodes it depends on. Set the definition\'s "goal" to the overall objective and tell each node what to produce.',
     '- start returns at once. Do not poll: when the run settles you get a summary with every node\'s output. Verify it, then use retry, amend or a follow-up run for anything missing.',
   ]
-  if (!interactive) lines.push('- Non-interactive session: do not ask the user (no AskUserQuestion, no clarifying questions); decide, and record every assumption in the definition\'s goal and in the node prompts.')
+  if (!interactive) lines.push(NON_INTERACTIVE_LINE)
   return lines.join('\n')
 }

@@ -2,6 +2,7 @@ import { mock, type Engine, type Plugin } from 'claude-code/testing'
 import type { EventOf, On } from 'claude-code'
 import type { Run } from '../hooks/engine/types.ts'
 import type { JevRequest } from '../hooks/engine/jev.ts'
+import type { Enforcement } from '../hooks/engine/policy.ts'
 
 export const ROOT = '/work/.claude/dag'
 export const KEY = 'control-test-secret'
@@ -128,9 +129,12 @@ export function harness(on: On) {
   return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
 }
 
-export async function boot($: Engine) {
+// The manifest's default enforcement is auto, which asks Jev about every user prompt. These suites were written for
+// strict, so boot pins it; a test whose options choose a level passes null to keep that level.
+export async function boot($: Engine, enforcement: Enforcement | null = 'strict') {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
+  if (enforcement) await command($, `enforce ${enforcement}`)
 }
 
 export async function dag($: Engine, input: Record<string, unknown>): Promise<Record<string, unknown>> {

@@ -4,7 +4,7 @@ import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine,
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
+import { MODE_CONFIDENCE, modeRequest, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
@@ -13,7 +13,7 @@ import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recover
 import { exitProblem, textProblem } from './engine/check-eval.ts'
 import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
 import { REVIEW_SPEC_ID, REVIEW_STANDARDS_ID } from './engine/stages.ts'
-import { denyMessage, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement } from './engine/policy.ts'
+import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode } from './engine/policy.ts'
 import {
   amendRun,
   approveRun,
@@ -53,8 +53,8 @@ import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks,
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|guide|off] | view [auto|graph|lanes|timeline]]'
-const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'guide', 'off']
+const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline]]'
+const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'auto', 'guide', 'off']
 type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
 const USER_ONLY = 'This action requires a user command or pane control.'
@@ -81,6 +81,12 @@ const JEV_TIMEOUT_MS = 5_000
 // so the model gets about twice the slowest of them, more room than HTTP.
 const JEV_MODEL_TIMEOUT_MS = 10_000
 const JEV_MODEL_CALLS = 8
+// The whole mode decision under enforcement auto, both backends together: the user's prompt waits for it before it
+// enters. HTTP alone may take JEV_TIMEOUT_MS and the model JEV_MODEL_TIMEOUT_MS after it (15 s), while session-model
+// routing calls took 1.5-5.3 s, so 8 s covers a slow model answer and leaves an unanswered turn on the strict rules.
+// It bounds the person's wait: the host's 10 s hook budget (HookBudget.ms) counts only the hook's own code, not its
+// $ calls, and 8 s stays under it even if the whole wait counted.
+const MODE_BUDGET_MS = 8_000
 // The planning skill's final audit never runs on quick; the plugin holds it to that whatever the proposal or Jev said.
 const FINAL_AUDIT_CATEGORY = 'unspecified-low'
 const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
@@ -145,7 +151,10 @@ let maxConcurrent = 8
 let retentionDays = 14
 let t: Strings = stringsFor('en')
 let nodeMessages: 'compact' | 'full' = 'compact'
-let enforcement: Enforcement = 'strict'
+let enforcement: Enforcement = 'auto'
+// How the current user turn runs under auto. A new process starts at 'dag', the strict rules, until the next user
+// prompt is decided: a reload in the middle of a direct turn closes the gate for the rest of that turn.
+let turnMode: TurnMode = 'dag'
 // start_approval from settings, and the /dag approval override that wins over it until the plugin's code reloads.
 let startApproval: StartApproval = 'off'
 let approvalOverride: StartApproval | undefined
@@ -459,6 +468,59 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
   })
   await persistDecisions($, records)
   return { ...run, nodes }
+}
+
+// evaluateJev under one deadline for both backends. At the deadline the model call is aborted and the answer counts as
+// a timeout; an HTTP call still in flight ends by its own JEV_TIMEOUT_MS and is no longer awaited.
+async function evaluateJevWithin($: EngineInterface, request: JevRequest, budgetMs: number, signal: AbortSignal): Promise<JevEvaluation> {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (signal.aborted) abort()
+  else signal.addEventListener('abort', abort, { once: true })
+  let timer: Timer | undefined
+  const deadline = new Promise<JevEvaluation>(resolve => {
+    timer = $.clock.after(budgetMs, () => {
+      controller.abort()
+      resolve({ choices: new Map(), outcome: 'timeout', latencyMs: budgetMs })
+    })
+  })
+  try {
+    return await Promise.race([evaluateJev($, request, controller.signal), deadline])
+  } finally {
+    timer?.cancel()
+    signal.removeEventListener('abort', abort)
+  }
+}
+
+function ownsUnsettledRun(): boolean {
+  return [...runs.values()].some(run => run.sessionId === sessionId && !isSettled(run))
+}
+
+// How a user turn runs under enforcement auto. Only a confident Jev answer picks the mode; every other path gives 'dag',
+// the strict rules. `recent` holds the user's requests before this one, oldest first.
+async function decideTurnMode($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnMode> {
+  if (ownsUnsettledRun()) {
+    debug($, 'turn mode dag without asking Jev: this session has a run that has not settled, and a direct turn could edit files its nodes write')
+    return 'dag'
+  }
+  if (!jevEnabled || (!jevApiKey && !jevModelFallback)) {
+    debug($, `turn mode dag without asking Jev: ${jevEnabled ? 'no Jev backend (no TYPESAFE_API_KEY and jev_model_fallback off)' : 'jev_enabled is off'}`)
+    return 'dag'
+  }
+  const request = modeRequest(text, recent)
+  const evaluation = await evaluateJevWithin($, request, MODE_BUDGET_MS, signal)
+  const choice = evaluation.choices.get('mode')
+  const outcome = decisionOutcome(evaluation, choice, 'mode', MODE_CONFIDENCE)
+  const applied = outcome === 'applied' && (choice?.choice === 'direct' || choice?.choice === 'dag')
+  const mode: TurnMode = applied && choice.choice === 'direct' ? 'direct' : 'dag'
+  await persistDecisions($, [decisionRecord({
+    at: await $.clock.now(), kind: 'mode', subject: 'request',
+    proposed: 'dag', selected: mode, source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
+    stateHash: hash(stableStringify(request.state)),
+    ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
+  }, evaluation, MODE_CONFIDENCE)])
+  debug($, `turn mode ${mode}: Jev ${outcome}${choice ? ` (${choice.choice} at ${choice.confidence}, bar ${MODE_CONFIDENCE})` : ''}`)
+  return mode
 }
 
 function contextPath(): string {
@@ -1262,6 +1324,11 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
+  // The work now belongs to the run's nodes: a direct turn that opens one keeps the main loop off the files they write.
+  if (turnMode === 'direct') {
+    turnMode = 'dag'
+    debug($, `turn mode dag: run ${runId} started in a direct turn`)
+  }
   view = { ...view, runIndex: 0 }
   const started = (await tick($, runId)) ?? created
   await openPane($, false)
@@ -1669,9 +1736,9 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
   }
   if (verb === 'enforce') {
     const level = rest[0] as Enforcement | undefined
-    if (level && !ENFORCEMENTS.includes(level)) return { text: `Unknown enforcement level "${level}". Use strict, guide or off.` }
+    if (level && !ENFORCEMENTS.includes(level)) return { text: `Unknown enforcement level "${level}". Use strict, auto, guide or off.` }
     if (level) enforcement = level
-    return { text: `DAG enforcement: ${enforcement}` }
+    return { text: `DAG enforcement: ${enforcement}${enforcement === 'auto' ? ` (this turn: ${turnMode})` : ''}` }
   }
   if (verb === 'approval') {
     const choice = rest[0] as StartApproval | undefined
@@ -2256,7 +2323,7 @@ export function register(on: On, options: PluginOptions) {
     await $.command.register({
       name: 'dag',
       description: 'Open the DAG pane, or run, list, inspect, approve, cancel or retry DAG workflows, or set enforcement',
-      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|guide|off]]',
+      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|auto|guide|off]]',
       immediate: true,
     })
     return next(e)
@@ -2366,14 +2433,21 @@ export function register(on: On, options: PluginOptions) {
   on('prompt.submit', async ($, e, next) => {
     const userOrigin = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
     if (next.origin.plugin === 'engine' && userOrigin && e.text.trim()) {
+      const recent = workflowContext.requests.slice(-3).map(entry => entry.text)
       userRequest = e.text
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
       await persistContext($)
+      // Under auto each user prompt is decided anew; a plugin's prompt (settle, keep-alive, progress) keeps the mode.
+      // The strict rules hold until the answer arrives, so a decision that throws or is cut off leaves the gate closed.
+      if (enforcement === 'auto') {
+        turnMode = 'dag'
+        turnMode = await decideTurnMode($, e.text, recent, next.signal)
+      }
     }
     // The protocol rides on every prompt. The block (up to 8,000 characters) goes only on a user prompt whose run and
     // note state the model has not received yet; a plugin's prompt never gets it, and the plugin's own carry the news.
     // It counts as received only once the prompt entered: a hook beneath that drops it delivers nothing.
-    const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive)])]
+    const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive, turnMode)])]
     const block = userOrigin && contextUnseen(delivered, contextSlices(workflowContext, [...runs.values()])) ? restoration() : undefined
     if (block) context.push(block.text)
     const result = await next({ ...e, context })
@@ -2444,7 +2518,7 @@ export function register(on: On, options: PluginOptions) {
     try {
       if (!agentId) {
         if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) await setPlanningLoaded($, true)
-        if (enforcement !== 'strict' || next.origin.plugin !== 'engine') return await next(e)
+        if (!gatesMainLoop(enforcement, turnMode) || next.origin.plugin !== 'engine') return await next(e)
         const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
         if (verdict.allowed) return await next(e)
         $.ui.log(`refused ${e.tool} in the main conversation; work runs in DAG nodes`)
@@ -2479,8 +2553,9 @@ export function register(on: On, options: PluginOptions) {
       if (agentId) clearWaiting($, agentId, { toolUseId: e.tool_use_id, tool: e.tool })
     }
   }).catch(async ($, e, next) => {
-    // A failed hook is skipped and the call runs, so strict enforcement fails closed here with pure checks only (1 s budget).
-    if (e.agentId || enforcement !== 'strict' || next.origin.plugin !== 'engine') return next(e)
+    // A failed hook is skipped and the call runs, so a gated turn (strict, or a DAG turn under auto) fails closed here with
+    // pure checks only (1 s budget).
+    if (e.agentId || !gatesMainLoop(enforcement, turnMode) || next.origin.plugin !== 'engine') return next(e)
     let reason: string
     try {
       const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
@@ -2523,7 +2598,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('tool.call', { tool: 'mcp__dag-workflow__dag' }, async ($, e) => {
     const opensPlan = e.action === 'start' || e.action === 'amend'
-    if (!e.agentId && opensPlan && enforcement === 'strict' && !planningLoaded) return err(planningRequired())
+    if (!e.agentId && opensPlan && gatesPlanning(enforcement) && !planningLoaded) return err(planningRequired())
     return serialized(() => handleTool($, e))
   }).catch(async ($, e, next) => {
     return err({ code: `hook_${next.error.kind}`, message: `The dag tool failed: ${next.error.message}` })

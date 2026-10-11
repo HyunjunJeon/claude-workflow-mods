@@ -91,9 +91,12 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   }
 }
 
+// These tests count Jev requests and were written for strict, the default before auto, which asks Jev about every
+// user prompt; boot pins strict.
 async function boot($: Engine) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
+  await $.command.run({ command: 'dag', args: 'enforce strict', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 }
 
 async function dag($: Engine, input: Record<string, unknown>) {
