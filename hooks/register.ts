@@ -83,7 +83,7 @@ const JEV_MODEL_TIMEOUT_MS = 10_000
 const JEV_MODEL_CALLS = 8
 // The whole mode decision under enforcement auto, both backends together: the user's prompt waits for it before it
 // enters. HTTP alone may take JEV_TIMEOUT_MS and the model JEV_MODEL_TIMEOUT_MS after it (15 s), while session-model
-// routing calls took 1.5-5.3 s, so 8 s covers a slow model answer and leaves an unanswered turn on the strict rules.
+// routing calls took 1.5-5.3 s, so 8 s covers a slow model answer and runs an unanswered turn directly.
 // It bounds the person's wait: the host's 10 s hook budget (HookBudget.ms) counts only the hook's own code, not its
 // $ calls, and 8 s stays under it even if the whole wait counted.
 const MODE_BUDGET_MS = 8_000
@@ -515,30 +515,33 @@ async function lastAssistantReply($: EngineInterface): Promise<string | undefine
   }
 }
 
-// The paths that give a turn the strict rules without asking Jev, or undefined when Jev is to be asked.
+// The paths that decide a turn without asking Jev, or undefined when Jev is to be asked. With no Jev to ask the turn
+// runs directly, like any turn Jev does not confidently call dag.
 function turnModeWithoutJev($: EngineInterface): TurnMode | undefined {
   if (ownsUnsettledRun()) {
     debug($, 'turn mode dag without asking Jev: this session has a run that has not settled, and a direct turn could edit files its nodes write')
     return 'dag'
   }
   if (!jevEnabled || (!jevApiKey && !jevModelFallback)) {
-    debug($, `turn mode dag without asking Jev: ${jevEnabled ? 'no Jev backend (no TYPESAFE_API_KEY and jev_model_fallback off)' : 'jev_enabled is off'}`)
-    return 'dag'
+    debug($, `turn mode direct without asking Jev: ${jevEnabled ? 'no Jev backend (no TYPESAFE_API_KEY and jev_model_fallback off)' : 'jev_enabled is off'}`)
+    return 'direct'
   }
   return undefined
 }
 
 // Asks Jev the mode question and records the decision under `subject`: the user's 'request' or the 'answer' to a popup.
-// Only a confident Jev 'direct' gives a direct turn; every other outcome gives 'dag', the strict rules.
+// Only a confident Jev 'dag' gives a dag turn, the strict rules; every other outcome (a direct answer, low confidence,
+// timeout, error) runs the turn directly. Measured over 10 mode decisions, 4 of the 5 dag turns were fallbacks with no
+// confident dag answer, one of them leaning direct at 0.83, so the fallback gated small requests.
 async function judgeTurnMode($: EngineInterface, request: JevRequest, subject: 'request' | 'answer', signal: AbortSignal): Promise<TurnMode> {
   const evaluation = await evaluateJevWithin($, request, MODE_BUDGET_MS, signal)
   const choice = evaluation.choices.get('mode')
   const outcome = decisionOutcome(evaluation, choice, 'mode', MODE_CONFIDENCE)
   const applied = outcome === 'applied' && (choice?.choice === 'direct' || choice?.choice === 'dag')
-  const mode: TurnMode = applied && choice.choice === 'direct' ? 'direct' : 'dag'
+  const mode: TurnMode = applied && choice.choice === 'dag' ? 'dag' : 'direct'
   await persistDecisions($, [decisionRecord({
     at: await $.clock.now(), kind: 'mode', subject,
-    proposed: 'dag', selected: mode, source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
+    proposed: 'direct', selected: mode, source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
     stateHash: hash(stableStringify(request.state)),
     ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
   }, evaluation, MODE_CONFIDENCE)])
@@ -546,16 +549,16 @@ async function judgeTurnMode($: EngineInterface, request: JevRequest, subject: '
   return mode
 }
 
-// How a user turn runs under enforcement auto. Only a confident Jev answer picks the mode; every other path gives 'dag',
-// the strict rules. `recent` holds the user's requests before this one, oldest first.
+// How a user turn runs under enforcement auto: dag only on a confident Jev 'dag' or while this session has an unsettled
+// run; every other path runs it directly. `recent` holds the user's requests before this one, oldest first.
 async function decideTurnMode($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnMode> {
   return turnModeWithoutJev($) ?? await judgeTurnMode($, modeRequest(text, recent, await lastAssistantReply($)), 'request', signal)
 }
 
 // An AskUserQuestion answer comes back inside the turn that asked it, so Jev never sees it as a prompt: "what next?" is
 // judged small, then the person picks a multi-file task in the popup and it would run with the main-loop gate open.
-// Under auto a direct turn is judged again on the answer, toward dag only: a dag turn stays strict, and an answer Jev
-// does not confidently call small closes the gate as an undecided prompt does. A turn that stays direct returns the
+// Under auto a direct turn is judged again on the answer, toward dag only: a dag turn stays strict, and only an answer
+// Jev confidently calls dag closes the gate, as for a prompt. A turn that stays direct returns the
 // reply as it came. A failure here leaves the turn as it was, because the person's answer is no place to lose the call.
 async function reconsiderAfterAnswer($: EngineInterface, reply: ToolCallResult<'AskUserQuestion'>, signal: AbortSignal): Promise<ToolCallResult<'AskUserQuestion'>> {
   if (reply.deny !== undefined || reply.isError === true) return reply
@@ -2490,7 +2493,8 @@ export function register(on: On, options: PluginOptions) {
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
       await persistContext($)
       // Under auto each user prompt is decided anew; a plugin's prompt (settle, keep-alive, progress) keeps the mode.
-      // The strict rules hold until the answer arrives, so a decision that throws or is cut off leaves the gate closed.
+      // The strict rules hold while Jev is asked; every answer, none included, then sets the mode, and only a decision
+      // that throws leaves the gate closed.
       if (enforcement === 'auto') {
         turnMode = 'dag'
         turnMode = await decideTurnMode($, e.text, recent, next.signal)

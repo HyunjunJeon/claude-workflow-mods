@@ -93,7 +93,7 @@ test('auto runs a request Jev judges small directly', async ($, on) => {
   const records = modeRecords(h)
   expect(records).toHaveLength(1)
   expect(records[0]).toMatchObject({
-    kind: 'mode', subject: 'request', proposed: 'dag', selected: 'direct', source: 'jev', outcome: 'applied',
+    kind: 'mode', subject: 'request', proposed: 'direct', selected: 'direct', source: 'jev', outcome: 'applied',
     backend: 'model', confidence: 0.9, probabilities: { direct: 0.9 }, threshold: 0.8, sessionId: 'source',
   })
   // The next request carries the one before it, for a short reply such as "yes".
@@ -114,44 +114,56 @@ test('auto keeps strict rules for a request Jev judges large', async ($, on) => 
   expect(modeRecords(h)[0]).toMatchObject({ selected: 'dag', source: 'jev', outcome: 'applied', confidence: 0.9 })
 })
 
-test('auto falls back to strict rules when Jev is unsure or unavailable', async ($, on) => {
+test('auto runs a turn directly when Jev is unsure or unavailable', async ($, on) => {
   const h = harness(on)
   const jev = jevModel(on, h)
   await boot($, null)
-  // Each fallback follows a confident direct turn, so it has to close a gate that was open.
-  const opened = async (text: string) => {
-    jev.answer = SMALL
+  // Each fallback follows a confident dag turn, so it has to open a gate that was closed.
+  const closed = async (text: string) => {
+    jev.answer = { choice: 'dag', confidence: 0.9 }
     jev.backend = 'up'
     await ask($, text)
-    expect(await edit($)).toBeUndefined()
+    expect(await edit($)).toContain(REFUSED)
   }
 
-  await opened('Rename a variable')
-  jev.answer = { choice: 'direct', confidence: 0.7 }
+  await closed('Build the settings page')
+  jev.answer = { choice: 'dag', confidence: 0.7 }
   await ask($, 'Maybe tidy the module')
-  expect(await edit($)).toContain(REFUSED)
+  expect(await edit($)).toBeUndefined()
 
-  await opened('Rename it back')
+  await closed('Build the billing page')
   jev.backend = 'down'
   await ask($, 'Fix the build')
-  expect(await edit($)).toContain(REFUSED)
+  expect(await edit($)).toBeUndefined()
 
-  // A backend that outlasts MODE_BUDGET_MS: the prompt enters at 8 s, on the strict rules.
-  await opened('Rename it once more')
+  // A backend that outlasts MODE_BUDGET_MS: the prompt enters at 8 s, as a direct turn.
+  await closed('Build the reports page')
   jev.backend = 'slow'
   const slow = ask($, 'Fix the flaky test')
   await h.clock.settle()
   await h.clock.advance(8_000)
   await slow
-  expect(await edit($)).toContain(REFUSED)
+  expect(await edit($)).toBeUndefined()
 
-  expect(protocols(h)).toEqual(['direct', 'dag', 'direct', 'dag', 'direct', 'dag'])
+  expect(protocols(h)).toEqual(['dag', 'direct', 'dag', 'direct', 'dag', 'direct'])
   const fallbacks = modeRecords(h).filter(record => record.source === 'baseline')
   expect(fallbacks).toHaveLength(3)
-  expect(fallbacks[0]).toMatchObject({ selected: 'dag', outcome: 'low-confidence', confidence: 0.7, threshold: 0.8 })
-  expect(fallbacks[1]).toMatchObject({ selected: 'dag', outcome: 'transport-error', backend: 'model' })
+  expect(fallbacks[0]).toMatchObject({ proposed: 'direct', selected: 'direct', outcome: 'low-confidence', confidence: 0.7, threshold: 0.8 })
+  expect(fallbacks[1]).toMatchObject({ selected: 'direct', outcome: 'transport-error', backend: 'model' })
   expect(fallbacks[1]?.confidence).toBeUndefined()
-  expect(fallbacks[2]).toMatchObject({ selected: 'dag', outcome: 'timeout', latencyMs: 8_000 })
+  expect(fallbacks[2]).toMatchObject({ selected: 'direct', outcome: 'timeout', latencyMs: 8_000 })
+})
+
+test('auto runs every turn directly when Jev is off', { options: { jev_enabled: false } }, async ($, on) => {
+  const h = harness(on)
+  jevModel(on, h, { choice: 'dag', confidence: 0.9 })
+  await boot($, null)
+  await ask($, 'Build the settings page')
+  expect(modeRequests(h)).toHaveLength(0)
+  expect(modeRecords(h)).toHaveLength(0)
+  expect(h.submits[0]?.context[0]).toBe(DIRECT)
+  expect(await edit($)).toBeUndefined()
+  expect(h.logs).toContain('dag-workflow: turn mode direct without asking Jev: jev_enabled is off')
 })
 
 test('auto keeps strict rules while this session has an active run', async ($, on) => {
@@ -355,7 +367,7 @@ test('an answer that selects large work in a direct turn closes the gate and tel
   expect(await edit($)).toContain(REFUSED)
   expect((await command($, 'enforce')).text).toBe('DAG enforcement: auto (this turn: dag)')
   expect(answerRecords(h)).toHaveLength(1)
-  expect(answerRecords(h)[0]).toMatchObject({ kind: 'mode', subject: 'answer', proposed: 'dag', selected: 'dag', source: 'jev', outcome: 'applied', confidence: 0.9 })
+  expect(answerRecords(h)[0]).toMatchObject({ kind: 'mode', subject: 'answer', proposed: 'direct', selected: 'dag', source: 'jev', outcome: 'applied', confidence: 0.9 })
   expect(modeRecords(h).map(record => record.subject)).toEqual(['request', 'answer'])
 
   // The turn is dag now: a later popup is not judged again, and its reply carries no reminder.
@@ -380,7 +392,7 @@ test('an answer Jev judges small leaves the direct turn and the reply alone', as
   expect((modeRequests(h)[1]?.state as { request: string }).request).toBe(`Answer to "${QUESTION}": Push main`)
   expect(await edit($)).toBeUndefined()
   expect(answerRecords(h)).toHaveLength(1)
-  expect(answerRecords(h)[0]).toMatchObject({ subject: 'answer', proposed: 'dag', selected: 'direct', source: 'jev', outcome: 'applied', confidence: 0.9 })
+  expect(answerRecords(h)[0]).toMatchObject({ subject: 'answer', proposed: 'direct', selected: 'direct', source: 'jev', outcome: 'applied', confidence: 0.9 })
 })
 
 test('an answer in a dag turn is not judged and never opens the gate', async ($, on) => {
@@ -408,27 +420,24 @@ test('an answer is not judged under enforcement strict', async ($, on) => {
   expect(await edit($)).toContain(REFUSED)
 })
 
-test('an answer Jev cannot judge confidently closes the gate, as an undecided prompt does', async ($, on) => {
+test('an answer Jev cannot judge confidently keeps the direct turn, as an undecided prompt does', async ($, on) => {
   popup(on)
   const h = harness(on)
   const jev = jevModel(on, h)
   await boot($, null)
   await ask($, 'What next?')
-  jev.answer = { choice: 'direct', confidence: 0.7 }
+  jev.answer = { choice: 'dag', confidence: 0.7 }
   const reply = await $.tool.call(POPUP)
-  expect(reply.context).toHaveLength(1)
-  expect(await edit($)).toContain(REFUSED)
-  expect(answerRecords(h)[0]).toMatchObject({ subject: 'answer', selected: 'dag', source: 'baseline', outcome: 'low-confidence', confidence: 0.7 })
+  expect(reply.context).toBeUndefined()
+  expect(await edit($)).toBeUndefined()
+  expect(answerRecords(h)[0]).toMatchObject({ subject: 'answer', selected: 'direct', source: 'baseline', outcome: 'low-confidence', confidence: 0.7 })
 
   // A backend that fails does the same.
-  jev.answer = SMALL
-  await ask($, 'And then?')
-  expect(await edit($)).toBeUndefined()
   jev.backend = 'down'
   const failed = await $.tool.call(POPUP)
-  expect(failed.context).toHaveLength(1)
-  expect(await edit($)).toContain(REFUSED)
-  expect(answerRecords(h)[1]).toMatchObject({ selected: 'dag', source: 'baseline', outcome: 'transport-error' })
+  expect(failed.context).toBeUndefined()
+  expect(await edit($)).toBeUndefined()
+  expect(answerRecords(h)[1]).toMatchObject({ selected: 'direct', source: 'baseline', outcome: 'transport-error' })
 })
 
 test('a typed reply instead of an option is judged as the answer', async ($, on) => {

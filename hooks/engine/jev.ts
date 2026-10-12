@@ -119,9 +119,9 @@ export function capTail(text: string, max: number): string {
   return masked.length > max ? `[truncated: first ${masked.length - max} of ${masked.length} characters omitted]\n${masked.slice(-max)}` : masked
 }
 
-// The bar for applying a mode answer. It matches the session-model routing bar (routing answers measured 0.60-0.97
-// confident) and sits below jev_confidence 0.9 because a wrong mode costs time, not safety: a direct turn still goes
-// through the user's normal permission rules.
+// The bar a dag answer must clear to gate the turn; anything below it runs directly. It matches the session-model
+// routing bar (routing answers measured 0.60-0.97 confident) and sits below jev_confidence 0.9 because a wrong mode
+// costs time, not safety: a direct turn still goes through the user's normal permission rules.
 export const MODE_CONFIDENCE = 0.8
 
 const MODE_CRITERIA: Readonly<Record<string, string>> = {

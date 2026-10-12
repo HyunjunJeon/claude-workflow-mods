@@ -2,11 +2,11 @@ import { isBlockedReportPath } from './lint.ts'
 import type { EngineError } from './types.ts'
 
 export type Enforcement = 'strict' | 'auto' | 'guide' | 'off'
-// How one user turn runs under `auto`: Jev's answer, or 'dag' (the strict rules) whenever it gave none.
+// How one user turn runs under `auto`: 'dag' (the strict rules) on a confident Jev 'dag', otherwise 'direct'.
 export type TurnMode = 'dag' | 'direct'
 
-// Only a direct turn under auto lifts the main-loop gate; an unanswered one is passed in as 'dag', so
-// auto never opens the gate on its own.
+// Only a direct turn under auto lifts the main-loop gate; a turn Jev confidently calls dag, or one in a session
+// with an unsettled run, is passed in as 'dag'.
 export function gatesMainLoop(level: Enforcement, mode: TurnMode): boolean {
   return level === 'strict' || (level === 'auto' && mode === 'dag')
 }
@@ -319,7 +319,7 @@ export function protocolFor(level: Enforcement, interactive = true, mode: TurnMo
     : 'Prefer doing all work inside DAG nodes; this main conversation should plan, orchestrate and verify.'
   const lines = [
     '[dag-workflow] DAG orchestration is mandatory for this task.',
-    ...(level === 'auto' ? ['- This request runs as a DAG: under enforcement auto, Jev judged it to need three or more nodes that gain from parallel or isolated work, or could not decide.'] : []),
+    ...(level === 'auto' ? ['- This request runs as a DAG: under enforcement auto, Jev judged it to need three or more nodes that gain from parallel or isolated work, or this session has a DAG run that has not settled.'] : []),
     gatesPlanning(level)
       ? `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it; start is refused until you do.`
       : `- Before your first DAG in this session, load the ${PLANNING_SKILL} skill with the Skill tool and follow it.`,

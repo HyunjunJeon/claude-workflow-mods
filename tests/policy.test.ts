@@ -323,7 +323,7 @@ test('only strict, and auto on a DAG turn, gate the main loop; strict and auto g
 
 test('under auto a DAG turn reads like strict plus one line saying why, and a direct turn is told to just do it', async () => {
   const strict = protocolFor('strict').split('\n')
-  const why = '- This request runs as a DAG: under enforcement auto, Jev judged it to need three or more nodes that gain from parallel or isolated work, or could not decide.'
+  const why = '- This request runs as a DAG: under enforcement auto, Jev judged it to need three or more nodes that gain from parallel or isolated work, or this session has a DAG run that has not settled.'
   expect(protocolFor('auto', true, 'dag').split('\n')).toEqual([strict[0], why, ...strict.slice(1)])
   expect(protocolFor('auto')).toBe(protocolFor('auto', true, 'dag'))
   expect(protocolFor('auto', false, 'dag').split('\n')).toEqual([strict[0], why, ...strict.slice(1), protocolFor('strict', false).split('\n').at(-1)])
