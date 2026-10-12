@@ -37,7 +37,7 @@ const ORPHAN_DIR = /^dag_[A-Za-z0-9_-]+$/
 function fileSessionId(name: string): string | undefined {
   if (!name.endsWith('.json') || name.includes('..')) return undefined
   const id = name.slice(0, -'.json'.length)
-  return id && SAFE_ID.test(id) ? id : undefined
+  return SAFE_ID.test(id) ? id : undefined
 }
 
 export function retentionPlan(input: RetentionInput): RetentionPlan {

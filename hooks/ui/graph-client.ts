@@ -2,13 +2,12 @@ import type { ClientModule } from 'claude-code'
 import type { GraphModel } from './graph-model.ts'
 import { activeView, VIEWS, viewBody } from './views.ts'
 
-const GraphClient: ClientModule = (props, surface) => {
+const GraphClient: ClientModule<GraphModel, true> = (model, surface) => {
   const { Box, Text, Button } = surface.elements
   if (surface.state === undefined) {
     surface.onKey(event => surface.post({ key: event.key, shift: event.shift === true }))
     surface.setState(true)
   }
-  const model = props as unknown as GraphModel
   if (surface.columns <= 0) return Box({ children: [] })
   const active = activeView(model, surface.columns)
   const tab = (key: string, label: string, chosen: boolean, view: string) =>

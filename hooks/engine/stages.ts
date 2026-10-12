@@ -231,13 +231,13 @@ export function lensNodeId(lens: string): string {
   return `security-${lens}`
 }
 
-// Verifier notes go one folder per lens under security-verify, so the lens's own folder can be emptied before it runs: the
-// default notes folder is shared by every run of a key, and a verifier file an earlier run left would otherwise stay. The
-// review-security folder check reads all of security-verify.
 export function lensNotesFile(review: ReviewStage, lens: string): string {
   return notesFile(review, lensNodeId(lens))
 }
 
+// Verifier notes go one folder per lens under security-verify, so the lens's own folder can be emptied before it runs: the
+// default notes folder is shared by every run of a key, and a verifier file an earlier run left would otherwise stay. The
+// review-security folder check reads all of security-verify.
 export function securityVerifyFolder(review: ReviewStage): string {
   return `${review.notes.replace(/[\\/]+$/, '')}/security-verify`
 }
@@ -397,7 +397,6 @@ export function verifierNodes(definition: Definition, lensId: string, candidates
   }))
 }
 
-// The reviewers a review stage expands into: the spec and standards pair, then review-security when security names guides.
 export function reviewerIds(review: ReviewStage): string[] {
   return [REVIEW_SPEC_ID, REVIEW_STANDARDS_ID, ...(review.security ? [REVIEW_SECURITY_ID] : [])]
 }

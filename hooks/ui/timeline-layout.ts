@@ -39,10 +39,10 @@ function bar(node: GraphNode, t0: number, span: number, cells: number, now: numb
 export function timelineLines(model: GraphModel, columns: number): Line[] {
   const order = frontiersOf(model).flat()
   if (columns <= 0 || order.length === 0) return []
-  const started = order.filter(node => node.startedAt !== null)
+  const started = order.filter((node): node is GraphNode & { startedAt: number } => node.startedAt !== null)
   if (started.length === 0) return [[{ text: model.labels.notStarted, dim: true }]]
   const focus = focusOf(model)
-  const t0 = Math.min(...started.map(node => node.startedAt as number))
+  const t0 = Math.min(...started.map(node => node.startedAt))
   const span = Math.max(1_000, Math.max(...started.map(node => node.finishedAt ?? model.now)) - t0)
   const critical = criticalPath(order, model.edges, model.now)
   const labelWidth = Math.max(4, Math.min(Math.max(...order.map(node => width(node.label))), Math.floor(columns * 0.35)))

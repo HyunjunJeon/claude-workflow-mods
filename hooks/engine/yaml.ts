@@ -34,8 +34,7 @@ class Parser {
 
   peek(): Row | undefined {
     if (this.override) return this.override
-    while (this.index < this.lines.length) {
-      const raw = this.lines[this.index] as string
+    for (let raw = this.lines[this.index]; raw !== undefined; raw = this.lines[this.index]) {
       if (/^\s*\t/.test(raw)) this.fail(this.index + 1, 'tabs are not allowed for indentation')
       const content = stripComment(raw.trim())
       if (content !== '') return { indent: raw.length - raw.trimStart().length, content, line: this.index + 1 }
@@ -112,8 +111,7 @@ class Parser {
     const [, style, chomp] = BLOCK_SCALAR.exec(header) as RegExpExecArray
     const collected: string[] = []
     let contentIndent: number | undefined
-    while (this.index < this.lines.length) {
-      const raw = this.lines[this.index] as string
+    for (let raw = this.lines[this.index]; raw !== undefined; raw = this.lines[this.index]) {
       const indent = raw.length - raw.trimStart().length
       if (raw.trim() !== '' && indent <= parentIndent) break
       if (raw.trim() !== '' && contentIndent === undefined) contentIndent = indent
@@ -131,7 +129,7 @@ class Parser {
   scalar(text: string, line: number): unknown {
     if (text.startsWith('"')) {
       try {
-        return JSON.parse(text) as string
+        return JSON.parse(text)
       } catch {
         this.fail(line, `invalid double-quoted string ${text}`)
       }

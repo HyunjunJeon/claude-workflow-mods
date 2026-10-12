@@ -176,7 +176,7 @@ export function answerModeRequest(
   response?: string,
 ): JevRequest {
   const lines = Object.entries(answers)
-    .filter(([, answer]) => typeof answer === 'string' && answer.trim())
+    .filter(([, answer]) => answer.trim())
     .map(([question, answer]) => `Answer to "${question}": ${answer}`)
   if (response?.trim()) lines.push(`Typed reply: ${response}`)
   const asked = questions.map(({ question, options }) =>

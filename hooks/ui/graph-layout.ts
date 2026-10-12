@@ -83,9 +83,16 @@ function gutterSegments(lanes: Lane[], gutter: number, row: number, focus: Focus
 // which take the next line; the last line carries the arrows. A lane that
 // only passes by is one vertical through every line.
 function band(edges: Edge[], upper: Row, lower: Row, index: number, lanes: Lane[], columns: number, focus: Focus | null): Line[] {
-  const direct = edges.filter(edge => upper.centers.has(edge.from) && lower.centers.has(edge.to))
+  const direct = edges.flatMap(edge => {
+    const a = upper.centers.get(edge.from)
+    const b = lower.centers.get(edge.to)
+    return a === undefined || b === undefined ? [] : [{ edge, a, b }]
+  })
   const leaving = lanes.filter(lane => lane.sources.some(source => source.row === index && upper.centers.has(source.id)))
-  const entering = lanes.filter(lane => lane.end === index && lower.centers.has(lane.target))
+  const entering = lanes.flatMap(lane => {
+    const t = lane.end === index ? lower.centers.get(lane.target) : undefined
+    return t === undefined ? [] : [{ lane, t }]
+  })
   const through = lanes.filter(lane => lane.start < index && lane.end > index && !leaving.includes(lane))
   if (direct.length === 0 && leaving.length === 0 && entering.length === 0) {
     if (through.length === 0) return []
@@ -93,8 +100,6 @@ function band(edges: Edge[], upper: Row, lower: Row, index: number, lanes: Lane[
     for (const lane of through) chars[lane.x] = '│'
     return [paintRuns(chars, chars.map((_, x) => through.some(lane => lane.x === x && lane.hot)), focus !== null)]
   }
-  const leaveAt = new Map(leaving.map((lane, i) => [lane, 1 + i]))
-  const enterAt = new Map(entering.map((lane, i) => [lane, 1 + leaving.length + i]))
   const directAt = direct.length ? 1 + leaving.length + entering.length : -1
   const arrowAt = 1 + leaving.length + entering.length + (direct.length ? 1 : 0)
   const height = arrowAt + 1
@@ -120,17 +125,15 @@ function band(edges: Edge[], upper: Row, lower: Row, index: number, lanes: Lane[
     const seen = stubs.get(x)
     stubs.set(x, { last: Math.max(seen?.last ?? 0, y), lit: (seen?.lit ?? false) || lit })
   }
-  for (const edge of direct) {
-    const a = upper.centers.get(edge.from) as number
-    const b = lower.centers.get(edge.to) as number
+  for (const { edge, a, b } of direct) {
     const lit = onFocusPath(focus, edge)
     use(a, directAt, lit)
     horizontal(directAt, a, b, lit)
     vertical(b, directAt, arrowAt, lit)
     targets.add(b)
   }
-  for (const lane of leaving) {
-    const y = leaveAt.get(lane) as number
+  for (const [i, lane] of leaving.entries()) {
+    const y = 1 + i
     for (const source of lane.sources) {
       const c = source.row === index ? upper.centers.get(source.id) : undefined
       if (c === undefined) continue
@@ -145,9 +148,8 @@ function band(edges: Edge[], upper: Row, lower: Row, index: number, lanes: Lane[
     vertical(lane.x, y, arrowAt, lane.hot)
     mark(arrowAt, lane.x, 4, lane.hot)
   }
-  for (const lane of entering) {
-    const y = enterAt.get(lane) as number
-    const t = lower.centers.get(lane.target) as number
+  for (const [i, { lane, t }] of entering.entries()) {
+    const y = 1 + leaving.length + i
     mark(0, lane.x, 1, lane.hot)
     vertical(lane.x, 0, y, lane.hot)
     horizontal(y, lane.x, t, lane.hot)
@@ -284,15 +286,16 @@ export function graphLines(model: GraphModel, columns: number): Line[] {
   }
   lanes = lanes.filter(lane => lane.x < gutter - 1)
   const out: Line[] = []
+  let above: Row | undefined
   rows.forEach((row, r) => {
-    if (r > 0) {
-      const above = rows[r - 1] as Row
+    if (above) {
       const joined = band(edges, above, row, r - 1, lanes, columns, focus)
       out.push(...joined)
       if (above.wraps) out.push([...gutterSegments(lanes, gutter, r, focus), { text: `  · ${model.labels.sameFrontier}`, dim: true }])
       else if (joined.length === 0) out.push([])
     }
     out.push(...boxes(model, row, gutterSegments(lanes, gutter, r, focus), gutter, focus))
+    above = row
   })
   return out
 }

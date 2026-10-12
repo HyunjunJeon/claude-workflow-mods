@@ -8,11 +8,6 @@ function quote(text: string): string {
   return JSON.stringify(chars.length > QUOTE_LIMIT ? `${chars.slice(0, QUOTE_LIMIT).join('')}...` : text)
 }
 
-// The text a check compares: trailing whitespace (spaces, tabs, CR and LF) is not part of it.
-function trimEnd(text: string): string {
-  return text.replace(/\s+$/, '')
-}
-
 // Undefined when every given field holds; otherwise the first failing field, in the order contains, absent, matches, lastLine, equals.
 export function textProblem(text: string, expect: TextExpect, label: string): string | undefined {
   if (expect.contains !== undefined && !text.includes(expect.contains)) {
@@ -31,7 +26,8 @@ export function textProblem(text: string, expect: TextExpect, label: string): st
     }
     if (!pattern.test(text)) return `${label}: matches /${expect.matches.slice(0, QUOTE_LIMIT)}/m found no match`
   }
-  const trimmed = trimEnd(text)
+  // Trailing whitespace (spaces, tabs, CR and LF) is not part of the text a check compares.
+  const trimmed = text.trimEnd()
   if (expect.lastLine !== undefined) {
     const last = trimmed.slice(trimmed.lastIndexOf('\n') + 1)
     if (last !== expect.lastLine) return `${label}: lastLine expected ${quote(expect.lastLine)}, got ${quote(last)}`

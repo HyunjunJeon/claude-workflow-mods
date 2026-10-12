@@ -695,7 +695,7 @@ test('the DAG pane opens with a run, draws its layers, and remembers folded node
 })
 
 test('the DAG pane follows the viewed node transcript without overriding manual selection', async ($, on) => {
-  const h = harness(on)
+  harness(on)
   await boot($)
   await callDag($, { action: 'start', definition: FAN_IN })
   const ui = (await $.ui.mount({

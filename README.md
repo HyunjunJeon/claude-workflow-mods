@@ -388,7 +388,7 @@ verify:
 | 하드: JS·TS | 연달은 `filter`·`map`, `reduce`에서 누적값 복사, 조건부 빈 객체 스프레드 | `two-pass-filter-map`, `growing-copy`, `conditional-empty-spread` |
 | 판단 | 되풀이 주석, 불가능한 상태 가드, 필요 없는 추상화, 깊은 중첩, 플래그 인자, 이름 없는 매직 값, 상태를 바꾸는 조회 함수, 이중 부정, 형태를 말하는 이름(`UserShape`, `strName`), 여러 일을 하는 함수 | 스캔 없음 |
 
-스캐너는 `hooks/engine/slop-scan.ts`에 있고, 모든 패턴마다 잡아야 할 예와 잡으면 안 되는 비슷한 예를 `tests/slop-scan.test.ts`에 둡니다. 잘못 걸린 경우는 편집마다 모델의 주의를 빼앗으므로, 규칙은 놓치는 쪽을 감수하고 정확도를 우선합니다. 2026-10-12에 이 저장소의 TS 10,573줄에 돌려 TS 파라미터의 `unknown`(36건 중 30건이 파서 입력)과 루프를 닫는 `}`를 if로 읽은 경우를 걸러냈습니다. 남은 186건은 모두 규칙이 겨냥한 모양이며, 그중 이유 없는 단언(72), 조건부 빈 스프레드(65), `filter`·`map`(29), 열린 딕셔너리(17)는 이 저장소가 이미 쓰는 관용구입니다. 확장자로 언어를 고르며, Kotlin·C#·Swift·Scala·Dart·C·C++·PHP는 중괄호 언어 공통 규칙만 받습니다.
+스캐너는 `hooks/engine/slop-scan.ts`에 있고, 모든 패턴마다 잡아야 할 예와 잡으면 안 되는 비슷한 예를 `tests/slop-scan.test.ts`에 둡니다. 잘못 걸린 경우는 편집마다 모델의 주의를 빼앗으므로, 규칙은 놓치는 쪽을 감수하고 정확도를 우선합니다. 2026-10-12에 이 저장소의 TS 10,573줄에 돌려 TS 파라미터의 `unknown`(36건 중 30건이 파서 입력)과 루프를 닫는 `}`를 if로 읽은 경우를 걸러냈습니다. 남은 186건은 모두 규칙이 겨냥한 모양이었고, 동작을 바꾸지 않고 정리할 수 있는 것(빈 catch 2, 이중 단언 1, 검사형으로 바꿀 수 있는 단언 28)은 정리했으며, 나머지는 이 저장소의 관용구로 [개발](#개발)에 예외로 적었습니다. 확장자로 언어를 고르며, Kotlin·C#·Swift·Scala·Dart·C·C++·PHP는 중괄호 언어 공통 규칙만 받습니다.
 
 #### 보안 검토 (선택)
 
@@ -665,6 +665,13 @@ claude plugin validate .
 claude plugin test
 bunx -p typescript@5 tsc -p . --noEmit
 ```
+
+이 저장소는 anti-slop 패턴 네 가지를 일부러 씁니다. 스캐너는 로컬 `AGENTS.md`의 `anti-slop allow:` 줄로 이들을 건너뛰고, 검토 노드는 이 문단을 저장소 규칙으로 읽습니다.
+
+- `conditional-empty-spread`: `...(x ? { k: x } : {})`는 `''`, `0`, `false`도 빼므로 `k: x`로 바꾸면 동작이 달라집니다.
+- `two-pass-filter-map`: 노드 수십 개짜리 배열이라 한 번에 도는 이득이 없고, 읽기는 `filter().map()`이 더 쉽습니다.
+- `open-dictionary`: `Record<string, unknown>`은 손으로 짠 파서(`definition.ts`, `yaml.ts`, `verification.ts`)의 작업 타입입니다.
+- `unreasoned-assertion`: 호스트 경계의 `as`와, `noUncheckedIndexedAccess`에서 코드가 이미 범위를 확인한 조회의 `as`입니다. 검사형으로 같은 동작을 낼 수 있는 곳(스택 `pop`, 문자 조회, 두 배열 비교, 그래프 레이아웃)은 2026-10-12에 바꿨습니다.
 
 엔진 로직은 `hooks/engine/`, 패널 모델은 `hooks/ui/`에 `$`를 쓰지 않는 순수 함수로 있습니다.  
 mods API 호출은 모두 `hooks/register.ts`에 있습니다.

@@ -44,7 +44,7 @@ import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
+import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
@@ -1859,9 +1859,9 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
 // /dag approve|reject and the pane's Approve and Reject buttons; callers check that a person asked. Approve clears the
 // hold and ticks, so the roots start now, or when a busy main turn ends if the caller set deferStarts. Reject cancels
 // the run, and its own message to the model stands in for the settle summary (announce marks the run notified).
-async function decideApproval($: EngineInterface, decision: 'approve' | 'reject', runId: string | undefined, reason = ''): Promise<{ text: string }> {
-  const run = runId ? runs.get(runId) : undefined
-  if (!run) return { text: `Unknown run "${runId ?? ''}".\n${USAGE}` }
+async function decideApproval($: EngineInterface, decision: 'approve' | 'reject', runId: string, reason = ''): Promise<{ text: string }> {
+  const run = runs.get(runId)
+  if (!run) return { text: `Unknown run "${runId}".\n${USAGE}` }
   if (run.sessionId !== sessionId) return { text: `Run ${run.runId} belongs to session ${run.sessionId}; only that session can approve or reject it.` }
   if (!awaitingApproval(run)) return { text: `Run ${run.runId} is not awaiting approval.` }
   const now = await $.clock.now()
@@ -1918,7 +1918,6 @@ function runListText(): string {
   return all.sort((a, b) => b.createdAt - a.createdAt).map(run => `${runLine(run, sessionId)}${awaitingApproval(run) ? '  [awaiting approval]' : ''}`).join('\n')
 }
 
-// /dag run and /dag preview take an absolute path as typed and anything else relative to the project.
 async function commandFilePath($: EngineInterface, given: string): Promise<string> {
   return given.startsWith('/') ? given : `${await $.session.cwd()}/${given}`
 }
@@ -2720,7 +2719,7 @@ export function register(on: On, options: PluginOptions) {
     const worker = ownNodeOfAgent(e.agentId ?? call?.agentId)
     // The answer stays with the person: mark the node worker that will wait for it.
     const asked = async (why: string) => {
-      if (call && e.tool_use_id) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+      if (call) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
       if (!interactive && worker && noteAsk(worker.run.runId, worker.nodeId, worker.attempt, e.tool)) {
         $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
       }

@@ -55,8 +55,7 @@ export function producersOf(run: Run, reviewerId: string): string[] {
   const found = new Set<string>()
   const seen = new Set<string>()
   const stack = [...(defOf(run, reviewerId)?.dependsOn ?? [])]
-  while (stack.length > 0) {
-    const id = stack.pop() as string
+  for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
     if (seen.has(id)) continue
     seen.add(id)
     const def = defOf(run, id)

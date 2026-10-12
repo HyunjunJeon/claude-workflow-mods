@@ -64,8 +64,8 @@ function deliverablePaths(node: NodeDef): string[] {
 }
 
 function namedSections(prompt: string): string[] {
-  const names = [...prompt.matchAll(/##\s+([A-Z][\w-]*(?: [A-Z][\w-]*)*)/g)].map(match => (match[1] ?? '').trim().toLowerCase())
-  return [...new Set(names.filter(name => name !== '' && name !== 'output'))]
+  const names = [...prompt.matchAll(/##\s+([A-Z][\w-]*(?: [A-Z][\w-]*)*)/g)].map(match => (match[1] ?? '').toLowerCase())
+  return [...new Set(names.filter(name => name !== 'output'))]
 }
 
 // Vacuous verify checks pass without proving the deliverable is right.

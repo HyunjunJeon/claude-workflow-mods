@@ -29,8 +29,11 @@ function overlap(x: string, y: string): string | undefined {
 
 // Compares two chains by the definition position of their nodes, root first.
 function earlier(x: string[], y: string[], position: Map<string, number>): boolean {
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    const diff = (position.get(x[i] as string) ?? 0) - (position.get(y[i] as string) ?? 0)
+  const others = y.values()
+  for (const node of x) {
+    const other = others.next()
+    if (other.done) break
+    const diff = (position.get(node) ?? 0) - (position.get(other.value) ?? 0)
     if (diff !== 0) return diff < 0
   }
   return false

@@ -49,8 +49,7 @@ function forward(payload: string): void {
 }
 
 // Each run is a fresh process, so the miss memory lives in a small file per session under the system temp directory
-// (which macOS clears on its own). A file that cannot be read or written only costs the memory: the miss then shows
-// as first seen.
+// (which macOS clears on its own).
 function rememberMiss(input: HudInput & { session_id?: string }): MissSeen | undefined {
   const id = input.session_id
   if (!id || !/^[\w-]+$/.test(id)) return undefined
@@ -58,12 +57,16 @@ function rememberMiss(input: HudInput & { session_id?: string }): MissSeen | und
   let seen: MissSeen | undefined
   try {
     seen = JSON.parse(readFileSync(path, 'utf8')) as MissSeen
-  } catch {}
+  } catch {
+    // No memory yet, or an unreadable one: the miss shows as first seen.
+  }
   const next = seeMiss(input.prompt_cache, seen)
   if (next && next !== seen) {
     try {
       writeFileSync(path, JSON.stringify(next))
-    } catch {}
+    } catch {
+      // Not remembered: the next render shows this miss as first seen again, which costs nothing else.
+    }
   }
   return next
 }

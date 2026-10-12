@@ -1,4 +1,4 @@
-import { layers } from '../engine/graph.ts'
+import { edgesOf, layers } from '../engine/graph.ts'
 import { STATUS_PREFIX } from '../engine/node-prompt.ts'
 import { awaitingApproval } from '../engine/run.ts'
 import type { NodeRun, NodeState, Run, RunStatus } from '../engine/types.ts'
@@ -62,14 +62,14 @@ const COLOR: Partial<Record<NodeState | RunStatus, string>> = {
 
 const STALLED_COLOR = 'yellow'
 const WAITING_COLOR = 'yellow'
-const DIM_STATES: ReadonlySet<NodeState> = new Set(['pending', 'skipped'])
+const DIM_STATES: ReadonlySet<NodeState | RunStatus> = new Set(['pending', 'skipped'])
 const SETTLED_NODES: ReadonlySet<NodeState> = new Set(['completed', 'failed', 'cancelled', 'skipped'])
 const SELECTOR_LIMIT = 5
 
 function styled(text: string, state: NodeState | RunStatus): Segment {
   const color = COLOR[state]
   if (color) return { text, color }
-  return DIM_STATES.has(state as NodeState) ? { text, dim: true } : { text }
+  return DIM_STATES.has(state) ? { text, dim: true } : { text }
 }
 
 export function visibleRuns(all: Run[], sessionId: string): Run[] {
@@ -87,12 +87,8 @@ export function clampRunIndex(index: number, count: number): number {
   return ((index % count) + count) % count
 }
 
-function edgesOf(run: Run): { from: string; to: string }[] {
-  return run.definition.nodes.flatMap(n => n.dependsOn.map(dep => ({ from: dep, to: n.id })))
-}
-
 export function nodeOrder(run: Run): string[] {
-  return layers(run.nodes.map(n => n.id), edgesOf(run)).flat()
+  return layers(run.nodes.map(n => n.id), edgesOf(run.definition.nodes)).flat()
 }
 
 export function stepSelection(order: string[], current: string | undefined, step: 1 | -1): string | undefined {
@@ -246,15 +242,13 @@ function isActive(run: Run): boolean {
 
 function runSelector(runs: Run[], index: number, view: ViewState, t: Strings): RunSelector | null {
   if (runs.length < 2) return null
-  const all = runs.map((_, i) => i)
-  const active = all.filter(i => isActive(runs[i] as Run))
-  const settled = all.filter(i => !isActive(runs[i] as Run))
-  const showCompleted = view.showCompleted === true || !active.includes(index)
+  const active = [...runs.entries()].filter(([, run]) => isActive(run))
+  const settled = [...runs.entries()].filter(([, run]) => !isActive(run))
+  const showCompleted = view.showCompleted === true || !active.some(([i]) => i === index)
   const listed = [...active, ...(showCompleted ? settled : [])]
-  const at = Math.max(0, listed.indexOf(index))
+  const at = listed.findIndex(([i]) => i === index)
   const start = listed.length <= SELECTOR_LIMIT ? 0 : Math.min(Math.max(0, at - SELECTOR_LIMIT + 1), listed.length - SELECTOR_LIMIT)
-  const rows = listed.slice(start, start + SELECTOR_LIMIT).map(i => {
-    const run = runs[i] as Run
+  const rows = listed.slice(start, start + SELECTOR_LIMIT).map(([i, run]) => {
     const selected = i === index
     const done = run.nodes.filter(n => n.state === 'completed').length
     const running = run.nodes.filter(n => n.state === 'running').length
@@ -289,7 +283,7 @@ export function buildPane(runs: Run[], view: ViewState, now: number, context: Vi
       ...(failed ? [{ text: ` · ${t.failedCount(failed)}`, color: 'red' }] : []),
     ],
   ]
-  const edges = edgesOf(run)
+  const edges = edgesOf(run.definition.nodes)
   const byId = new Map(run.nodes.map(n => [n.id, n]))
   return {
     header,

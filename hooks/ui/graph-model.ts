@@ -51,8 +51,7 @@ export type Focus = { selected: string; up: Set<string>; down: Set<string> }
 function reach(edges: Edge[], start: string, forward: boolean): Set<string> {
   const found = new Set<string>()
   const stack = [start]
-  while (stack.length > 0) {
-    const id = stack.pop() as string
+  for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
     for (const edge of edges) {
       const [from, to] = forward ? [edge.from, edge.to] : [edge.to, edge.from]
       if (from === id && !found.has(to)) {

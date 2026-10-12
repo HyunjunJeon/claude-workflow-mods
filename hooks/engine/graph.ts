@@ -29,8 +29,7 @@ export function downstream(nodes: NodeDef[], roots: Iterable<string>): Set<strin
   }
   const found = new Set<string>()
   const stack = [...roots]
-  while (stack.length > 0) {
-    const id = stack.pop() as string
+  for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
     for (const next of dependents.get(id) ?? []) {
       if (!found.has(next)) {
         found.add(next)
@@ -45,8 +44,7 @@ export function upstream(nodes: NodeDef[], id: string): Set<string> {
   const byId = new Map(nodes.map(n => [n.id, n]))
   const found = new Set<string>()
   const stack = [...(byId.get(id)?.dependsOn ?? [])]
-  while (stack.length > 0) {
-    const dep = stack.pop() as string
+  for (let dep = stack.pop(); dep !== undefined; dep = stack.pop()) {
     if (found.has(dep)) continue
     found.add(dep)
     stack.push(...(byId.get(dep)?.dependsOn ?? []))

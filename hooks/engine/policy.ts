@@ -84,7 +84,7 @@ const SHELL_CLOSERS: ReadonlySet<string> = new Set(['done', 'fi'])
 const COMMAND_BUILTIN = 'command'
 
 function isLeaderToken(tokens: readonly string[]): boolean {
-  const first = tokens[0] as string
+  const [first = ''] = tokens
   if (SHELL_LEADERS.has(first) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return true
   return first === COMMAND_BUILTIN && !(tokens[1] ?? '').startsWith('-')
 }
@@ -111,15 +111,15 @@ function sedScriptProblem(script: string): string | undefined {
       return delimited('/')
     }
     if (script[i] === '\\' && i + 1 < script.length) {
-      const delimiter = script[i + 1] as string
+      const delimiter = script.charAt(i + 1)
       i += 2
       return delimited(delimiter)
     }
-    while (i < script.length && /[\d$~]/.test(script[i] as string)) i++
+    while (i < script.length && /[\d$~]/.test(script.charAt(i))) i++
     return true
   }
   const skip = () => {
-    while (i < script.length && /[\s;]/.test(script[i] as string)) i++
+    while (i < script.length && /[\s;]/.test(script.charAt(i))) i++
   }
   skip()
   while (i < script.length) {
@@ -135,7 +135,7 @@ function sedScriptProblem(script: string): string | undefined {
       const delimiter = script[i++]
       if (!delimiter || !delimited(delimiter) || !delimited(delimiter)) return `sed ${command} command is unterminated`
       const start = i
-      while (i < script.length && /[A-Za-z0-9]/.test(script[i] as string)) i++
+      while (i < script.length && /[A-Za-z0-9]/.test(script.charAt(i))) i++
       if (/[weW]/.test(script.slice(start, i))) return 'sed s with the w or e flag writes files or runs commands'
     } else if (!SED_SAFE_COMMANDS.has(command)) {
       return `sed command "${command}" can write files or run commands`
@@ -147,11 +147,11 @@ function sedScriptProblem(script: string): string | undefined {
 
 function sedProblem(args: string[]): string | undefined {
   const scripts: string[] = []
-  for (let k = 0; k < args.length; k++) {
-    const arg = args[k] as string
+  const rest = args.values()
+  for (const arg of rest) {
     if (SED_FLAGS.test(arg)) continue
     if (arg === '-e' || arg === '--expression') {
-      scripts.push(args[++k] ?? '')
+      scripts.push(rest.next().value ?? '')
       continue
     }
     if (arg.startsWith('-')) return `sed ${arg} is not allowed in the main conversation`
@@ -203,7 +203,7 @@ function splitSegments(command: string): string[] {
   let current = ''
   let quote: string | undefined
   for (let i = 0; i < command.length; i++) {
-    const ch = command[i] as string
+    const ch = command.charAt(i)
     if (quote) {
       if (ch === quote) quote = undefined
       current += ch
@@ -226,8 +226,8 @@ function splitSegments(command: string): string[] {
 
 function gitVerdict(args: string[]): string | undefined {
   let i = 0
-  while (i < args.length && (args[i] as string).startsWith('-')) {
-    const flag = args[i] as string
+  while (args[i]?.startsWith('-')) {
+    const flag = args[i]
     i += flag === '-C' || flag === '-c' || flag === '--git-dir' || flag === '--work-tree' ? 2 : 1
   }
   const sub = args[i]
