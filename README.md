@@ -1,677 +1,122 @@
 # claude-dag-workflow
 
-Claude Code mod로 만든 의존성 그래프(DAG) 워크플로우 관리 플러그인입니다.
+Claude Code의 작업을 의존성 그래프(DAG)로 나누어 실행하는 Mod 플러그인입니다.
+독립된 작업은 병렬로 실행하고, 선행 작업이 끝나면 그 결과를 다음 작업에 전달합니다.
 
-- **DAG 사용은 강제입니다.** 기본값 `auto`에서는 Jev가 요청마다 판단해, 노드가 셋 이상 필요한 요청은 DAG로 돌리고 작은 요청은 메인 대화에서 직접 실행합니다. DAG로 도는 턴에서 메인 대화는 계획, 읽기, 질문, 오케스트레이션만 하고 실제 작업은 모두 DAG 노드에서 합니다. `strict`는 모든 요청을 이렇게 돌립니다([강제](#강제)).
-- 노드는 Claude Code 서브에이전트로 실행되고, 의존성이 풀리는 순서대로 병렬 웨이브로 돕니다.
-- 각 노드의 결과는 그 노드에 의존하는 노드와 메인 대화로 전달됩니다([결과 전달](#결과-전달)).
-- 실행 상태는 노드 단위 State로 `.claude/dag/runs/<run_id>.json`에, 노드별 전체 보고서는 `.claude/dag/runs/<run_id>/<node>.md`에 저장됩니다. `.claude/dag/`는 처음 무언가를 쓸 때(첫 실행, 고정 노트, 판단 기록 등) 비로소 만들어지므로, `strict`에서는 플러그인을 전역으로 불러와도 DAG를 쓰지 않은 프로젝트에 아무것도 남지 않습니다. 기본값 `auto`에서는 Jev에 물은 첫 프롬프트가 판단 기록을 남기므로 이 폴더가 만들어집니다([판단 기록](#판단-기록)). 그때 `.claude/dag/.gitignore`(`*`)가 함께 생겨(이미 있으면 그대로 둠) 이 폴더는 git에 잡히지 않고, 노드 프롬프트도 이 폴더를 작업 대상이나 기존 내용으로 세지 말라고 알려 줍니다.
-- 진행 상황은 오른쪽 DAG 패널에 실시간으로 그려집니다([실제 사용 예](#실제-사용-예)).
+- **병렬 실행:** Claude Code 서브에이전트가 의존 관계에 따라 작업합니다.
+- **결과 검증:** 노드마다 정해 둔 검사를 통과해야 완료로 처리합니다.
+- **진행 상황 표시:** DAG 패널에서 작업 상태와 의존 관계를 확인합니다.
 
-Claude Code v2.1.287 이상이 필요합니다(mod 지원 버전).
+## 실행 화면
 
-## 불러오기
+![Mod 실행 화면: 왼쪽 Claude Code 대화와 오른쪽 DAG 패널](docs/images/run-overview.png)
+
+선행 작업인 `settings`가 끝난 뒤 `greeter`와 `repeater`가 병렬로 실행되는 화면입니다.
+오른쪽 패널은 작업별 상태와 의존 관계를, 프롬프트 위 밴드는 현재 진행 상황을 보여 줍니다.
+
+## 빠른 시작
+
+Claude Code **v2.1.287 이상(Claude Mods 기능 활용)**이 필요합니다.  
+이 저장소를 내려받은 뒤, 작업할 프로젝트 디렉터리에서 플러그인을 불러옵니다.
 
 ```bash
-claude --plugin-dir /path/to/claude-workflow-mods
+claude --plugin-dir /path/to/this-repo
 ```
 
-플래그 없이 모든 세션에서 항상 불러오려면 `~/.claude/settings.json`의 `env`에 플러그인 경로를 넣습니다. 이렇게 하면 어느 디렉터리에서 시작하든 강제와 계획 스킬이 켜진 상태로 시작합니다. `--plugin-dir`을 함께 줘도 한 번만 불러옵니다.
+`/path/to/this-repo`는 이 저장소의 실제 경로로 바꿉니다.  
+모든 세션에 적용하려면 [전역 불러오기 설정](docs/reference.md#불러오기)을 참고하세요.
 
-```json
-{
-  "env": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/claude-workflow-mods"
-  }
-}
-```
-
-## 사용법
-
-**평소처럼 요청하기**: 따로 말하지 않아도 노드가 셋 이상 필요한 작업은 Claude가 DAG로 계획해 `mcp__dag-workflow__dag` 도구로 실행합니다(작은 요청은 기본값 `auto`가 직접 실행합니다. [강제](#강제)). `start`는 바로 반환되고, 실행이 끝나면(정착하면) 노드별 결과가 담긴 요약 메시지가 세션에 들어옵니다.
-
-**파일로 실행하기**:
+이후에는 평소처럼 요청합니다.   
+DAG를 직접 작성하거나 별도로 실행을 지시할 필요는 없습니다.
 
 ```text
-/dag run flows/review.yaml      JSON 또는 YAML 정의 파일 실행
-/dag preview <file>             정의 파일을 실행하지 않고 단계·모델·쓰기 충돌·경고 미리보기
-/dag                            DAG 패널 열기
-/dag list                       이 프로젝트의 실행 목록
-/dag status <run_id>            노드별 상태
-/dag cancel <run_id>            실행 취소(실행 중인 노드 에이전트 중단)
-/dag retry <run_id> [node...]   실패/취소된 노드 다시 실행
-/dag enforce [strict|auto|guide|off] 이 세션의 강제 수준 확인·변경(auto일 때는 이번 턴의 방식도 표시)
-/dag view [auto|graph|lanes|timeline]  그래프 영역의 보기 확인·변경(이 프로젝트에 저장)
-/dag inspect dag|decisions|context|sessions  패널을 그 화면으로 열기
-/dag context                    이 세션의 복원 컨텍스트(JSON) 보기
-/dag note <text>                고정 노트 추가(1-4000자, 최대 50개)
-/dag note rm <번호>             고정 노트 삭제(번호는 /dag context에 보이는 1부터 시작하는 순서)
-/dag decisions [id]             최근 판단 20개 또는 판단 하나의 전체 기록
-/dag sessions                   같은 프로젝트의 세션과 겹치는 쓰기 범위
-/dag handoff <run> <session>    실행을 다른 세션에 넘기겠다고 제안
-/dag handoff <run> cancel       보낸 제안 취소
-/dag accept <run>               나에게 온 제안 수락
-/dag approve <run>              승인 대기 중인 실행을 승인하고 시작
-/dag reject <run> [reason]      승인 대기 중인 실행을 거부하고 취소(사유는 모델에 전달)
-/dag approval [off|always]      모델이 시작한 실행의 승인 설정(start_approval) 확인·다음 `/reload-plugins`까지 변경
+설정 파일을 공유하는 인사 함수와 텍스트 반복 함수를 만들고,
+두 함수를 사용하는 CLI와 테스트까지 작성해줘.
 ```
 
-`handoff`, `accept`, `note`, `approve`, `reject`는 사용자가 직접 입력하거나 패널 버튼을 눌러야 실행됩니다. `approval`은 읽기와 쓰기가 다릅니다. 인자 없이 `/dag approval`로 지금 값을 읽는 것은 누구에게나 열려 있고, `/dag approval off|always`로 바꾸는 것만 사용자 전용입니다. 사용자 전용 명령은 모델이 대신 실행할 수 없습니다.
+기본 `auto` 모드에서는 요청에 따라 직접 실행하거나 DAG로 나눕니다.
+DAG로 실행하면 진행 알림이 나오고, 실행이 끝나면 노드별 결과와 검증 요약이 대화에 전달됩니다.
 
-`/dag run`과 `/dag retry`를 모델 턴이 진행 중일 때 입력하면 정의를 바로 검증하고 실행을 보류 상태로 저장한 뒤, 그 턴이 끝날 때(중단된 턴 포함) 시작합니다. 모델이 턴 안에서 호출하는 `dag` 도구는 계속 즉시 시작합니다.
+## 기본 사용법
 
-## 실제 사용 예
-
-DAG를 언급하지 않은 평범한 요청 하나가 처리되는 과정을 실제 세션에서 캡처했습니다. Claude Code 2.1.292, 메인 모델 Sonnet 5.5, 플러그인 기본 설정(당시 `enforcement` 기본값은 `strict`), `TYPESAFE_API_KEY` 없음, 220×62 터미널(tmux)에서 실측했습니다(2026-10-07). 권한 모드는 bypass였고 `--allowedTools`로 Write/Edit/Bash를 허용했으므로, 이 실행에는 [승인 대기](#dag-패널) 표시와 Jev 도구 승인이 나타나지 않습니다. 이미지는 `tmux capture-pane`으로 받은 화면을 다시 그린 것으로, 작업 경로를 `~/greeter-demo`로 줄이고 영역을 잘라낸 것 외에는 내용을 바꾸지 않았습니다. 요청은 `eval/`의 `diamond-app` 시나리오와 같은 문장입니다.
+### 진행 확인
 
 ```text
-Build a tiny Python app: settings.py exposing SETTINGS = {"greeting": "hi", "repeat": 2};
-greeter.py with greet(name) returning "<greeting>, <name>" using SETTINGS; repeater.py with
-repeat_text(text) repeating text SETTINGS["repeat"] times joined by spaces; main.py printing
-repeat_text(greet("ada")); and test_app.py with plain asserts for greet, repeat_text and main
-that prints OK when run with python3 test_app.py.
+/dag                        DAG 패널 열기
+/dag list                   이 프로젝트의 실행 목록
+/dag status <run_id>        실행의 노드별 상태
 ```
 
-**1. 계획.** Claude가 `planning` 스킬을 불러온 뒤 노드 6개짜리 다이아몬드 정의를 `start`했습니다. 계약 점검 경고는 없었습니다.
+패널에서는 그래프·레인·타임라인 보기를 선택할 수 있습니다.
+패널을 닫아도 프롬프트 주변에 진행 상황이 표시됩니다. `Esc`로 프롬프트로 돌아갑니다.
 
+패널은 터미널과 데스크톱에서 표시되며, 다른 화면에서는 진행·완료 메시지를 텍스트로 받습니다.
 
-| 노드         | `category`        | `dependsOn`           | `verify`                                                                 |
-| ---------- | ----------------- | --------------------- | ------------------------------------------------------------------------ |
-| `settings` | `quick`           |                       | 파일 + `SETTINGS` 값 assert                                                 |
-| `greeter`  | `quick`           | `settings`            | 파일 + `greet('ada')` assert                                               |
-| `repeater` | `quick`           | `settings`            | 파일 + `repeat_text` assert                                                |
-| `main`     | `quick`           | `greeter`, `repeater` | 파일 + `main.py` 출력 비교 2개                                                  |
-| `test_app` | `quick`           | `main`                | 파일 + `test_app.py`가 `OK`를 출력하는지                                          |
-| `audit`    | `unspecified-low` | 앞의 5개 전부              | 변이 검사(임시 복사본의 greeter·repeater·main을 하나씩 망가뜨려 테스트가 실패하는지) + `main.py` 출력 |
+### 취소와 재시도
 
-
-키가 없어 Jev가 세션 모델로 카테고리를 판단하려 했지만 5초 안에 답이 없어(`/dag decisions`의 `outcome: timeout`), 정의의 카테고리를 그대로 썼습니다([Jev 를 활용한 자동 판단](#jev-를-활용한-자동-판단)의 실패 처리). 같은 요청을 `claude -p`로 재현해 보니 노드 6개를 한 요청으로 물으면 4.5–5.1초가 걸렸습니다. 이 실측 뒤 세션 모델 경로를 고쳤습니다(링크한 섹션의 작업 배정 항목).
-
-**2. 실행.** `settings`가 끝나자 `greeter`와 `repeater`가 같은 웨이브에서 병렬로 시작했습니다. 오른쪽 패널, 프롬프트 위 밴드(`DAG Tiny greeter app 1/6 done · ● 2 running`와 숫자 단축키 `0`–`2`), 프롬프트 아래 상태 줄이 같은 진행을 보여 줍니다. 왼쪽 위는 `start`에 넘긴 정의(노드 프롬프트의 TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN)입니다.
-
-![실행 중 전체 화면: 왼쪽 대화, 오른쪽 DAG 패널, 프롬프트 위 밴드](docs/images/run-overview.png)
-
- 패널 화면 캡쳐입니다. `greeter`는 `▶ Write` 도구를 실행 중이고 `repeater`는 응답을 기다리는 중(`…`)입니다. `settings → audit`처럼 층을 건너뛰는 간선은 왼쪽 거터의 레인으로 내려갑니다.
-
-<img src="docs/images/pane-graph.png" alt="DAG 패널 그래프 뷰: settings 완료, greeter와 repeater 실행 중" width="430">
-
-**3. 정착.** 6개 노드가 모두 검증을 통과했고, 실행은 시작부터 1분 45초 만에 끝났습니다. 타임라인 뷰(`/dag view timeline`)는 노드별 실행 시간과 임계 경로(`◆`)를 보여 줍니다. 가장 오래 걸린 노드는 변이 검사를 한 `audit`(45초)입니다.
-
-<img src="docs/images/pane-timeline.png" alt="DAG 패널 타임라인 뷰: 6개 노드 완료, 임계 경로 표시" width="430">
-
-**4. 보고.** 정착 요약이 "증거로 확인하기 전까지 완료 주장을 거짓으로 취급하라"는 지침과 함께 메인 대화에 들어왔습니다. Claude는 읽기 전용 명령으로 파일과 `git status`를 확인했고, `python3 -B main.py`를 직접 실행하려던 Bash 호출은 strict 강제에 거부됐습니다(`python3 is not on the read-only command list`). 그래서 런타임이 노드마다 실행한 검증 증거를 근거로 보고했습니다. 화면에 표시된 턴 시간은 3분 15초입니다.
-
-![정착 후 메인 대화의 최종 답변](docs/images/settle-reply.png)
-
-## 강제
-
-기본값인 `auto`에서는 사용자 프롬프트마다 Jev가 요청을 DAG로 돌릴지 바로 실행할지 판단합니다. 노드가 셋 이상 필요하고 병렬 또는 격리 실행으로 이득을 보는 요청이면 DAG로, 그렇지 않은 작은 요청이면 메인 대화에서 직접 실행합니다. 이 판단은 판단 종류 `mode`(패널과 `/dag decisions`에는 **실행 방식**)로 [기록](#판단-기록)됩니다.
-
-- **직접 실행 턴**: 아래 1번 도구 게이트가 풀려 메인 대화가 Edit, Write, 쓰기 Bash 같은 도구를 직접 호출합니다. 호출은 사용자의 평소 권한 규칙을 그대로 따릅니다. 프로토콜은 "이 요청은 작으니 DAG 없이 직접 하라"는 한 줄로 바뀌고, 독립된 작업이 셋 이상으로 커지면 계획 스킬을 불러 DAG로 돌리라고 알립니다.
-- **DAG 턴**: 아래 네 가지가 `strict`와 똑같이 동작합니다. 프로토콜에는 Jev가 DAG로 판단했거나 이 세션에 정착하지 않은 실행이 있다는 한 줄이 더 붙습니다.
-- **DAG 턴이 되는 경우**: Jev가 확신도 0.8 이상으로 DAG라고 판단했을 때와, 이 세션에 아직 정착하지 않은 실행이 있을 때 두 가지뿐입니다. 뒤의 경우에는 Jev를 부르지도 않습니다. 직접 실행 턴이 그 실행의 노드가 쓰는 파일을 건드릴 수 있기 때문입니다. 그 밖에는 모두 직접 실행 턴입니다: Jev가 직접 실행으로 판단했을 때, 확신도가 0.8 미만일 때(어느 쪽으로 기울었든), Jev를 쓸 수 없을 때(`jev_enabled`가 꺼졌거나 키도 세션 모델 대체도 없음), 답이 제한 시간 안에 오지 않았거나 잘못됐을 때. 그래서 Jev를 쓸 수 없는 환경의 `auto`는 정착하지 않은 실행이 없는 한 모든 턴을 직접 실행합니다. 예전에는 판단하지 못한 턴을 모두 DAG로 돌렸는데, 기록된 실행 방식 판단 10건 중 DAG 턴 5건의 4건이 확신 있는 DAG 판단이 아닌 이런 대체였고 작은 요청까지 막았기 때문에 바꿨습니다.
-- **판단 시점**: 사용자 프롬프트마다 새로 판단하고, 직접 실행 턴에서 선택 창에 답했을 때도 한 번 더 판단합니다(아래 **선택 창 답**). 플러그인이 보내는 프롬프트(정착 요약, 진행 알림, keep-alive)는 판단하지 않고 현재 턴의 방식을 그대로 씁니다. 사용자 프롬프트는 답이 올 때까지 기다리며 기다림은 최대 8초입니다(TypeSafe와 세션 모델 대체를 합친 한도로, [Jev 섹션](#jev-를-활용한-자동-판단)의 5초·10초 제한과 별개). 판단하는 동안에는 게이트가 닫혀 있고, 답이 없거나 실패하면 직접 실행 턴이 됩니다. 판단 코드 자체가 예외로 끊긴 경우만 게이트가 닫힌 채로 남습니다.
-- **선택 창 답**: 직접 실행 턴에서 사용자가 AskUserQuestion 선택 창에 답하면 Jev가 질문과 선택지, 고른 답을 사용자의 직전 요청 최대 3개와 함께 다시 판단합니다. 고른 작업이 DAG를 필요로 하면 그 턴은 그 자리에서 DAG 턴이 되어 도구 게이트가 닫히고, 모델은 도구 결과 뒤에 계획을 짜서 실행을 시작하라는 안내를 받습니다. 한쪽으로만 바뀝니다. 선택 창 답이 DAG 턴을 직접 실행 턴으로 풀지는 않는데, 범위 A·B를 고르는 좁은 계획 질문은 작게 판단되어도 실제 작업은 클 수 있기 때문입니다. 프롬프트와 같은 규칙으로, 확신도 0.8 이상의 DAG 판단이나 이 세션의 정착하지 않은 실행만 DAG 턴을 만들고, 확신도 0.8 미만, 제한 시간(8초) 초과, Jev를 쓸 수 없는 경우는 직접 실행 턴을 그대로 둡니다. 사용자는 답한 뒤 판단이 끝날 때까지 최대 8초를 기다립니다. 이 판단은 종류 `mode`, 대상 `answer`로 [기록](#판단-기록)됩니다(프롬프트는 대상 `request`).
-- **직접 실행 턴에서 실행 시작**: 직접 실행 턴에서 모델이 `start`하거나 사용자가 `/dag run`을 입력해 실행이 만들어지면 그 턴은 DAG 턴이 되어 게이트가 다시 닫힙니다. `amend`와 `retry`는 턴을 바꾸지 않습니다. 계획 스킬 게이트(아래 4번)는 `auto`에서도 `strict`처럼 적용됩니다.
-- **알려진 한계**: 모델이 일하는 도중에 입력한 프롬프트도 Enter를 누른 때 판단하므로 아직 진행 중인 턴의 게이트가 바뀔 수 있습니다. 예를 들어 직접 편집하던 턴에 DAG로 판단되는 요청을 이어 입력하면 진행 중이던 편집이 거부될 수 있습니다.
-
-`strict`는 모든 턴에 DAG 턴 규칙을 적용합니다. 네 가지는 다음과 같습니다.
-
-1. **도구 게이트**: 메인 대화에서 모델이 호출하는 도구 중 다음을 제외한 모든 도구를 거부합니다. 거부할 때는 "이 작업을 DAG 노드로 옮겨 `start`나 `amend`하라"는 안내를 돌려줍니다.
-   - 허용: dag 도구, Read, LSP, WebFetch/WebSearch, AskUserQuestion, 계획 모드, 작업 조회·중단(TaskList/TaskGet/TaskStop), 읽기 전용 Bash, 호스트가 막는 보고서 이름에 한정한 Write 예외(아래)
-   - 읽기 전용 Bash: `ls`, `cat`, `rg`, `find`(‐exec/‐delete 제외), `git status/log/diff/show/...`, 인자가 `--version`/`--help` 하나뿐인 명령, 맨 앞의 `command` 내장 명령(`command claude --version`, `command git status`처럼 뒤따르는 명령은 그대로 검사하며 `command -v`·`command -p`는 거부), `uv pip list/freeze/show/check`, 출력만 하는 `sed`(`-i`·`-f`·`w`·`e` 제외) 등. 명령이 모두 읽기 전용이면 `for`/`if`/`while` 구조와 입력 리다이렉트(`< 파일`)도 허용합니다. 출력 리다이렉트(`>`), 명령 치환(`$(...)`), 프로세스 치환(`<(...)`), 목록에 없는 명령이 하나라도 있으면 거부합니다.
-   - Write 예외: 파일 이름(basename)이 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*`로 시작하는 Markdown(`^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$`, 대소문자 무시)은 메인 대화의 Write를 허용합니다. Claude Code가 서브에이전트의 이 이름 쓰기를 `Subagents should return findings as text, not write report files`로 직접 거부하므로 노드로는 `report.md` 같은 파일을 만들 수 없기 때문입니다. 정착한 노드의 `## Output`이나 노트를 그대로 옮겨 쓰는 용도로만 허용하며, Edit과 쓰기 Bash, 다른 이름의 Write는 계속 거부합니다.
-   - 거부: Edit, Write(위 예외 제외), NotebookEdit, Agent, Workflow, TodoWrite/TaskCreate(계획은 DAG로만), 쓰기 Bash, 그 밖의 MCP 도구
-   - DAG 노드 에이전트와 플러그인 자신의 호출(노드 spawn, TaskStop)은 제한하지 않습니다.
-2. **프로토콜 주입**: 사용자 프롬프트마다 "계획을 DAG로 짜서 실행하고, 의존 관계를 정확히 적고, 정착 요약을 확인하라"는 짧은 지침을 붙입니다. 비대화형 세션(`session.start`의 `isInteractive`가 false인 경우, 예: `claude -p`)에서는 지침이 한 줄 더 붙어, 사용자에게 묻지 말고(AskUserQuestion도, 확인 질문도 안 됨) 스스로 결정하되 가정을 정의의 `goal`과 노드 프롬프트에 적으라고 알립니다.
-3. **도구 설명**: dag 도구 설명에 같은 원칙을 넣습니다.
-4. **계획 스킬 게이트**: 세션의 첫 `start`/`amend`는 `dag-workflow:planning` 스킬을 불러오기 전까지 `planning_skill_required`로 거부됩니다([계획 스킬](#계획-스킬)). 게이트가 인정하는 스킬 이름은 `dag-workflow:planning`과 접두사 없는 `planning`뿐이며, 다른 플러그인의 같은 이름 스킬은 인정하지 않습니다. `/clear`하면 다시 불러와야 합니다. `/reload-plugins`는 게이트를 다시 닫지 않습니다(불러옴 여부를 호스트 세션 상태 `$.state`에 보관하므로 핫 리로드를 지나도 남고, 대화를 비우는 `/clear`만 게이트를 닫습니다). `claude --resume`으로 같은 세션을 새 프로세스에서 이어 가도 게이트는 열린 채로 남는데, 플러그인이 불러옴 표시를 세션 컨텍스트 파일 `.claude/dag/context/<세션 id>.json`에도 함께 기록하기 때문입니다. 이 파일은 세션이 DAG를 쓴 뒤(실행을 소유했거나 메모를 고정한 뒤)에야 생기므로, 스킬만 불러온 세션, 새 세션 id를 받는 포크(`--fork-session`), `retention_days`가 지나 컨텍스트 파일이 지워진 세션은 스킬을 다시 불러와야 합니다. 사용자가 직접 실행하는 `/dag run`은 게이트하지 않습니다.
-
-`auto`의 직접 실행 턴은 1을 풀고 2를 위의 한 줄로 바꾸며 3·4는 그대로 둡니다. `guide`는 2·3만 적용하고 스킬을 안 불렀으면 경고만 남기며, `off`는 아무것도 하지 않습니다. 다른 도구를 메인에서 계속 쓰려면 `main_allowed_tools` 설정에 이름을 추가합니다.
-
-## 계획 스킬
-
-`skills/planning/`이 플러그인에 들어 있습니다(`/dag-workflow:planning`).
-
-- `SKILL.md`: 언제 쓰나, 정의 형태(노드 필드, dependsOn으로 결과가 흐르는 방식), 목표 우선, 실행·복구(retry/amend/send/cancel)·감독 방법, 메인 대화가 할 수 있는 일
-- `SKILL.md`의 `## Alignment` 단계: 계획 읽기 뒤, 실행 계획을 쓰기 전에 질문 라운드를 최대 한 번 가집니다. 산출물 종류(예: CLI인지 문서인지), 범위(들어가고 빠지는 파일·구성요소), 완료 기준 중 하나가 정말 모호하고 Read나 `rg`로도 풀리지 않을 때만 묻습니다. 사실은 찾아보고 묻지 않으며, 모호한 것이 없으면 조용히 건너뜁니다. 라운드는 AskUserQuestion 한 번에 번호 붙인 질문 4개까지이고, 질문마다 추천 답을 첫 옵션으로 두어 "예"만 해도 받아들여집니다. 주입된 프로토콜이 비대화형 세션이라고 알리면 라운드를 건너뛰고 스스로 결정하며 가정은 `definition.goal`과 노드 프롬프트에 적습니다. 요청이 크고 모호하면 `/dag-workflow:interview`나 `/dag-workflow:pm`을 제안할 뿐 모델이 직접 부르지는 않습니다. 답을 받은 뒤 확정한 목표는 `definition.goal`에, 완료 기준은 `verify`에 넣습니다.
-- `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`)와 선택형 보안 축(`review-security`), 안전하지만 틀린 산출물 점검표
-- 노드용 스킬 `skills/anti-slop/`, `skills/debugging/`, `skills/review-standards/`, `skills/secure-coding/`, `skills/testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:debugging"]`)로 불러오는 작업 규율(의미 없는 코드 차단, 디버깅, 표준 리뷰, 시큐어코딩 관점·검증·집계, 테스트)입니다.
-
-계획 스킬은 검증도 묶어서 하게 합니다. 관련 변경은 한 단계 실행으로 묶고 끝에 검증 단계 하나(코드는 검토 한 쌍, 곧 `review-spec`과 `review-standards`)만 둡니다. 작은 변경마다 검토 한 쌍을 붙이지 않고, 단계 전체는 종단 시나리오 테스트로 증명합니다. 검토 한 쌍과 커밋은 정의의 `review`와 `commit` 필드로 선언하면 플러그인이 노드로 만들어 주므로 손으로 쓰지 않습니다([검토와 커밋 단계](#검토와-커밋-단계)).
-
-mod는 이 스킬을 강제로 연결합니다.  
-프로토콜과 거부 메시지가 스킬을 안내하고, strict와 auto에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/validate/check/test/review/audit로 시작하는 단어가 있고 다른 노드에 의존. `preview`는 해당하지 않습니다)가 없거나, 한 노드가 파일 셋 이상을 혼자 만들거나(`writes`와 파일 검사 `verify`의 경로를 세며 테스트 경로는 제외하고, 선언한 폴더와 그 안의 파일은 한 번만 세어 `writes: ['skills/x/']`에 그 안의 파일 둘을 검사하면 둘로 셉니다), 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
-
-### 정렬 스킬: 인터뷰와 PM
-
-요청이 크고 모호하면 DAG를 짜기 전에 사용자와 먼저 맞추는 스킬 두 개가 있습니다. 둘 다 `disable-model-invocation`이라 사용자가 `/dag-workflow:interview [주제]`나 `/dag-workflow:pm [아이디어]`로 직접 실행할 때만 동작하고, 모델은 스스로 부르지 못합니다(계획 스킬도 제안만 합니다). 메인 대화에서 strict 강제를 받는 것을 전제로 실행하므로 AskUserQuestion, Read, LSP, 읽기 전용 Bash, dag 도구만 쓰고 Agent·Write·Edit·쓰기 Bash는 쓰지 못합니다(`auto`에서 직접 실행 턴이면 도구 게이트는 풀리지만 스킬 지침이 같은 도구만 쓰게 합니다). 파일은 스킬이 직접 쓰지 않습니다.
-
-- `/dag-workflow:interview`: 요청을 설계 트리로 보고 라운드로 묻습니다.
-  - 질문에는 Q1, Q2 번호와 짧은 제목을 붙이고 추천 답을 밝힙니다. AskUserQuestion에서는 추천 옵션을 맨 앞에 "(Recommended)"로 두어 "예"만 해도 받아들여지게 합니다. 앞선 결정이 풀려 지금 물을 수 있는 질문은 한 라운드에 묻되, AskUserQuestion 한 번에 4개까지입니다. 넘치면 하위 가지가 많은 4개를 먼저 묻습니다.
-  - 모호함 트랙은 범위, 제약, 산출물, 검증 네 가지입니다. 라운드마다 트랙별 해결됨/미해결 표를 출력하고, 직전 두 라운드가 한 트랙에만 몰렸으면 가장 덜 다룬 트랙에서 고릅니다.
-  - 사실과 결정을 나눕니다. "프로젝트가 X를 쓴다"는 사실이라 Read, LSP, `rg` 같은 읽기 전용 명령으로 직접 찾고, "새 기능이 X를 써야 한다"는 결정이라 사용자에게 묻습니다. 사실이 너무 커서 직접 읽기 어려우면 읽기만 하는 한 노드짜리 DAG로 조사시키고, 기다리거나 폴링하지 않습니다.
-  - Refine: 자유 답변에 범위·제약·결정이 담기면 `Decision (user-stated)`, `Constraints (user-stated)`, `My reading`으로 나눠 다시 말하고 AskUserQuestion으로 확인받습니다. 확인 전에는 확정으로 보지 않고, 모델의 추론을 사용자가 말한 것으로 적지 않습니다.
-  - Restate gate: 더 물을 질문이 없고 암묵적 가정이 없으면 목표를 한 문장으로, 완료 기준을 관찰 가능한 번호 목록으로 다시 말해 확인받습니다. "Yes, plan it"을 고른 뒤에만 `dag-workflow:planning`을 불러 넘기며, 목표는 `definition.goal`에, 완료 기준은 `verify` 후보에, 사용자가 말한 제약은 노드 SCOPE 줄에 들어갑니다. 그 전에는 계획할 작업의 `start`를 하지 않습니다.
-  - 요청이 이미 명확하면 한 문장으로 알리고 바로 계획 스킬로 갑니다. 비대화형 세션에서는 적용하지 않습니다.
-- `/dag-workflow:pm`: 사용자를 제품 책임자로 보고 무엇을, 왜만 묻습니다. 라운드는 `interview`와 같게(번호, 첫 옵션이 추천 답, 한 번에 4개까지) 진행합니다.
-  - 질문은 하기 전에 세 분류 중 하나로 가릅니다. 제품 결정(사용자, 문제, 범위, 우선순위, 성공 척도, 사용자에게 보이는 동작)은 사용자에게 묻고, 기술 결정(스택, 구조, 라이브러리, 데이터 모델)은 묻지 않고 "Deferred to development"로 개발 단계에 넘기며, 모름(사용자가 모르거나 다른 사람에게 달렸거나 지금 정할 수 없는 것)은 미해결 항목으로 기록합니다.
-  - 제품 질문마다 "Decide later" 선택지를 두고, 고르면 모름으로 취급해 미해결 항목에 넣습니다. 모름을 확정 요구사항으로 내놓지 않습니다.
-  - 질문이 끝나면 확정한 제품 결정, 미룬 기술 결정, 미해결 항목과 제품 목표 한 문장을 보여 주고 확인받은 뒤에야 씁니다.
-  - PRD 파일은 메인 대화가 쓸 수 없으므로 노드가 하나인 DAG `write-prd`(category `writing`, `writes`는 `docs/prd/<slug>.md`)가 씁니다. 계획 스킬을 먼저 불러 시작합니다. 노드는 Problem, Users, Goals, Scope, Requirements, Success criteria, Deferred to development, Open items 순서의 섹션을 쓰고, 미해결 항목은 `## Open items`에만 적으며 비어 있어도 "None"으로 이 섹션을 씁니다. 검증은 그 파일에 `## Open items`와 `## Goals`가 들어 있는지 확인합니다. 정착하면 PRD를 읽어 경로와 미해결 항목을 보여 주고, 다음 단계로 `/dag-workflow:interview`나 일반 계획을 제안합니다.
-
-## 결과 전달
-
-- 노드는 최종 보고서를 `## Output` 섹션(만든 파일, 핵심 사실·값·결정)과 `DAG_NODE_STATUS` 줄로 끝내도록 지시받습니다.
-- 노드가 끝나면 전체 보고서는 `.claude/dag/runs/<run_id>/<node>.md`에 저장되고, 출력(`## Output` 섹션, 없으면 보고서 전체)은 상태에 기록됩니다.
-- 하위 노드의 프롬프트에는 `dependsOn`에 적힌 직접 의존 노드들의 출력(노드당 4,000자까지)과 전체 보고서 경로가 `<upstream_results>`로 자동으로 들어갑니다. 정의의 `goal`은 모든 노드에 전달됩니다.
-- 메인 대화는 노드마다 출력 발췌가 담긴 짧은 진행 알림을 받고, 정착하면 모든 노드의 출력과 보고서 경로가 담긴 요약을 받습니다.
-- 사용자가 `report.md`처럼 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*` 이름의 파일을 요구하면 노드는 호스트가 서브에이전트의 쓰기를 거부하므로 전체 텍스트를 `## Output`에 돌려주고(또는 `<node-id>-notes.md`에 쓰고), 메인 대화가 정착 뒤에 그 내용을 해당 파일로 그대로 씁니다([강제](#강제)). 노드 id가 `report-draft`처럼 이 이름들로 시작하면 `<node-id>-notes.md`도 거부되므로 `notes-<node-id>.md`를 씁니다. lint 경고와 거부 메시지도 이 이름을 제안하며, 경고는 같은 경로를 여러 번 적어도 노드마다 한 번만 나옵니다.
-
-**비대화형 세션에서 세션 유지**: 비대화형 세션(`claude -p` 등)에서는 메인 턴이 끝나도 이 세션의 실행이 `running`인 동안 플러그인이 그 턴의 `turn.complete`를 `sleep 1` 반복으로 붙잡아 세션을 열어 둡니다. 그런데 호스트는 붙잡힌 메인 턴을 끝난 뒤 60초까지만 기다립니다. 넘기면 `[WARN] headless session: turn events still running after 60000ms; the turn ends without them and their late notes are dropped`를 남기고, 그 뒤에는 살아 있는 노드 에이전트만 프로세스를 붙잡습니다. 그래서 메인 턴이 끝나고 60초가 지난 뒤에 노드가 끝나면 플러그인이 그 노드를 검증하거나 다음 노드를 띄우는 도중에 세션이 종료되어, 실행은 `running`, 노드는 `scheduled`나 `running`인 채 종료 코드 0으로 끝나곤 했습니다(백로그 B6). 이제 메인 턴이 붙잡힌 동안 노드 에이전트가 끝나면 플러그인이 검증보다 먼저 짧은 진행 프롬프트를 제출합니다. 노드가 끝났고 검증과 후속 실행은 백그라운드에서 이어진다고 알리며, 도구를 부르지 말고 한 줄로 답한 뒤 턴을 끝내라고 요청하는 내용입니다. 호스트가 이 프롬프트로 새 메인 턴을 시작하면 세션이 유지되고, 그 턴이 끝나면 플러그인은 실행이 정착할 때까지 다시 붙잡습니다. 비용은 노드가 끝날 때마다 메인 모델 턴이 짧게 한 번 더 도는 것입니다(그 프롬프트의 턴이 시작되기 전에 겹쳐 끝난 노드는 프롬프트 하나로 묶습니다). 이 턴의 한 줄 답변은 `claude -p`의 stdout에 그대로 나타납니다. 제출이 거부되거나 버려지면 `could not keep the session open for <run_id>/<node>`를 로그에 남깁니다. 대화형 세션은 영향을 받지 않습니다.
-
-**비대화형 세션의 도구 허용**: 비대화형 세션(`claude -p` 등)에서 DAG 노드 작업자의 도구 호출은 메인 대화와 같은 권한 설정을 따릅니다. 판정이 `ask`인 호출은 물어볼 상대가 없으므로 Claude Code가 거부합니다. 플러그인의 Jev 도구 승인이 `jev_confidence`(기본 `0.9`) 이상의 확신도로 허용을 고른 호출만 예외입니다. 2026-10-09에 `--allowedTools`에 Write가 빠진 `claude -p`로 실측했더니 Jev는 허용을 골랐지만 확신도가 0.88로 기준 0.9에 못 미쳐 노드의 Write가 거부됐습니다. 그래서 `claude -p`로 DAG를 돌릴 때는 노드가 쓰는 도구를 미리 허용하길 권합니다. 권장 명령은 `claude -p "<요청>" --allowedTools mcp__dag-workflow__dag Skill Read Write Edit Bash`입니다. `eval/run.ts`는 여기에 `TaskStop`, `ToolSearch`, `LSP`도 허용합니다. `--permission-mode acceptEdits`는 Write와 Edit만 덮고 Bash는 덮지 않으므로, Bash는 이 모드에서도 `--allowedTools`로 허용해야 합니다. 비대화형 세션에서 노드 작업자의 도구 호출이 `ask`로 남으면 플러그인은 판정을 그대로 두고(거부는 호스트가 합니다) 트랜스크립트에 한 줄을 `$.ui.log`로 남깁니다. `-p`나 SDK 호스트는 이 줄을 `ui_log`로 받고 디버그 로그에도 남으며, 같은 실행·노드·시도·도구에는 한 번만 남깁니다. 줄의 형식은 `<runId>/<nodeId>: <tool> needs approval that this non-interactive session cannot ask for (<why>); allow it up front with --allowedTools <tool> or a --permission-mode that covers it`입니다. `<why>`는 Jev가 왜 이 호출을 정하지 못했는지입니다. Jev가 답했지만 적용되지 않았으면 `Jev <outcome>: <choice> at <confidence>, jev_confidence <threshold>`(예: `Jev low-confidence: allow at 0.88, jev_confidence 0.9`), 답이 없었으면 `Jev <outcome>`(예: `Jev timeout`), 묻지 않았으면 `Jev not asked: jev_permission_scope is dag and the call carries no node task`입니다([Jev 를 활용한 자동 판단](#jev-를-활용한-자동-판단)의 승인 범위). 실행이 끝났을 때 플러그인이 올리는 완료 요약 메시지(메인 모델이 읽고 사용자에게 전하는 프롬프트)에도 같은 정보가 실립니다. 현재 시도에서 도구 호출이 `ask`로 남은 노드의 줄 끝에 `; needed approval this non-interactive session cannot give: <tools> (allow them up front with --allowedTools)`가 붙고, `<tools>`는 그 도구를 처음 나온 순서대로 `, `로 이은 목록입니다. 재시도한 시도는 이 목록을 처음부터 다시 만듭니다. 그래서 로그 줄이 보이지 않는 환경에서도 메인 모델이 해결 방법을 사용자에게 전할 수 있습니다. 노드 작업자의 도구 승인 판단 기록(`/dag decisions`, 도구 액션 `decisions`)에는 `runId`와 `nodeId`가 들어가고, 이 비대화형 경우에는 `<runId>/<nodeId>: ` 접두사를 뺀 같은 문장이 `note`로 붙습니다. 다만 `Jev not asked`인 경우(`jev_permission_scope`가 `dag`인데 호출에 노드 작업이 없을 때)는 Jev를 묻지 않으므로 판단 기록을 쓰지 않고, 그래서 `note`도 없습니다. 이 경우에는 로그 줄과 완료 요약의 힌트만 남습니다. 대화형 세션과 메인 대화의 호출에는 이 줄도, 요약 힌트도, `note`도 없습니다.
-
-## 정의 형식
-
-```yaml
-key: review-fan-in          # 멱등 키: 같은 키+같은 정의로 다시 시작하면 기존 실행을 돌려줌
-name: Integration review
-goal: Find and confirm wiring bugs before the release
-nodes:
-  - id: navigation
-    category: quick
-    prompt: Audit src/navigation for dead routes. Write findings to notes/navigation.md.
-    writes: [notes/navigation.md]
-    verify:
-      - kind: file
-        path: notes/navigation.md
-        contains: "## Dead routes"
-  - id: gate-wiring
-    prompt: |
-      Check that every feature gate in src/gates is wired.
-      Write findings to notes/gates.md.
-    writes: [notes/gates.md]
-    verify:
-      - kind: file
-        path: notes/gates.md
-        contains: "## Unwired gates"
-  - id: verify
-    category: unspecified-low
-    dependsOn: [navigation, gate-wiring]
-    prompt: Read notes/*.md, verify each finding against the code, and write the verdict to notes/verdict.md.
-    writes: [notes/verdict.md]
-    verify:
-      - kind: file
-        path: notes/verdict.md
-        contains: "Verdict:"
-      - kind: command
-        argv: [npm, test]
+```text
+/dag cancel <run_id>           실행 취소
+/dag retry <run_id> [node...]  실패·취소된 노드 다시 실행
 ```
 
+노드가 실패하면 그 결과가 필요한 후속 작업은 시작하지 않고, 관계없는 작업은 계속 실행합니다.
+재시도할 때 이미 완료된 노드의 결과는 재사용합니다.
 
-| 필드                                     | 설명                                                                                                                                                                                |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                                   | 1-64자의 영문, 숫자, `_`, `-`, `.`                                                                                                                                                      |
-| `prompt`                               | 혼자 읽어도 이해되는 작업 지시                                                                                                                                                                 |
-| `goal` (정의 수준)                         | 전체 목표. 모든 노드 프롬프트에 들어갑니다                                                                                                                                                          |
-| `dependsOn`                            | 먼저 완료돼야 하는 노드 id. 이 노드들의 출력이 프롬프트에 자동으로 들어갑니다                                                                                                                                     |
-| `category`                             | 모델 라우팅: `quick`/`unspecified-low`/`deep-low`/`writing`/`visual-engineering`=sonnet, `unspecified-high`/`deep-high`/`artistry`/`ultrabrain`/`architect`=opus. 생략하거나 미등록 값이면 sonnet |
-| `agent`                                | 서브에이전트 타입(예: `Explore`). 기본값 `general-purpose`. 모델을 강제로 상속하는 `fork`는 Sonnet 하한을 보장할 수 없어 거부                                                                                       |
-| `label`, `task_summary`, `description` | 패널 표시용                                                                                                                                                                            |
-| `load_skills`                          | 노드가 시작 전에 불러올 스킬 이름                                                                                                                                                               |
-| `verify`                               | **`start`·`amend`에서 필수.** 런타임이 직접 실행할 검사 1-16개. 파일 검사(`contains`/`absent`/`matches`/`lastLine`/`equals`)와 명령 검사(`expect`)의 문법은 [검증](#검증)                                                                                                                         |
-| `writes`                               | 이 노드가 쓸 프로젝트 상대 경로나 폴더. 다른 세션과 겹치는지 보여 주는 데만 쓰고, 쓰기를 막지는 않습니다                                                                                                                     |
-| `external`                             | 이 노드가 프로젝트 파일 밖을 바꾸면 `true`(push, 배포, DB·스토리지·설정 변경, 메시지 전송). 자동 리뷰 수정 라운드는 이런 노드를 다시 실행하지 않습니다 |
-| `review` (정의 수준)                      | `{request, notes?, category?, rules?, security?}`. 선언하면 파싱할 때 `review-spec`과 `review-standards` 노드로 확장하고, `security`가 있으면 보안 관점 노드 7개와 `review-security`도 만듭니다. `request`는 사용자의 요청 문장으로, `review-spec` 프롬프트에 그대로 붙여 넣습니다. 이 id로 노드를 직접 정의하면 안 됩니다. 자세한 내용은 [검토와 커밋 단계](#검토와-커밋-단계) |
-| `commit` (정의 수준)                      | `[{message, paths}]`. 선언하면 파싱할 때 노드 `commit`으로 확장합니다. 항목마다 `paths`만 스테이징해 `message`로 순서대로 커밋하며, 다른 변경은 스테이징하지 않고 푸시하지 않습니다 |
+### 정의 파일 실행
 
+직접 작성한 DAG는 JSON 또는 YAML 파일로 실행할 수 있습니다.
 
-YAML은 DAG 정의에 필요한 부분집합만 지원합니다(매핑, 시퀀스, 인용 문자열, `[a, b]`, `|`/`>` 블록 스칼라, 주석). `{a: 1}` 형태의 플로우 매핑은 지원하지 않습니다.
-
-정의 수준 `review`와 `commit`은 이렇게 씁니다. 노드는 사용자가 만든 것만 적고, 검토 노드와 커밋 노드는 플러그인이 만듭니다.
-
-```yaml
-key: csv-export
-goal: Add CSV export to the report page
-nodes:
-  - id: export
-    prompt: "TASK: Add src/export.ts and tests/export.test.ts. STOP WHEN: the export test passes."
-    writes: [src/export.ts, tests/export.test.ts]
-    verify:
-      - kind: command
-        argv: [bun, test, tests/export.test.ts]
-review:
-  request: "Add CSV export to the report page"   # 사용자의 요청 문장. review-spec에 그대로 들어감
-  category: unspecified-low                      # 생략하면 unspecified-low
-commit:
-  - message: "feat(export): add CSV export"
-    paths: [src/export.ts, tests/export.test.ts]
+```text
+/dag preview <file>          실행 전 계획·쓰기 충돌·경고 확인
+/dag run <file>              정의 파일 실행
 ```
 
-카테고리 제안 기준은 `skills/planning/references/planning.md`의 **Category routing**에 있습니다. DAG를 작성하는 메인 Claude가 값을 제안하며, 사용자가 정의 파일을 작성하면 그 값이 제안이 됩니다. Jev가 켜져 있으면 `hooks/engine/jev.ts`의 분류 기준으로 작업 내용을 독립적으로 평가하고, 확신도가 기준 이상일 때 실행 카테고리를 바꿉니다. 최종 감사가 제안이나 Jev 판단으로 `quick`이 되면 Jev 설정과 관계없이 `unspecified-low`로 실행합니다(판단 주체 `rule`). 최종 모델은 `hooks/engine/node-prompt.ts`의 매핑으로 정합니다. `quick`과 `unspecified-low`는 모두 Sonnet이지만 기계적 작업과 판단 작업을 구분하는 이름입니다. 작업자 모델은 최소 Sonnet이며, 세션이나 에이전트 타입의 Haiku 설정을 상속하지 않도록 모델을 명시합니다.
+작성 예제와 필드는 [정의 형식](docs/reference.md#정의-형식)을 참고하세요.
 
-## Jev 를 활용한 자동 판단
+## 실행 방식과 주요 설정
 
-Claude Code를 시작하는 환경에 `TYPESAFE_API_KEY`가 있으면 TypeSafe API를 기본 판단 경로로 씁니다. 키는 저장소나 체크포인트에 저장하지 않습니다. 키를 추가한 뒤에는 새 세션을 시작하거나 `/reload-plugins`를 실행합니다.
+설정은 `/config`의 플러그인 항목에서 바꿉니다.
+실행 방식은 `/dag enforce <모드>`로 현재 세션에서도 변경할 수 있습니다.
 
-`jev_model_fallback`(기본 `true`)이 켜져 있으면, 키가 없거나 TypeSafe 요청이 실패·시간 초과·2xx 외 상태로 끝날 때 같은 질문과 기준을 세션의 Sonnet 모델(`$.model.complete`, effort `low`, 요청마다 10초 제한)에 보냅니다. 따라서 키가 없어도 Jev는 활성 상태입니다. 이 대체 호출은 현재 Claude Code 로그인으로 실행되므로 **사용량이 사용자의 Claude 요금제(구독 한도 또는 API 과금)에 포함됩니다**. 응답은 각 질문의 선택지·확신도와 가능성이 높은 선택지 3개의 확률을 담은 JSON이어야 하며, 형식이 틀리거나 선택지 밖이거나 확신도가 범위를 벗어난 답은 버립니다. 같은 `jev_confidence` 기준과 적용 규칙을 따르고, 모델이 답하지 못하거나(중단·API 오류·빈 응답) 호출이 실패하면 기존 흐름을 유지합니다. 키가 있는 정상 응답(형식이 틀린 2xx 응답 포함)에는 대체 호출을 하지 않습니다.
+### 실행 방식
 
-- **작업 배정:** `start` 전에 노드별 카테고리 질문을 한 번의 TypeSafe 요청으로 보냅니다. 세션 모델은 답을 통째로 돌려줘서 질문이 많을수록 느려지므로, 노드를 최대 8개 요청에 고르게 나눠 동시에 보냅니다(노드가 8개 이하면 노드마다 요청 하나). 이때 판단 기록의 결과와 지연 시간은 노드마다 따로 남습니다. 세션 모델이 고른 카테고리는 `jev_model_routing_confidence`(기본 `0.8`) 이상이면 적용합니다. 실측한 답 117개에서 고른 카테고리는 모두 맞았지만 확신도가 0.60–0.97로 흩어져, 기준 0.9에서는 맞는 답의 28%가 버려졌기 때문입니다. 도구 승인과 복구 판단은 계속 `jev_confidence`를 씁니다. `amend`는 재실행 대상만, `retry`는 재실행할 노드와 변경된 프롬프트를 평가합니다. 확신도가 낮거나 평가가 실패하면 제안 카테고리를 유지합니다. 동일 정의의 재사용은 재평가하지 않습니다.
-- **도구 승인:** 기존 권한 판정이 `ask`인 호출만 평가합니다. 사람에게 묻는 도구(`AskUserQuestion`, `ExitPlanMode`)는 평가하지 않습니다. 훅의 `allow`가 그 창을 닫지 못해서, 질문마다 Jev를 부르면 기다림만 늘고 바꿀 수 있는 것은 사용자의 질문을 거부하는 것뿐이기 때문입니다. 확신도 높은 `allow`는 자동 실행, `deny`는 거부로 바꿉니다. `ask`·낮은 확신도·오류는 기존 판정의 이유와 규칙까지 그대로 유지합니다. 이미 내려진 `allow`와 `deny`, strict(와 `auto`의 DAG 턴)의 메인 도구 제한은 바꾸지 않습니다.
-- **승인 범위:** `jev_permission_scope`가 `all`(기본)이면 모든 `ask` 판정을 평가합니다. `dag`면 DAG 노드 작업자가 호출한 도구만 평가하고, 메인 대화의 `ask`는 Jev 요청도 판단 기록도 없이 기존 판정 그대로 둡니다. 노드 문맥은 작업자의 도구 호출 이벤트로 연결되는데, 첫 웨이브 뒤에 시작된 작업자는 이 이벤트가 mod에 오지 않으므로`dag`에서는 그 작업자의 `ask`도 평가하지 않고 기존 확인 창으로 남깁니다. 노드 작업자의 도구 승인 판단 기록에는 `runId`와 `nodeId`가 들어가고, 비대화형 세션에서는 Jev가 정하지 못한 이유를 적은 `note`도 붙습니다([결과 전달](#결과-전달)의 **비대화형 세션의 도구 허용** 문단).
-- **실행 방식(`mode`):** `enforcement`가 `auto`일 때만 씁니다. 사용자 프롬프트마다 `direct`(메인 대화에서 직접 실행)와 `dag` 중 하나를 고르는 질문을 한 번 보냅니다([강제](#강제)). `dag`는 노드가 셋 이상 필요하고 병렬 또는 격리 실행으로 시간이나 컨텍스트를 아낄 때만 고르고, 질문·설명·단일 파일 수정처럼 한두 단계로 끝나는 요청은 `direct`입니다. 확신도 기준은 `0.8`로 고정이고 TypeSafe와 세션 모델에 같은 값을 씁니다(`jev_confidence`, `jev_model_routing_confidence`와 무관). 실행 방식이 틀려도 잃는 것은 안전이 아니라 시간이고, 직접 실행 턴도 사용자의 평소 권한 규칙을 지나기 때문에 도구 승인보다 낮게 잡았습니다. 확신도 `0.8` 이상의 `dag`만 DAG 턴(`strict` 규칙)을 만들며, 그 밖에는 모두 직접 실행 턴입니다(`direct` 판단, 낮은 확신도, 키도 세션 모델 대체도 없는 경우, 제한 시간 초과, 잘못된 응답). 이 세션에 정착하지 않은 실행이 있거나 `jev_enabled`가 꺼졌거나 쓸 수 있는 경로가 없으면 Jev를 부르지 않고 기록도 남기지 않습니다. 키가 없으면 사용자 프롬프트마다 세션 모델(Sonnet, effort `low`)을 한 번 부르므로 그 사용량이 사용자의 Claude 요금제에 포함됩니다. `/dag decisions`와 패널의 Decisions 탭에는 종류 `mode`(한국어 패널은 **실행 방식**), 대상 `request`(직접 실행 턴에서 선택 창에 답했을 때의 판단은 대상 `answer`), 제안값 `direct`, 선택값 `direct` 또는 `dag`로 나타납니다.
-- **판단 입력:** 배정에는 실행 목표·노드 작업·의존 ID·제안 카테고리를 보냅니다. 세션 모델에는 제안 카테고리를 빼고, 그 노드에 의존하는 노드 ID(`dependents`)를 더해 보냅니다. 제안이 틀리면 모델의 답은 맞아도 확신도가 기준 아래로 떨어지는 것이 실측됐기 때문입니다. `dependents`는 노드별로 나눠 물을 때 사라지는 그래프 정보로, 최종 감사(의존하는 노드가 없고 입력이 둘 이상인 검증 노드)를 알아보는 데 씁니다. 승인에는 도구 이름·인자·현재 사용자 요청·프로젝트 경로와, 연결 가능한 경우 해당 노드의 목표·작업을 보냅니다. 실행 방식에는 사용자 요청(4,000자까지)과, "예"나 "1" 같은 짧은 답을 풀이할 맥락으로 직전 사용자 요청 최대 3개(각 500자까지), 그 요청 앞의 어시스턴트의 직전 답변 마지막 1,000자를 보냅니다. 짧은 답은 길이가 아니라 그 답변에서 고르는 선택지나 계획으로 판단하며, 대화 기록을 읽을 수 없으면 직전 답변 없이 묻습니다. 선택 창 답에는 사용자 요청과 어시스턴트의 직전 답변 대신 고른 답과, 질문 및 그 선택지를 보내고(비밀값은 같은 방식으로 가립니다) 직전 사용자 요청 최대 3개는 그대로 함께 보냅니다. 이 데이터는 TypeSafe의 외부 API로 전송됩니다.
-- **승인 입력 마스킹:** 보내기 전에 도구 인자의 비밀값(키, 토큰 등)은 `[REDACTED:<종류>]`로 바꿉니다. 실행 방식에 보내는 요청과 어시스턴트의 직전 답변의 비밀값도 같은 방식으로 가립니다. 요청은 앞부분을 남기지만, 직전 답변은 끝부분(마지막 1,000자)을 남깁니다. 2,000자를 넘는 문자열은 길이·해시·앞 1,000자만 보내고, 목표와 작업은 각각 2,000자까지, 요청 전체는 4,000자까지로 줄입니다.
-- **확인:** `snapshot`의 `category`는 원래 제안이며, `routing`은 실제 선택한 카테고리·판단 주체(`jev`, `definition`, 최종 감사 규칙 `rule`)·Jev 확신도를 담습니다. `model`은 실제 시작된 작업자의 모델입니다. 터미널 로그에도 적용한 판단을 표시합니다. `/dag decisions`의 각 기록에는 판단 경로 `backend`(`http` 또는 세션 모델 `model`)가 붙으며, 이 필드가 없는 예전 기록도 그대로 읽습니다.
-- **실패 처리:** 누락·잘못된 응답, HTTP 오류, 제한 시간(TypeSafe 5초, 세션 모델 10초) 안에 답이 없는 경우 모두 기존 배정·승인 흐름으로 돌아갑니다. `start`는 배정 판단을 기다린 뒤 반환하므로, 키가 없으면 최대 10초, 키가 있는데 TypeSafe가 답하지 않으면 최대 약 15초 늦어집니다. 도구 승인을 판단하는 동안에는 그 도구 호출도 같은 시간만큼 기다립니다. 실행 방식 판단은 두 경로를 합쳐 8초로 제한하며, 그동안 사용자 프롬프트가 기다리고 시간이 지나면 `strict` 규칙으로 진행합니다. 현재 mods HTTP API에는 요청 취소 옵션이 없어 시간 초과된 HTTP 요청 자체는 뒤에서 끝날 수 있지만, 늦은 응답으로 결정을 바꾸지는 않습니다.
+- **`auto` (기본):** Jev가 요청마다 판단합니다. 작은 요청은 직접 실행하고, 노드가 셋 이상 필요하며 병렬·격리 실행이 유리한 요청은 DAG로 실행합니다.
+- **`strict`:** 실제 작업은 모두 DAG 노드에서 실행합니다. 메인 대화는 계획·읽기·질문·실행 관리만 담당합니다.
+- **`guide`:** DAG 사용을 안내하지만 메인 대화의 도구 사용을 제한하지 않습니다.
+- **`off`:** DAG 강제와 관련 안내를 끕니다.
 
-TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세션 모델의 카테고리 배정과 실행 방식은 `0.8`)는 자동 적용 기준이며 정확도 보증이 아닙니다. `jev_enabled=false`이거나, 키가 없고 `jev_model_fallback=false`면 모델 호출 없이 기존 방식으로 동작하고(`auto`는 정착하지 않은 실행이 없는 한 모든 턴을 직접 실행) 시작 로그에 `Jev inactive`가 표시됩니다.
+`auto`에서 판단이 불확실하거나 실패하면 직접 실행합니다.
+단, 현재 세션에 아직 끝나지 않은 실행이 있으면 DAG 방식으로 유지합니다.
 
-## 검증
+### 자주 바꾸는 설정
 
-`start`와 `amend`는 모든 노드에 `verify`가 있어야 받아들입니다. 하나라도 없으면 `verification_required`로 거부합니다. 형식이 틀리면 `invalid_verification`입니다.
+- **`language`:** 패널 언어. 기본 `en`, 한국어는 `ko`.
+- **`max_concurrent`:** 실행 하나에서 동시에 작업할 노드 수. 기본 `8`.
+- **`start_approval`:** 기본 `off`. `always`로 설정하면 대화형 세션에서 모델이 시작한 실행은 사용자 승인을 기다립니다.
+- **`auto_recovery`:** 기본 `true`. 조건에 맞는 실패를 자동으로 복구합니다.
 
-검사는 파일 검사와 명령 검사 두 가지이고, 하나의 문법을 씁니다. 문구가 없어졌는지(`absent`), 판정 줄이 마지막에 있는지(`lastLine`), 실패해야 정상인 명령(`expect`)도 `sh -c` 같은 셸 래퍼 없이 검사 하나로 적습니다.
+시작 승인을 켰다면 패널 버튼이나 `/dag approve <run_id>`로 승인하고,
+`/dag reject <run_id> [reason]`으로 거절합니다.
+직접 입력한 `/dag run`과 비대화형 세션은 시작 승인을 기다리지 않습니다.
 
-| 검사 | 형식 | 통과 조건 |
-| --- | --- | --- |
-| 파일 | `{kind: file, path, contains?, absent?, matches?, lastLine?, equals?}` | 경로가 있고, 준 텍스트 필드가 모두 성립 |
-| 명령 | `{kind: command, argv: [...], expect?}` | 프로젝트 루트에서 셸 없이 실행해 30초 안에 끝나고 `expect`를 만족. `expect`가 없으면 종료 코드 0 |
+### 자동 판단과 사용량
 
-텍스트 필드는 파일 검사와, 명령 검사의 `expect.stdout`·`expect.stderr`가 똑같이 씁니다. 여러 개를 함께 주면 모두 성립해야 통과합니다.
+Typesafe 의 Jev(System One Model)는 실행 방식, 노드의 모델 등급, 도구 승인, 실패 복구를 판단합니다.  
+`TYPESAFE_API_KEY`가 있으면 TypeSafe API를 사용하고,
+키가 없거나 API가 실패하면 기본적으로 세션의 Sonnet 모델을 사용합니다.
+**세션 모델의 판단 호출은 사용자의 Claude 요금제 사용량에 포함됩니다.**
 
-| 텍스트 필드 | 통과 조건 |
-| --- | --- |
-| `contains` | 그 문자열이 들어 있음(빈 문자열 불가) |
-| `absent` | 그 문자열이 없음 |
-| `matches` | 자바스크립트 정규식이 텍스트에서 일치. 여러 줄 모드라서 `^`와 `$`가 줄마다 맞음. 다른 정규식 문법(`\A`, `\Z`, `\z`, `\p{L}`, `[[:digit:]]` 등)은 자바스크립트에서 오류 없이 평범한 글자로 읽혀 절대 통과하지 않으므로 `invalid_verification`으로 거부합니다. 텍스트 맨 앞은 `(?<![\s\S])`, 맨 끝은 `(?![\s\S])`로 씁니다 |
-| `lastLine` | 끝의 공백을 지운 텍스트의 마지막 줄이 이 문자열과 같음 |
-| `equals` | 끝의 공백을 지운 전체 텍스트가 이 문자열과 같음 |
+자세한 동작은 [자동 판단](docs/reference.md#jev-를-활용한-자동-판단),
+전체 옵션은 [설정 레퍼런스](docs/reference.md#설정)를 참고하세요.
 
-`lastLine`과 `equals`는 텍스트 끝의 공백과 줄바꿈만 지우고 앞쪽 공백은 그대로 비교합니다. `contains`, `absent`, `matches`는 텍스트를 그대로 봅니다.
+### 사용 중 알아둘 점
 
-**파일 검사의 경로**
+- 노드가 긴 명령을 실행 중이라면 `/clear` 대신 `/compact`를 사용하세요. `/clear`는 실행 중인 셸을 종료할 수 있습니다.
+- 패널에 포커스가 있으면 권한 확인 창에 답하기 전에 `Esc`로 프롬프트로 돌아가세요.
+- 실행 기록과 보고서는 프로젝트의 `.claude/dag/`에 저장되며, 기본 보관 기간은 14일입니다. 이 폴더는 자동으로 git에서 제외됩니다.
 
-- `path`는 프로젝트 상대 경로입니다. 프로젝트 밖의 파일은 절대 경로로 읽기만 하는 검사에 한해 확인할 수 있어서, 노드가 `/tmp`에 남긴 노트 파일의 판정 줄도 볼 수 있습니다. 절대 경로에는 `C:/notes.md` 같은 윈도 경로도 쓸 수 있습니다. 어느 경로든 `..`과 NUL 문자는 거부합니다. 상대 경로에는 대소문자와 관계없이 `.claude` 구간이 들어갈 수 없고, 절대 경로는 읽기 전용이며 `.claude/dag`에 닿을 수 없습니다. `writes`는 이전처럼 프로젝트 상대 경로만 받으며, 절대 경로(윈도 드라이브 문자 포함), `..`, `.claude` 안쪽 경로를 거부합니다.
-- 경로가 없으면 `absent`를 줬어도 실패합니다. 없는 경로에서 "문구가 없다"를 통과시키지 않습니다.
-- 폴더 경로에는 `contains`와 `absent`만 쓸 수 있습니다. 폴더 아래의 모든 일반 파일(숨김 파일과 gitignore 대상 포함)에 적용하고, 최대 2,000개 파일·20MB까지 읽습니다. `contains`는 파일 중 하나라도 그 문자열을 가지면 통과하고(모든 파일이 가질 필요는 없음), `absent`는 어느 파일에도 그 문자열이 없어야 통과합니다. 폴더를 훑을 때 프로젝트 자신의 `.claude/dag`(런의 체크포인트)는 건너뜁니다. 체크포인트에는 정의에 적은 검사 문구가 그대로 들어 있어서, 읽으면 `contains`가 저절로 통과하기 때문입니다.
+## 상세 문서
 
-**명령 검사의 `expect`**
-
-- 형식은 `{exit?, stdout?, stderr?}`입니다. `exit`는 숫자 하나이거나 숫자 배열이고, 종료 코드가 거기에 들어 있어야 통과합니다. `exit`를 주지 않으면 종료 코드 0만 통과합니다.
-- `stdout`과 `stderr`에는 위 텍스트 필드를 씁니다.
-- 프로그램이 시작되지 못하거나(없는 프로그램, 권한 오류) 30초 제한을 넘기면 `expect`에 무엇을 적었든 실패입니다.
-- 명령은 Claude Code 프로세스의 PATH로 셸 프로필 없이 실행됩니다. 그래서 `start`·`amend`·dry run·`/dag preview`는 노드를 띄우기 전에 `argv[0]`과 `sh -c`/`bash -c` 스크립트 안의 명령 이름을 그 PATH에서 찾아보고, 없는 프로그램이 있으면 `invalid_verification`으로 거부합니다. Claude의 Bash 도구에는 있는 `rg` 같은 프로그램이 이 환경에는 없을 수 있기 때문입니다. `./run.sh`처럼 경로로 부른 프로그램, 로그인 셸(`-l`), here-document·`case`·`source`·`PATH=` 등 해석하지 않는 구문이 있는 스크립트는 찾아보지 않습니다.
-
-예시입니다. 첫 검사는 폴더 전체에서 지운 옵션 이름이 남지 않았는지, 둘째는 `/tmp`의 노트 파일 마지막 줄이 판정 줄인지, 셋째는 잘못된 입력을 넣었을 때 종료 코드 1로 끝나며 이유를 stderr에 적는지 확인합니다.
-
-```yaml
-verify:
-  - kind: file
-    path: skills                    # 폴더: contains와 absent만 가능
-    absent: "legacy_mode"
-  - kind: file
-    path: /tmp/review-notes.md      # 프로젝트 밖은 절대 경로, 읽기 전용
-    lastLine: "Verdict: PASS"
-  - kind: command
-    argv: [node, tools/lint.js, fixtures/bad.json]
-    expect:
-      exit: 1                       # 실패해야 정상. 여러 코드는 [1, 2]
-      stderr:
-        contains: "unknown field"
-```
-
-`dag` 도구에 JSON 정의로 넘길 때 같은 명령 검사는 다음과 같습니다.
-
-```json
-{"kind": "command", "argv": ["node", "tools/lint.js", "fixtures/bad.json"], "expect": {"exit": 1, "stderr": {"contains": "unknown field"}}}
-```
-
-- 노드 에이전트가 완료를 보고하면 런타임이 검사를 모두 실행하고, 시도마다 `.claude/dag/runs/<run_id>/<node>.verification.<시도>.json`에 증거(검사, 통과 여부, 종료 코드, 출력 4,000자까지)를 남긴 다음에야 `completed`로 바꿉니다.
-- 검사가 하나라도 실패하거나 증거가 없으면 노드는 `failed`가 되고 하위 노드는 시작하지 않습니다.
-- 검증은 **적어 둔 검사가 통과했다는 것만** 증명합니다. 결과가 의미상 모두 옳다는 보증은 아닙니다. 그래서 검사는 산출물의 핵심을 실제로 확인하도록 고르고, `true` 같은 빈 검사나 텍스트 필드 없는 파일 검사는 쓰지 않습니다.
-- `verify`가 없는 예전 완료 기록은 미검증 상태로 표시하며, 이미 끝난 작업을 자동으로 다시 실행하지 않습니다. 예전 노드를 다시 실행할 때 계약이 없으면 "검증 계약 없음"으로 실패하고 자동 복구도 하지 않습니다. 정의에 `verify`를 넣어 `amend`하거나 새로 `start`합니다. 동일 정의의 멱등 재사용은 기존 기록의 검증 상태를 그대로 돌려줍니다.
-
-### 빈 검증 경고
-
-통과는 하지만 산출물이 옳다는 것을 거의 증명하지 못하는 검사는 정의 린트가 경고합니다. 경고 문구는 `node "<id>": vacuous verify - check 1 ...`로 시작하고, `start`와 `amend`가 돌려주는 `warnings`에 담기며 `/dag run`은 `Warnings:` 아래에 보여 줍니다. 경고일 뿐이라 실행을 거부하지는 않습니다. 노드마다 경고는 하나이고, 문제가 있는 검사를 `verify` 안의 위치(1부터 셈)로 모두 나열합니다. 한 검사에는 아래 규칙 중 먼저 맞는 하나만 적용합니다.
-
-
-| 규칙  | 조건                                                                                     | 이유                                        |
-| --- | -------------------------------------------------------------------------------------- | ----------------------------------------- |
-| V1  | 텍스트 필드(`contains`, `absent`, `matches`, `lastLine`, `equals`)가 하나도 없는 파일 검사 | 파일이 있다는 것만 증명합니다. `touch`로 만든 빈 파일도 통과합니다 |
-| V2  | 명령의 프로그램(`argv[0]`의 마지막 경로 이름)이 `true`, `:`, `echo`, `printf`, `exit`, `yes`, `sleep`  | 인자와 관계없이 항상 통과합니다                         |
-| V3  | `test` 또는 `[`의 `-` 인자가 하나 이상이고 모두 `-e`, `-f`, `-d`, `-s`이거나, 프로그램이 `ls`, `stat`, `cat` | 경로가 있다는 것만 증명합니다                          |
-| V4  | 종료 코드를 둘 이상 허용(`expect.exit` 배열)하면서 `stdout`·`stderr`를 확인하지 않는 명령 | 허용한 종료 코드 어느 쪽으로 끝나도 통과해서, 출력이 틀려도 걸러내지 못합니다 |
-
-
-`test -n`, `test -r`, `test -z`처럼 다른 연산자가 하나라도 있거나 `-` 인자가 없는 `test a = b`는 경고하지 않습니다. `/bin/true`처럼 경로가 붙어도 마지막 이름으로 판단합니다.
-
-대신 산출물의 핵심 문구를 `contains`에 적은 파일 검사, 사라져야 할 문구를 `absent`에 적은 파일 검사, 판정 줄을 `lastLine`으로 확인하는 파일 검사를 쓰거나, 산출물이 틀리면 종료 코드가 달라지는 명령(테스트 실행, `grep -q '<문구>' <파일>` 등)을 씁니다. 실패해야 정상인 명령은 `expect.exit`에 기대하는 종료 코드와 `stderr`·`stdout` 필드를 함께 적습니다.
-
-검증 노드를 알아보는 경고(검증 노드 없음, 최종 감사 판정)는 id·label·요약에서 verify/validate/check/test/review/audit로 **시작하는 단어**만 검증 노드로 봅니다. `preview`처럼 단어 중간에 `review` 같은 글자가 들어 있는 경우는 세지 않습니다.
-
-한계: 린트는 프로그램 이름과 위 플래그만 봅니다. `sh -c '...'` 같은 셸 래퍼는 분석하지 않으므로 그 안에 `true`나 `touch`를 넣어도 경고가 나오지 않습니다.
-
-### 검토와 커밋 단계
-
-두 축 검토 한 쌍과 커밋 노드는 모든 코드 변경 실행에 같은 모양으로 들어가므로, 손으로 쓰지 않고 정의 수준의 `review`와 `commit` 필드로 선언합니다. 플러그인이 정의를 파싱할 때(`start`, `amend`, `/dag run`, 드라이런) 이 필드를 노드로 확장하고, 그 노드의 검사도 [검증](#검증)의 검사 문법으로 만들어 붙입니다. 프롬프트는 템플릿입니다. 드라이런(`start {dryRun: true}`)의 `preview`에는 확장된 노드가 보입니다.
-
-- `review: {request, notes?, category?, rules?, security?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. 검토는 크리티컬 패스 끝에 있으므로 템플릿이 범위를 정해 둡니다. 노트는 항목마다 한 줄로 쓰고 출력은 결정적인 줄만 인용합니다. `review-spec`은 선언된 검사 외에 직접 만든 probe를 두 개까지만 실행하고(안전하지만 틀린 산출물 점검표의 2·3번), 검증 스크립트·테스트 하네스·mutant를 만들지 않습니다. 2026-10-10 eval에서 최종 감사 노드는 150-230초, 생산 노드는 5-30초였고, 감사 하나는 직접 만든 검증 스크립트와 mutant에 약 95초를 썼습니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다. `security`는 아래 [보안 검토 (선택)](#보안-검토-선택)에 있습니다.
-- `commit: [{message, paths}]`: 노드 `commit`을 만듭니다. `review`가 있으면 검토 노드(`security`가 있으면 세 개, 없으면 두 개) 뒤에, 없으면 모든 사용자 노드 뒤에 실행합니다. 항목마다 그 `paths`만 스테이징해 `message`로 순서대로 커밋하고, 다른 변경은 스테이징하지 않으며 푸시하지 않습니다. 검증은 세 가지입니다. 커밋마다 `git log --format=%s`의 제목이 `message`의 첫 줄(제목)과 같은지만 비교하고(본문은 비교하지 않습니다), 나열한 `paths`가 모두 커밋됐는지(`git status --porcelain -- <paths>`가 비었는지) 확인하며, 각 커밋이 자기 `paths` 밖의 파일을 하나도 바꾸지 않았는지 확인합니다. 마지막 검사가 `git add -A` 같은 넓은 스테이징으로 관련 없는 변경이 커밋에 섞이는 것을 막습니다.
-
-`review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `security`가 있으면 `review-security`, `security-<관점>`, `security-verify-`로 시작하는 id도 마찬가지입니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
-
-#### 의미 없는 코드 차단 (anti-slop)
-
-`skills/anti-slop/`은 지워도 동작이 그대로인 코드와, 코드가 이미 아는 타입 정보를 버리는 코드를 막는 규율입니다. 모든 언어에 적용하고 예시는 TS·JS·Python·Go·Java·Rust·Ruby로 듭니다. 세 겹으로 동작합니다.
-
-1. 스캔: Edit이나 Write가 끝나면 플러그인이 그 호출이 추가한 줄만 정규식으로 검사하고, 걸린 패턴을 도구 결과 뒤에 모델이 읽는 컨텍스트로 붙입니다. 메인 대화와 DAG 노드 모두에 적용되고 모델 호출이 없습니다. 모양만 보므로 예외에 해당하면 모델이 그 예외를 밝히고 코드를 남깁니다. `anti_slop_scan`으로 끄고 `anti_slop_skip`으로 패턴을 뺍니다. 저장소 하나에서만 빼려면 루트의 `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` 중 하나에 `anti-slop allow: <패턴 id>, ...` 줄을 쓰고 이유를 함께 적습니다. 프로젝트 `.claude/settings.json`의 `pluginConfigs`는 플러그인에 전달되지 않습니다(2026-10-12 측정, `--settings` 파일은 전달됨).
-2. 작성: 계획 스킬은 코드를 쓰거나 고치는 노드의 `load_skills`에 `dag-workflow:anti-slop`을 넣습니다. 노드는 보고하기 전에 자기 diff를 목록 전체와 대조해 고치고, 남긴 예외는 `## Output`에 한 줄씩 적습니다.
-3. 검토: `review`로 생성되는 `review-standards` 노드는 이 스킬을 항상 불러옵니다. diff가 증명하는 하드 패턴은 `## Rule breaches`에 `anti-slop: <패턴> - <file:line> - <증명>; <고칠 방법>`으로 적히고 `Standards verdict: FAIL`이 됩니다. `auto_recovery`가 켜져 있으면 [리뷰 수정 라운드](#자동-복구)가 지적된 생산 노드를 실행당 한 번 다시 실행합니다.
-
-등급은 두 가지입니다. 하드는 지우거나 단순하게 바꿔도 동작이 그대로라는 것, 또는 버린 타입 정보를 diff로 증명할 수 있는 패턴입니다. 판단은 가독성(Clean Code) 항목과, 증명보다 읽기가 필요한 세 패턴(코드를 되풀이하는 주석, 일어날 수 없는 상태를 막는 가드, 아직 아무도 필요로 하지 않는 추상화)입니다. 판단 항목도 작성 노드는 고쳐야 하지만, 검토에서는 `## Judgment calls`에만 남고 판정을 FAIL로 만들지 않습니다. 주석 한 줄 때문에 수정 라운드(검토 노드 하나에 150-230초)가 돌지 않게 하려는 것입니다.
-
-변경이 추가하거나 고친 줄만 봅니다. 저장소 규칙 문서(CLAUDE.md, AGENTS.md, CONTRIBUTING 등)가 허용한 패턴과 포매터·린터·컴파일러가 이미 잡는 것은 제외합니다. 포매팅, 함수 길이·인자 수 같은 고정 숫자 제한(AI가 한 번만 쓰는 도우미 함수로 잘게 쪼개게 만듦), "주석은 실패"라는 규칙(이 레포는 이유를 적는 주석을 요구함)은 일부러 넣지 않았습니다.
-
-| 구분 | 패턴 | 스캔 id |
-| --- | --- | --- |
-| 하드: 군더더기 | 디버그 문(`debugger`, `breakpoint()`, `dbg!`, `printStackTrace()`), 주석 처리된 코드, 요청된 동작 대신 남긴 `TODO` | `debug-leftover`, `commented-out-code`, `todo-stub` |
-| | 삼키거나 다시 던지기만 하는 catch·except·`if err != nil {}` | `swallowed-error`, `rethrow-only-catch` |
-| | `c ? true : false`, `if (c) return true; return false`, `result` 같은 이름으로 받아 바로 반환 | `boolean-ceremony`, `pass-through-variable` |
-| 하드: 버린 근거 | 계약의 최상위 타입(`unknown`·`any`, `Any`, `interface{}`, `Object`. 외부 데이터를 파싱하는 함수의 입력은 예외), 열린 딕셔너리(`Record<string, unknown>`, `dict[str, Any]`, `Map<String, Object>`) | `top-type`(TS는 `any`·`object`만), `open-dictionary` |
-| | 연쇄 단언, `SAFETY:` 이유 없는 캐스트(`as T`, `cast()`, `x.(T)`, `(User) obj`, `unsafe`), 이유 없는 억제(`@ts-ignore`, `# type: ignore`, `@SuppressWarnings`) | `chained-assertion`, `unreasoned-assertion`, `suppression-without-reason` |
-| | 이름 문자열로 하는 리플렉션(`Reflect.get`, `getattr(o, "x")`) | `reflection` |
-| | 아는 값을 넓은 타입으로 넓히기, 넓혔다가 다시 단언, 경계 파서 밖의 `typeof`·`isinstance` | 스캔 없음 |
-| 하드: 테스트 | 모듈 패치(`vi.mock`, `jest.mock`, `Mockito.mockStatic`, `mock.patch`) | `module-mock`(JS·TS·Java) |
-| 하드: JS·TS | 연달은 `filter`·`map`, `reduce`에서 누적값 복사, 조건부 빈 객체 스프레드 | `two-pass-filter-map`, `growing-copy`, `conditional-empty-spread` |
-| 판단 | 되풀이 주석, 불가능한 상태 가드, 필요 없는 추상화, 깊은 중첩, 플래그 인자, 이름 없는 매직 값, 상태를 바꾸는 조회 함수, 이중 부정, 형태를 말하는 이름(`UserShape`, `strName`), 여러 일을 하는 함수 | 스캔 없음 |
-
-스캐너는 `hooks/engine/slop-scan.ts`에 있고, 모든 패턴마다 잡아야 할 예와 잡으면 안 되는 비슷한 예를 `tests/slop-scan.test.ts`에 둡니다. 잘못 걸린 경우는 편집마다 모델의 주의를 빼앗으므로, 규칙은 놓치는 쪽을 감수하고 정확도를 우선합니다. 2026-10-12에 이 저장소의 TS 10,573줄에 돌려 TS 파라미터의 `unknown`(36건 중 30건이 파서 입력)과 루프를 닫는 `}`를 if로 읽은 경우를 걸러냈습니다. 남은 186건은 모두 규칙이 겨냥한 모양이었고, 동작을 바꾸지 않고 정리할 수 있는 것(빈 catch 2, 이중 단언 1, 검사형으로 바꿀 수 있는 단언 28)은 정리했으며, 나머지는 이 저장소의 관용구로 [개발](#개발)에 예외로 적었습니다. 확장자로 언어를 고르며, Kotlin·C#·Swift·Scala·Dart·C·C++·PHP는 중괄호 언어 공통 규칙만 받습니다.
-
-#### 보안 검토 (선택)
-
-`review.security`에 시큐어코딩 가이드를 고르면 보안 검토가 멀티에이전트로 붙습니다. 고르지 않으면 보안 노드는 하나도 없고, 기존 정의는 해시와 지문이 이전과 같아서 `amend`해도 다시 실행되는 노드가 없습니다.
-
-| id      | 가이드                                                      | 기준 파일                                     |
-| ------- | ----------------------------------------------------------- | --------------------------------------------- |
-| `kisa`  | KISA·행정안전부 소프트웨어 개발보안 가이드, 구현 단계 보안약점 49개(2021 개정판) | `skills/secure-coding/references/kisa.md`  |
-| `owasp` | OWASP Top 10:2025와 CWE Top 25(2025)                         | `skills/secure-coding/references/owasp.md` |
-
-```yaml
-review:
-  request: 로그인 API를 추가한다.
-  security: [kisa]        # [owasp] 또는 [kisa, owasp]. 빼면 보안 검토 없음
-```
-
-검토는 세 단계이고, 각 에이전트는 자기 몫 하나만 맡습니다.
-
-```
-사용자 노드 ─┬─ security-injection ─┐        (실행 중 추가)
-             ├─ security-resources ─┤   후보마다 security-verify-<관점>-<n>
-             ├─ security-access ────┤          │
-             ├─ security-crypto ────┼──────────┴──── review-security ── commit
-             ├─ security-errors ────┤
-             ├─ security-memory ────┤
-             └─ security-integrity ─┘
-```
-
-1. 관점 노드 7개(`injection`, `resources`, `access`, `crypto`, `errors`, `memory`, `integrity`)가 사용자 노드 뒤에 병렬로 돕니다. 기준 파일의 각 행에는 관점 열이 있고, 관점 노드는 고른 가이드에서 자기 관점 행만 적용해 후보 위반을 찾습니다. 확신이 없으면 후보로 올리고(재현율 우선), 결과는 노트의 `## Candidates`에 JSON 배열로 씁니다. 관점당 최대 8건이고, 같은 패턴의 반복은 한 후보로 합칩니다.
-2. 관점 노드가 끝나면 플러그인이 그 JSON을 읽어 후보마다 검증 노드 `security-verify-<관점>-<n>`을 실행 중에 추가합니다. 검증 노드는 어떤 노드에도 의존하지 않아 관점 노드의 출력도 구현 노드의 보고도 받지 않고, 자기 후보 하나만 봅니다. 그 후보를 반박하려고 시도하면서 (1) 변경이 그 줄을 추가하거나 고쳤는지, (2) 인용한 가이드 행이 해당하는지, (3) 변경 밖 호출부·미들웨어·프레임워크 기본값까지 따라가도 통제가 없는지를 증거와 함께 확인하고, 셋 다 맞을 때만 `Candidate verdict: CONFIRMED`, 아니면 `REFUTED`를 씁니다.
-3. `review-security`는 관점 노드 전부와 추가된 검증 노드 전부를 기다린 뒤, 새로 판단하지 않고 결과만 모아 보고서를 씁니다. 판정은 기계적으로 막습니다. 검증 노트 폴더(`<notes>/security-verify/`)에 `Candidate verdict: CONFIRMED`가 하나라도 있으면 `review-security`의 검사가 실패하므로, 보고서가 PASS라고 써도 커밋되지 않습니다. `commit`이 있으면 세 검토(spec, standards, security)가 모두 PASS일 때만 커밋합니다.
-
-- 위반 기준: 변경이 추가하거나 고친 줄에 고른 가이드의 행이 해당하고 그 행이 요구하는 통제가 없을 때만 위반입니다. 변경하지 않은 코드, 고르지 않은 가이드에만 있는 위험, 반박된 후보는 판단 사항으로 적고 통과합니다. 저장소에 설정된 린터나 보안 스캐너가 잡는 것은 적지 않습니다.
-- 실패 처리: 관점 노드의 JSON이 깨졌거나, 8건을 넘거나, 고르지 않은 가이드를 인용하거나, 프로젝트 밖 경로를 가리키면 그 관점 노드가 이유와 함께 실패합니다. 이때 검증 노드는 만들지 않고 `review-security`와 커밋은 건너뜁니다.
-- 이전 결과 정리: 생성된 노드는 시도 전에 자기 노트를 지우고, 관점 노드는 자기 검증 폴더(`security-verify/<관점>/`)를 통째로 지웁니다. 같은 key로 돌린 이전 실행이 남긴 CONFIRMED 파일로 실패하지 않게 하기 위해서입니다.
-- 비용: 검증 노드는 어떤 노드에도 의존하지 않아서 관점 노드의 추론도, 구현 노드의 자기 보고도 받지 않습니다. 그래서 그래프에서는 시작 노드처럼 보입니다. 검토 한 번에 에이전트 8개(관점 7 + 집계 1)와 후보 수만큼의 검증 에이전트가 듭니다. 드라이런 미리보기와 승인 화면에는 관점 노드까지만 보이고, 검증 노드는 실행 중에 나타납니다. 동시 실행 한도(`max_concurrent`, 기본 8)를 넘는 노드는 차례를 기다립니다.
-- `amend`: 선언된 정의에는 실행 중 추가된 검증 노드가 없으므로, `amend`하면 검증 노드를 만든 관점 노드가 다시 실행되어 검증 노드를 새로 만듭니다. 검증 노드가 실행 중이면 `amend`는 거부됩니다.
-- 고르는 방법: 계획 스킬은 요청이 시큐어코딩, 보안 검토, KISA, OWASP를 언급하거나 프로젝트 규칙 파일이 가이드를 지정할 때만 `security`를 넣고, 기본으로는 넣지 않습니다. 실행마다 고르려면 요청에 "KISA 기준으로 보안 검토까지"처럼 적거나 정의 파일에 `security`를 씁니다. 프로젝트 전체에 적용하려면 그 프로젝트의 `CLAUDE.md`나 `AGENTS.md`에 "코드 변경 실행은 `review.security: [kisa]`로 검토한다" 같은 한 줄을 둡니다.
-- 구현 노드: 코드를 쓰는 노드도 `load_skills: ["dag-workflow:secure-coding"]`과 프롬프트의 가이드 id로 같은 기준을 따르게 할 수 있습니다. 가이드 id가 없으면 그 노드는 `missing-input`으로 실패합니다.
-- 모델 등급: 보안 노드는 모두 `review.category`(기본 `unspecified-low`)를 씁니다. 더 깊게 보려면 `category: unspecified-high`로 올립니다.
-- 가이드 추가: `hooks/engine/stages.ts`의 `SECURITY_GUIDES`에 id와 이름을 한 줄 넣고, `skills/secure-coding/references/<id>.md`에 항목, 판본, 행마다 관점 열(`SECURITY_LENSES`의 id 중 하나)을 쓰고, `skills/secure-coding/SKILL.md`의 가이드 표와 이 표에 한 줄씩 더합니다. 도구 스키마의 허용 값은 `SECURITY_GUIDES`에서 만들어집니다.
-
-## 자동 복구
-
-`auto_recovery`(기본 `true`)가 켜져 있고 Jev를 쓸 수 있으면, 실패한 노드의 원인을 Jev가 분류하고 확신도가 `jev_confidence` 이상일 때만 다시 실행합니다.
-
-- `transient`(일시 오류): 같은 등급 모델로 다시 실행합니다.
-- `implementation`(구현 실수): Opus로 다시 실행합니다.
-- `missing-input`, `clarification`, `permanent`, 낮은 확신도, API 실패, 사용자 취소, 인계 중인 실행, 검증 계약이 없는 노드는 자동으로 재시도하지 않습니다.
-- 리뷰·감사 노드의 FAIL 판정(`Spec`/`Standards`/`Security verdict: FAIL`, `partial/supporting-output`)도 재시도하지 않습니다. 같은 결과물을 다시 리뷰해도 판정은 그대로이기 때문입니다(2026-10-12, 실제 run 4개에서 Opus 재시도 7번이 같은 FAIL을 되풀이하며 54분을 썼습니다). 대신 실행에서 실패한 노드가 이런 판정뿐이면, 실행당 한 번 **리뷰 수정 라운드**를 돕니다. 지적이 가리키는 producer(생산 노드가 하나면 그 노드, 여럿이면 지적에 나온 `파일:줄`이 `writes` 범위에 드는 노드)를 지적 내용을 프롬프트에 붙여 다시 실행하고, 그 뒤의 노드(리뷰·커밋)도 다시 실행합니다. 생성된 리뷰 노드의 지적은 노트의 `## Findings`·`## Rule breaches`·`## Breaches` 절에서 읽습니다. 리뷰가 통과하면 정착 메시지에 "자동 수정 라운드가 producer를 다시 실행했다"는 줄이 붙고, 다시 FAIL이면 "라운드를 이미 썼다"는 줄과 남은 지적을 담아 정착 메시지를 보내고, 지적이 어느 `writes`에도 닿지 않으면 예전처럼 바로 정착합니다. 라운드가 다시 실행할 노드 중 이미 끝난 노드가 프로젝트 밖을 바꾸는 노드면 라운드를 돌지 않습니다. `external: true`로 표시했거나, `writes`를 선언하지 않았거나, id·라벨·요약에 push·deploy·publish·upload·migrate·delete·commit·prod 같은 단어가 있는 노드가 여기에 해당합니다. 실제 run에서 외부 작업을 한 노드(`apply-env`, `setup-assets`, `delete-token-row`, `commit-push`)는 모두 `writes`가 없었습니다. 이때 FAIL은 바로 정착하고, 정착 메시지에 이유와 함께 "지적을 검토하고 외부 작업을 다시 하기 전에 사용자에게 수정 방향을 물으라"는 안내가 붙습니다. 지적이 어느 producer에도 닿지 않아 라운드를 돌지 않을 때도 이유가 붙습니다. `auto_recovery=false`면 이 라운드도 돌지 않습니다.
-- 검사 자체의 결함(`check-defect`)도 재시도하지 않고 Jev에 묻지도 않습니다. 검사 프로그램이 PATH에 없어 시작되지 못했거나, 검사의 셸이 종료 코드 127로 "command not found"를 냈거나(`./dist/cli`처럼 경로로 부른 프로그램은 제외), 워커가 `DAG_NODE_STATUS: failed: check-defect - <이유>`로 보고한 경우입니다. 다시 실행해도 같은 검사가 또 실패하기 때문입니다. 오류는 `check-defect:`로 시작하고, 메인 대화가 검사를 `amend`로 고칩니다.
-- 노드마다 자동 추가 시도는 최대 2번입니다. 원래 프롬프트·범위·목표를 그대로 두고 실패 이유와 "선언한 검증을 다시 실행하라"는 지시만 덧붙이며, 사용한 횟수는 체크포인트에 남아 다시 늘어나지 않습니다.
-- 실패 때문에 건너뛴 하위 노드도 함께 대기 상태로 돌아갑니다. 모든 복구 판단은 [판단 기록](#판단-기록)에 남습니다.
-
-## 컨텍스트 보존
-
-세션마다 `.claude/dag/context/<session>.json`에 원본 사용자 요청 마지막 8개(각 20,000자까지, 넘으면 잘렸다는 표시를 붙임)와 고정 노트를 저장합니다. 이 원본에서 매번 8,000자 이하의 복원 블록(JSON)을 새로 만들고, 여기에는 현재 목표, 노트, 이 세션의 실행·노드 상태, 검증 결과, 복구 횟수, 체크포인트와 보고서 경로 같은 출처 참조가 들어갑니다. 요약을 다시 요약하지는 않으며, 원본과 체크포인트가 기준입니다. 이 파일은 세션이 실행을 소유하거나, 고정 노트가 있거나, 이미 파일이 있을 때만 씁니다. DAG를 쓰지 않는 평범한 대화의 요청은 메모리에만 두고(복원 블록은 그대로 동작), 세션의 첫 실행이 시작될 때 그때까지의 요청을 함께 저장합니다.
-
-복원 블록은 대화의 첫 컨텍스트 블록으로 모델에 전달되고, 압축(compaction) 뒤와 `/clear` 뒤에도 다시 넣습니다. 이후 프롬프트에서는 모델이 마지막으로 본 뒤 이 세션의 실행이나 노트 상태가 바뀐 경우(예: 패널에서 실행을 취소했거나 노트를 고정한 경우)에만 사용자 프롬프트에 붙습니다. 플러그인이 보내는 진행·정산(settle)·keep-alive 메시지에는 붙지 않고, 짧은 프로토콜 안내문은 모든 프롬프트에 붙습니다. `/clear` 뒤에는 이전 컨텍스트를 새 세션으로 옮기고, 재개한 세션은 자기 기록을 다시 읽습니다. `/dag context`로 내용을 보고, `/dag note`로 노트를 고정하거나 지웁니다.
-
-노드가 실행 중일 때 `/clear`를 하면 실행 소유권과 노트는 새 세션으로 옮겨지고 작업자도 계속 실행됩니다. 다만 Claude Code가 그 순간 작업자가 실행 중이던 셸 명령을 종료할 수 있습니다(실측: exit 137). 작업자는 보통 명령을 다시 실행하지만, 허용 규칙에 없는 형태로 다시 실행하면 권한 확인을 기다리며 멈출 수 있습니다. 노드가 오래 걸리는 셸 명령을 실행 중이면 `/clear` 대신 `/compact`를 쓰세요. 실측에서 압축은 실행 중인 셸을 끊지 않았습니다.
-
-## 판단 기록
-
-라우팅·도구 승인·복구·실행 방식 판단을 세션마다 마지막 200개까지 `.claude/dag/decisions/<session>.json`에 남깁니다. 기본값 `auto`에서는 Jev에 물은 사용자 프롬프트마다 실행 방식 기록이 남으므로, DAG를 쓰지 않는 프로젝트에서도 첫 프롬프트에 `.claude/dag/.gitignore`와 이 파일이 생깁니다. 기록에는 제안값, 선택값, 판단 주체(`jev`/`baseline`/`rule`), 확신도, 선택지별 확률, 규칙 버전, 기준 확신도, 지연 시간, 결과(`applied`, `low-confidence`, `timeout` 등), 입력 상태의 해시가 들어갑니다. 결과는 Jev의 답이 어떻게 처리됐는지, 판단 주체는 최종 값을 누가 정했는지를 뜻합니다. 그래서 최종 감사 규칙이 Jev의 `quick`을 덮어쓰면 결과는 `applied`, 판단 주체는 `rule`로 남습니다. API 키와 도구 입력 전체는 저장하지 않습니다. `/dag decisions [id]`, 도구 액션 `decisions`, 패널의 Decisions 탭으로 봅니다. 노드 작업자의 도구 승인 기록에는 `runId`와 `nodeId`도 들어가고, 비대화형 세션에서 호출이 `ask`로 남았으면 그 원인을 적은 `note`도 붙습니다([결과 전달](#결과-전달)의 **비대화형 세션의 도구 허용** 문단).
-
-## 세션과 인계
-
-같은 프로젝트의 세션은 10초마다 자기 상태(실행 목록, 실행 중 노드의 `writes`)를 갱신합니다. 60초 안에 갱신한 세션만 활성으로 봅니다. 활성 세션끼리 `writes`가 겹치면(같은 경로이거나 한쪽이 다른 쪽 폴더 안) 충돌로 **보여 주기만** 하고, 실행을 멈추거나 조정하지는 않습니다. 와일드카드가 들어간 범위는 비교하지 않습니다.
-
-실행 소유권은 명시적인 인계로만 옮깁니다.
-
-1. 원래 세션에서 `/dag handoff <run> <session>`: 같은 프로젝트의 활성 세션에만 제안할 수 있습니다. 새 노드는 시작하지 않고(대기 노드는 `paused`), 실행 중인 노드는 끝날 때까지 둡니다. 실행 중인 노드가 모두 끝나 제안이 `offered`가 된 뒤에는 원래 세션을 닫아도 됩니다.
-2. 받는 세션에서 `/dag accept <run>`: 실행 중인 노드가 모두 끝난 뒤에만 수락됩니다. 끝나지 않은 노드만 이어서 실행하고, 완료된 노드와 결과는 그대로 둡니다. 원래 세션의 고정 노트도 가져옵니다.
-3. 취소는 원래 세션에서 `/dag handoff <run> cancel`입니다.
-
-다른 프로젝트 세션은 대상이 될 수 없습니다. 인계 알림이 와도 패널만 새로 고칠 뿐 자동으로 수락하지 않습니다. `attach`는 소유 세션이 아직 활성이거나 인계 중인 실행이면 거부합니다(`owner_active`, `manual_handoff_required`).
-
-## 실행 규칙
-
-- 의존 노드가 모두 `completed`인 노드가 `scheduled`가 되고, 실행 수 상한(기본 8)까지 동시에 시작됩니다.
-- 노드가 실패하거나 취소되면 그 하위 노드는 `skipped`가 됩니다. 관계없는 노드는 계속 실행됩니다.
-- 노드 상태는 서브에이전트 턴 종료 이유로 정합니다. `aborted`면 `cancelled`, `error`/`refusal`이면 `failed`이고, 답변 마지막 줄이 `DAG_NODE_STATUS: failed: <이유>`여도 `failed`입니다.
-- 노드 작업자는 명령을 포그라운드로 실행하고, 자기가 시작한 백그라운드 작업·모니터·백그라운드 서브에이전트가 아직 돌고 있으면 턴을 끝내지 말라고 지시받습니다. 그런데도 백그라운드 작업을 시작한 노드가 `DAG_NODE_STATUS` 줄 없이 턴을 끝내면 플러그인은 바로 검증하지 않고 그 에이전트의 다음 턴을 기다립니다. 30분 안에 다음 턴이 오지 않으면 `ended its turn with background work pending and was not resumed`로 노드를 실패시킵니다.
-- 실행이 끝나면 세션에 "완료 주장은 증거로 확인하기 전까지 거짓으로 취급하라"는 지침과 함께 요약 메시지가 들어갑니다.
-
-`start_approval`을 `always`로 하면(기본 `off`) 대화형 세션에서 모델이 `dag` 도구로 시작한 실행은 만들어지기만 하고 노드를 하나도 시작하지 않은 채 보류됩니다. `start` 응답과 스냅샷에 `awaiting_approval: true`와 안내 문구가 붙고, 모델은 사용자에게 한 번 알린 뒤 턴을 끝냅니다. 실행이 보류되면 토스트가 한 번 뜹니다. 프롬프트 아래 상태 줄(`DAG <이름>: 0/3 완료 · 승인 대기 중`)과 프롬프트 위 밴드는 `실행 중 N` 자리에 `승인 대기 중`(영어 `awaiting approval`)을 보여 주고, 도구의 `list` 액션은 그 실행의 `status: running`을 그대로 둔 채 `awaiting_approval: true`를 더해 아직 시작하지 않았음을 알립니다. 보류된 실행 자체는 `/reload-plugins`나 세션 재개 뒤에도 계속 승인을 기다립니다. 보류 표시가 체크포인트에 저장되기 때문입니다. DAG 패널의 승인 블록과 `/dag status`는 사용자가 무엇을 승인하는지 볼 수 있도록 실행 미리보기를 보여 줍니다. 미리보기에는 노드 수와 웨이브 수, 가장 넓은 웨이브와 동시 실행 한도(`max_concurrent`)의 비교, 웨이브별 노드와 카테고리·모델, 쓰기 충돌, 쓰기 범위를 확인하지 못한 노드, lint 경고가 들어갑니다. 승인 블록의 `approve` 버튼(한국어 화면에서는 `승인`)이나 `a` 키, 또는 `/dag approve <run_id>`로 승인하면 실행이 시작되고 모델에 승인되어 시작됐다는 메시지가 갑니다. 같은 블록의 `reject` 버튼(`거절`)이나 `r` 키, 또는 `/dag reject <run_id> [reason]`으로 거부하면 실행이 `Rejected by the user: <reason>`으로 취소되고 모델에 거부되어 아무것도 실행되지 않았다는 메시지가 갑니다. 사용자가 거부한 실행은 모델이 `retry`나 `amend`로 다시 살릴 수 없고, 모델이 같은 키와 같은 정의로 `start`해도 거절하며, 모두 코드 `rejected_by_user`입니다. 사용자는 `/dag retry`로 그 실행을 다시 돌릴 수 있고, 계획을 고치려면 새 키로 시작해야 합니다. `/dag approval`은 인자 없이 쓰면 지금 유효한 설정만 보여 주며 누가 입력해도 됩니다. `/dag approval off|always`로 덮어쓰는 것과 `/dag approve`, `/dag reject`는 사용자 전용이라 모델이 실행할 수 없습니다. 덮어쓴 값은 메모리에만 있어서 다음 `/reload-plugins`까지만 유지되고, 그 뒤에는 `start_approval` 설정으로 돌아갑니다. `start_approval`에 `off`나 `always`가 아닌 값을 쓰면 다른 설정처럼 무시하고 `off`로 둡니다. 예외가 둘 있습니다. 사용자가 직접 입력한 `/dag run`과 비대화형 세션(`claude -p`)은 설정과 관계없이 기다리지 않고 바로 시작합니다. 사용자가 보류된 실행과 같은 정의로 `/dag run`을 입력하면 그 보류된 실행이 승인됩니다.
-
-### `dag` 도구 액션
-
-
-| 액션                                         | 동작                                                                                            |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| `start {definition}`                       | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict`. 결과에 계약 점검 `warnings` 포함             |
-| `start {path}`                             | `definition` 대신 프로젝트 상대 `.yaml`/`.yml`/`.json` 정의 파일 경로를 받습니다. `/dag run`과 똑같이 읽고 파싱한 뒤 `start {definition}`과 똑같이 시작하므로 계획 스킬 게이트, 린트 `warnings`, 키 재사용이 같습니다. `definition`과 `path` 중 정확히 하나만 허용하며 둘 다 주거나 둘 다 없으면 `invalid_request`입니다. 경로는 `..` 없는 프로젝트 상대 경로이고 `.claude` 밖이며 위 확장자여야 하고, 어기면 `invalid_request`입니다. 읽기나 파싱에 실패하면 경로를 담은 `definition_unreadable`을 돌려줍니다. 모델이 YAML 흐름을 JSON으로 직접 옮겨 적지 않아도 되며, `/dag run`은 계속 사용자 명령이고 절대 경로도 받습니다 |
-| `start {dryRun: true}`                     | 정의를 검증만 하고 실행은 만들지 않은 채 `{dry_run: true, preview}`를 돌려줍니다. `definition` 또는 `path`와 함께 씁니다. `preview`에는 단계별 노드 id `waves`, `critical_path`, `node_count`, 노드별 `nodes`(`wave`, 실효 `category`, `model`, `agent`, `depends_on`, `checks`, `writes`, `load_skills`), 동시에 실행될 수 있는 노드끼리 `writes`가 겹치는 쌍 `write_conflicts`, `widest_wave`, `max_concurrent`, `start`가 돌려주는 것과 같은 린트 `warnings`가 들어 있고, 같은 키로 같은 정의가 이미 실행됐다면 `existing_run_id`도 붙고, 아니면 `preview_id`가 붙습니다. `start {preview_id}`는 미리 본 정의를 그대로 시작하므로 모델이 정의를 다시 쓰지 않아도 됩니다(eval에서 이 두 번째 출력에 11-31초가 들었습니다). 시작할 때 키 재사용·검증·PATH 검사를 처음처럼 다시 하며, `preview_id`는 이 세션의 최근 드라이런 8개까지만 기억합니다. 모르는 값은 `unknown_preview`로 거부합니다. `writes`를 선언하지 않은 노드는 `writes`가 null이고, 그런 노드 중 다른 노드와 동시에 실행될 수 있는 것은 `unchecked_writes`에 나열됩니다. 이 노드들은 충돌을 점검하지 못했다는 뜻이며, `writes: []`는 읽기 전용으로 선언한 범위입니다. 알 수 없는 category는 `warnings`에 경고가 추가됩니다. `routing_note`는 category와 모델이 정의가 내놓은 제안값이며 실제로 시작할 때 Jev가 노드를 다시 분류할 수 있다고 알려 주므로, 표시된 category는 최종 감사 규칙까지 적용한 제안값입니다. 계획 스킬 게이트는 드라이런에도 적용됩니다. `dryRun`이 불리언이 아니면 `invalid_request`로 거부하고, `amend`는 `dryRun`을 받지 않고 거부합니다. 사용자는 `/dag preview <file>`로 정의 파일에 같은 미리보기를 볼 수 있습니다. `/dag preview`는 계획 스킬 게이트를 받지 않는 사용자 명령이며, 아무것도 시작하지 않으므로 `/dag run`과 달리 모델 턴 중에도 즉시 실행됩니다 |
-| `snapshot {run_id}` / `list`               | 상태 조회(노드 답변 발췌 포함)                                                                            |
-| `wait {run_id}`                            | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다                                   |
-| `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |
-| `retry {run_id, node_id|node_ids, prompt}` | 실패/취소 노드와 그 때문에 skip된 하위 노드를 다시 실행. 완료 노드는 재사용                                                |
-| `amend {run_id, definition}`               | 노드 fingerprint(prompt, category, agent, dependsOn, verify, writes)를 비교해 바뀐 노드와 그 하위 노드만 다시 실행 |
-| `send {run_id, node_id, message}`          | 실행 중인 노드에 메시지를 보내 방향을 바꿈                                                                      |
-| `attach {run_id}`                          | 소유 세션이 끝난 실행을 이 세션으로 가져와 남은 노드를 이어서 실행. 소유 세션이 활성이거나 인계 중이면 거부                                |
-| `context` / `decisions` / `sessions`       | 복원 컨텍스트, 판단 기록, 같은 프로젝트 세션과 충돌 조회                                                             |
-
-
-## DAG 패널
-
-패널은 위에서 아래로 다음을 보여 줍니다.
-
-- **헤더**: `DAG & Tasks(N)`, 실행 이름과 run id, 실행 상태·완료 수·실패 수. 실행이 둘 이상이면 진행 중인 실행 목록(최대 5개, 눌러서 전환)과 끝난 실행을 펼치는 줄이 붙습니다.
-- **관점(뷰)**: 그래프 영역 위의 탭 줄(`▸ Graph   Lanes   Timeline`)이 지금 보이는 뷰를 알려 줍니다. 세 뷰 모두 `Client` 서피스 모듈(`hooks/ui/graph-client.ts`)이 패널의 실제 폭에 맞춰 그립니다. 기본은 자동입니다. 박스가 패널에 무리 없이 들어가면 그래프 뷰, 한 층이 박스 두 줄을 넘거나 박스 줄이 여섯 개를 넘거나 레인이 모자라면 레인 뷰를 씁니다. 탭은 버튼이라 마우스로 눌러 바꿀 수 있고(모델이 작업 중이라 키보드 포커스를 못 얻을 때도 동작), `v`로 자동 → 그래프 → 레인 → 타임라인 순서로 바꾸거나 `/dag view <보기>`로 정할 수도 있습니다. 고른 뷰와 카드 접힘 상태는 프로젝트별로 저장되어 다음 세션에도 유지되고, 다른 프로젝트의 설정에는 영향을 주지 않습니다.
-  - **그래프 뷰**: 노드마다 둥근 박스 하나를 층 순서로 그립니다. 박스에는 선택 표시 `>`, 접힘 표시 `[-]`/`[+]`, 라벨, 상태와 실행 중 활동(`… 12s` 응답 대기, `✻` 생각 중, `✎` 응답 중, `⚙ Bash` 도구 인자 작성, `▶ Bash 5s` 도구 실행, `⚠` 멈춤 의심), 들어오는 노드(`← a, b`) 또는 `Start node`가 들어갑니다. 바로 아래 줄로 가는 간선은 상자 그림 문자 연결선(`│ ─ ┬ ┴ ▼`)으로 잇습니다. 박스 줄을 하나 이상 건너뛰는 간선(넓은 층이 줄바꿈된 경우, `a → c` 같은 건너뛰기)은 왼쪽 거터의 세로 레인으로 내려갑니다. 레인마다 출발·도착 줄이 따로 있어서, 다른 선을 지날 때는 합류(`┴`)가 아닌 교차(`┼`)로 그려집니다. 목적지가 같은 간선은 한 레인을 같이 쓰며, 레인은 최대 4개입니다. 테두리 색은 상태를 따릅니다(실행 중 cyan, 완료 green, 실패 red, 멈춤 의심 yellow, 대기 흐림). 노드를 선택하면 그 노드의 위·아래 경로 연결선과 박스는 진하게, 나머지는 흐리게 그립니다. 한 층이 박스 두 줄을 넘으면 선택·멈춤 의심·실패·실행 중 노드를 먼저 남기고 나머지를 `+19 more` 요약 박스 하나로 접으며, `f`로 펼치거나 다시 접습니다.
-  - **레인 뷰**: `git log --graph`처럼 한 줄에 노드 하나를 두고, 진행 중인 간선마다 레인을 하나씩 그립니다. 모든 간선이 정확히 보이고, 같은 노드로 모이는 간선은 바로 한 레인에 합류해서 노드가 24개인 팬인도 폭이 좁게 유지됩니다.
-  - **타임라인 뷰**: 노드마다 시작부터 끝(실행 중이면 지금)까지를 막대로 그리고, 시간축과 실행 시간을 붙입니다. 경과 시간 기준 가장 긴 의존 사슬(임계 경로)을 `◆`로 표시합니다.
-- **Inspector 탭**: 맨 위 탭으로 DAG(`g`), Decisions(`j`), Context(`x`), Sessions(`s`) 화면을 고릅니다. DAG 화면은 위의 세 뷰를 그대로 보여 주고, Decisions는 판단 기록을 페이지 단위로 넘기며 하나를 골라 상세를 펼칩니다. Context는 복원 블록과 노트를, Sessions는 세션 목록·충돌과 인계 제안·수락·취소 버튼을 보여 줍니다. `/dag inspect <화면>`으로 바로 열 수도 있습니다.
-- **Dependencies**: 모든 간선 목록.
-- **Node details**: 노드별 테두리 카드. 실행 중인 노드는 펼쳐지고 나머지는 접힙니다. 펼치면 작업 요약, 에이전트·모델, 진행(전체 활동 문구), 시도 횟수·경과 시간이 보입니다.
-- 실패·건너뜀 노드의 오류 목록과 키 안내.
-
-토큰 없이 30초, 첫 토큰 없이 90초가 지나면 멈춤 의심으로 표시합니다.
-
-패널을 열지 않아도, 모델이 작업 중이어도 프롬프트 아래 한 줄(`DAG <이름>: 3/7 완료 · 실행 중 2 · 실패 1`)이 이 세션의 진행 중인 실행을 보여 줍니다. 실행이 여럿이면 가장 최근에 바뀐 실행에 `+N개 실행`이 붙고, 진행 중인 실행이 없으면 사라집니다. 사람이 확인해야 하는 순간에만 토스트(12초)가 뜹니다: 자동 복구 후에도 노드가 실패했을 때(검증 실패는 별도 문구), 인계 제안을 받았을 때, 모델이 시작한 실행이 시작 승인을 기다리기 시작했을 때(`DAG <이름> 실행이 승인을 기다립니다`), 실패가 있는 채로 실행이 끝났을 때, Claude Code가 패널을 그리지 못했을 때. 평소 진행 상황에는 토스트가 없습니다.
-
-이 세션에 진행 중인 실행이 있으면 프롬프트 바로 위에도 요약 밴드가 최대 세 줄로 나옵니다(터미널과 데스크톱, 모델이 작업 중일 때도 표시).
-
-- **첫 줄**: 실행 이름과 상태 줄과 같은 수치입니다(`DAG <이름>  3/7 완료 · × 실패 1 · ? 권한 승인 대기 1 · ● 실행 중 2`). 급한 것부터 적어서, 폭이 모자라면 뒤쪽부터 `…`로 잘립니다. 시작 승인을 기다리는 실행이면 `● 실행 중 N` 자리에 노란 굵은 글씨의 `? 승인 대기 중`(영어 `? awaiting approval`)이 나옵니다.
-- **둘째 줄**: 숫자 단축키 버튼입니다. `0`은 DAG 패널을 열고, `1`–`5`는 확인이 필요한 노드(실패 `×`, 권한 승인 대기 `?`, 실행 중 `●` 순서로 최대 5개)를 선택한 채 패널을 DAG 화면으로 엽니다. 프롬프트가 비어 있을 때 숫자 하나만 입력하고 잠시 기다리면 그 버튼이 눌리므로, 패널이 키보드 포커스를 얻지 못하는 모델 작업 중에도 쓸 수 있습니다. 버튼으로 연 패널은 사용자가 요청한 것이라 어떤 폭에서도 표시되고, 프롬프트가 비어 있으면 포커스도 받습니다. 노드 id가 길면 표시 폭 기준으로 `…`로 줄이고, 그래도 자리가 모자라면 덜 급한 노드부터 뺍니다.
-- **셋째 줄**: Claude Code가 패널을 그리지 못하고 있을 때만 나오는 `패널 미표시: <이유>`입니다.
-
-밴드는 주어진 폭과 줄 수를 넘지 않습니다. 한 줄만 쓸 수 있으면 버튼 줄만 남기고(수치는 프롬프트 아래 상태 줄에도 있습니다), 다른 mod가 밴드에 그린 내용은 그 아래에 그대로 둡니다. 설문(survey)이 밴드를 쓰는 동안과 진행 중인 실행이 없을 때는 아무것도 그리지 않습니다. 좁은 터미널에서 패널이 프롬프트 위에 열려 있는 동안에는 그 자리에 패널이 보이고, 패널을 닫으면 밴드가 다시 나옵니다(Claude Code 2.1.288에서 확인).
-
-Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만, 사용자가 한 번 직접 연 뒤에는 110열 미만)에서는 그리지 않고 대기시킵니다. 이때는 이유를 토스트로 한 번 알리고 밴드가 패널을 대신합니다. 확인할 노드가 없어도 밴드는 남고, `0`이나 `/dag`로 패널을 열어 실제로 그려지면 셋째 줄이 사라집니다.
-
-노드 작업자가 도구 권한 승인을 기다리면(`classic.PermissionRequest`, 또는 최종 권한 판정이 `ask`인 노드 호출) 그래프·레인·타임라인·노드 카드·인스펙터의 해당 노드에 노란 `승인 대기: <도구>`(영어 `waiting: <tool>`) 표시가 붙고, 상태 줄에 `권한 승인 대기 N`이 더해지며, 대기 한 번마다 토스트 하나(`DAG <실행> › <노드> 노드가 권한 승인을 기다립니다`)가 뜹니다. 대기 상태는 토스트, 상태 줄, 프롬프트 위 밴드에 표시됩니다. 호출 ID를 알면 권한 대화 상자 아래에 한 줄을 붙이도록 `$.ui.notice`를 호출하지만, 이 줄을 그릴지는 호스트에 달려 있습니다(2.1.288 실측: 호출은 받아들여지지만 아무것도 그리지 않음). 이 줄에 의존하지 마세요. 표시는 그 호출이 진행되거나 거부될 때, 작업자의 다음 단계나 종료 때, 실행을 취소할 때 사라지며 체크포인트에 저장하지 않습니다.
-
-> **주의:** DAG 패널이 키보드 포커스를 가진 상태에서는 패널이 권한 대화 상자로 갈 Enter를 가져갈 수 있습니다. 현재 mod API에는 패널의 포커스를 해제하는 호출이 없어 자동으로 돌려줄 수 없습니다. 노드가 `승인 대기` 상태가 되면 `Esc`로 포커스를 프롬프트에 돌려준 뒤 대화 상자에 답하세요(`/dag`로 직접 연 패널은 `Esc`에 닫히며, `/dag`로 다시 열 수 있습니다).
-
-첫 웨이브 다음에 시작되는 노드는 Claude Code가 스트리밍 이벤트를 mod에 전달하지 않습니다. 그래서 이런 노드의 활동은 2초마다 노드 기록을 읽어 메시지 단위로 표시하고, stall 경고는 모델 대기가 5분을 넘을 때만 띄웁니다.
-
-
-| 키                          | 동작                                      |
-| -------------------------- | --------------------------------------- |
-| `n` / `p`                  | 다음 / 이전 노드 선택                           |
-| `d`                        | 상세 보기(task id, 보고서 경로, 답변)              |
-| `t`                        | DAG 뷰와 Tasks 뷰(DAG에 속하지 않은 서브에이전트) 전환   |
-| `c`                        | 끝난 실행 목록 펼치기·접기(실행이 둘 이상일 때)            |
-| `v`                        | 보기 전환: 자동 → 그래프 → 레인 → 타임라인(이 프로젝트에 저장) |
-| 탭 버튼 클릭                    | 그 보기로 바로 전환(이 프로젝트에 저장)                 |
-| `f`                        | 그래프 뷰에서 넓은 층 펼치기·접기                     |
-| `a` / `r`                  | 승인 대기 중인 실행을 승인 / 거절(승인 블록의 버튼과 같음)     |
-| 카드의 `[-]` / `[+]`          | 그 노드 펼치기·접기(이 프로젝트에 저장)                 |
-| 그래프를 클릭한 뒤 Tab / Shift-Tab | 다음 / 이전 노드 선택                           |
-| 그래프를 클릭한 뒤 Space / Enter   | 선택한 노드 펼치기·접기                           |
-| 그래프를 클릭한 뒤 ← / →           | 이전 / 다음 실행                              |
-| Esc                        | 프롬프트로 돌아가기(`/dag`로 연 패널은 닫힘)            |
-| 빈 프롬프트에서 `0`               | DAG 패널 열기(밴드 버튼)                        |
-| 빈 프롬프트에서 `1`–`5`           | 밴드에 보이는 그 번호의 노드를 선택한 채 패널 열기           |
-
-
-글자 단축키(`n` `p` `d` `t` `c` `v` `f`, 승인 대기 중인 실행이 보일 때는 `a` `r`도)는 패널이 키보드 포커스를 가진 동안 동작합니다. 프롬프트가 비어 있을 때 ctrl+x tab으로 패널에 포커스를 줍니다. mod의 Button 단축키는 숫자나 소문자 한 글자만 받으므로, Tab·Space·화살표는 그래프 영역을 클릭해 포커스를 준 뒤에만 동작합니다.
-
-패널을 직접 닫으면 자동으로 다시 열리지 않습니다. `/dag`나 밴드의 `0`으로 다시 엽니다.
-
-좁은 창에서는 패널이 프롬프트 위의 스크롤 영역으로 표시됩니다. 아래쪽 증거나 출처가 안 보이면 `ctrl+x tab`으로 패널에 포커스를 준 뒤 위·아래 화살표로 스크롤합니다.
-
-패널과 프롬프트 위 띠는 terminal과 desktop 화면에만 그려집니다. vscode, mobile 같은 다른 화면(알 수 없는 화면 포함)에서는 패널을 열지 않고, 노드가 끝날 때마다 짧은 진행 메시지를, 실행이 끝나면 기존 요약 메시지를 텍스트로 보냅니다.
-
-## 설정
-
-`/config`의 플러그인 항목에서 바꿉니다.
-
-
-| 키                              | 기본값       | 설명                                                                                                                |
-| ------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `auto_recovery`                | `true`    | 확신도 높은 Jev 실패 분류로 노드당 최대 2번 자동 재시도, 리뷰 FAIL은 실행당 한 번 리뷰 수정 라운드([자동 복구](#자동-복구))                                                               |
-| `jev_enabled`                  | `true`    | Jev의 카테고리 배정·도구 자동 승인 사용(키 또는 세션 모델 대체가 필요)                                                                       |
-| `jev_model_fallback`           | `true`    | 키가 없거나 TypeSafe API가 실패·시간 초과·오류 상태일 때 세션의 Sonnet 모델로 대신 판단. 사용량은 사용자의 Claude 요금제에 포함                             |
-| `jev_confidence`               | `0.9`     | TypeSafe API의 카테고리 배정과 모든 도구 승인·복구 판단을 자동 적용할 최소 확신도(0–1)                                                         |
-| `jev_model_routing_confidence` | `0.8`     | 세션 모델이 고른 카테고리를 적용할 최소 확신도(0–1). 도구 승인·복구에는 쓰지 않음                                                                 |
-| `jev_permission_scope`         | `all`     | Jev 도구 승인 범위. `all`은 모든 `ask` 판정, `dag`는 DAG 노드 작업자의 도구 호출만 평가                                                    |
-| `enforcement`                  | `auto`    | 메인 대화의 DAG 강제 수준([강제](#강제)). `strict`, `auto`, `guide`, `off` 중 하나. `auto`는 Jev가 프롬프트마다 DAG와 직접 실행을 고르고(실행 방식, 확신도 0.8 이상의 DAG 판단만 `strict` 규칙, 확신도 미달이나 Jev를 쓸 수 없으면 직접 실행), `/dag enforce`로 세션 중에 바꿈 |
-| `language`                     | `en`      | 패널 언어(`en`, `ko`)                                                                                                 |
-| `max_concurrent`               | `8`       | 실행 하나에서 동시에 도는 노드 수                                                                                               |
-| `retention_days`               | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
-| `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
-| `start_approval`               | `off`     | `always`면 대화형 세션에서 모델이 시작한 실행을 만들되 시작하지 않고 사용자의 승인을 기다림([실행 규칙](#실행-규칙)). 사용자가 입력한 `/dag run`과 비대화형 세션은 기다리지 않음. `/dag approval`로 덮어쓴 값은 다음 `/reload-plugins`까지만 유지되고, `off`·`always`가 아닌 값은 `off`로 처리 |
-| `anti_slop_scan`               | `true`    | Edit·Write가 추가한 줄을 anti-slop 패턴으로 검사해 걸린 것을 모델에게 알림([의미 없는 코드 차단](#의미-없는-코드-차단-anti-slop)). 모델 호출 없음 |
-| `anti_slop_skip`               | `[]`      | 스캔이 보고하지 않을 패턴 id 목록. 예: 이유 없는 캐스트를 허용하는 저장소의 `unreasoned-assertion` |
-
-
-### 보관 기간
-
-세션을 시작할 때 `retention_days`보다 오래된 다음 항목을 지웁니다. 현재 세션과 활성(60초 안에 갱신한) 세션의 것은 남깁니다.
-
-- 다른 세션의 종료(또는 일시 정지)된 실행 체크포인트 `runs/<run_id>.json`과 그 보고서·검증 증거 폴더 `runs/<run_id>/`
-- 어느 체크포인트에도 속하지 않는 `runs/dag_*` 폴더(시각과 관계없이 지움. 같은 이름의 `.json`이 있으면 읽을 수 없어도 남김)
-- 남은 실행이 참조하지 않는 세션의 `context/<session>.json`, `decisions/<session>.json`(파일 수정 시각 기준)
-- 갱신이 멈춘 세션의 세션 기록(플러그인 저장소 키)
-
-삭제 실패는 로그에 남기고 세션 시작은 계속합니다.
-
-## DAG 형태 평가
-
-`eval/`은 이 플러그인이 실제로 다양한 DAG 형태를 만드는지 측정하는 하네스입니다. 각 시나리오는 작은 고정 파일과 DAG를 언급하지 않는 평범한 작업 문장, 결과 확인 명령으로 이루어져 있고, 특정 토폴로지를 유도하도록 골랐습니다.
-
-
-| 시나리오              | 기대 형태                |
-| ----------------- | -------------------- |
-| `single-edit`     | DAG 없이 직접 실행         |
-| `parallel-files`  | 독립 병렬                |
-| `map-reduce-docs` | 팬아웃 → 팬인             |
-| `pipeline-stats`  | 체인                   |
-| `diamond-app`     | 다이아몬드                |
-| `debug-fix`       | DAG 없이 직접 실행         |
-| `wide-harvest`    | 샤딩 팬아웃(파일 450개) → 집계 |
-| `research-write`  | 조사 병렬 → 작성           |
-
-러너는 `enforcement`를 지정하지 않아 기본값 `auto`로 돕니다. 기대가 "DAG 없이 직접 실행"(`eval/scenarios.ts`의 `expect: 'direct'`)인 시나리오는 Jev가 작은 요청으로 판단해 DAG 실행이 하나도 만들어지지 않을 때만 일치로 세고, 결과 표의 형태 열에는 `no run`이 나옵니다.
-
-
-```bash
-bun eval/run.ts --list
-bun eval/run.ts [--only id,id] [--concurrency 4] [--model sonnet] [--timeout-min 15] [--keep] [--enforcement strict]
-```
-
-러너는 시나리오마다 `/tmp/dag-shapes/<stamp>/<id>`에 고정 파일을 만들어 첫 커밋 하나가 있는 git 저장소로 초기화하고 `claude -p --plugin-dir <이 저장소>`를 실행합니다(현재 계정의 사용량을 씁니다). 생성되는 검토 노드(`review-spec`, `review-standards`)가 `git diff`로 변경을 읽기 때문입니다. 머리말에 `Fixtures: git repositories with one initial commit.`이 없는 결과(스탬프 `20261010113334`까지)는 git 저장소가 아닌 고정 파일에서 측정한 것입니다. 끝나면 체크포인트의 정의로 노드 수, 깊이, 레이어 폭, 팬인 노드, 검증 노드, 경고, 카테고리, 형태(전체와 검증 노드를 뺀 생산자 형태)를 측정하고, 세션 기록에서 스킬 로드가 start보다 먼저였는지와 거부 횟수를 확인하며, 결과 확인 명령을 실행합니다. 결과는 `eval/results/<stamp>.md`와 `.json`에 저장되고, 고정 파일 디렉터리는 `--keep`이 없으면 지워집니다. `--enforcement <수준>`은 `--settings`의 `pluginConfigs`로 그 실행의 `enforcement`를 정합니다. 기본값이 `auto`가 된 뒤로는 작은 시나리오가 직접 실행될 수 있으므로, `strict`에서 찍은 기준선과 비교할 때는 `--enforcement strict`를 줍니다. 머리말에 `Enforcement: strict.`가 붙습니다.
-
-결과 표의 `AskUserQuestion calls` 열(`refusals (planning/tools)` 바로 뒤)은 시나리오 세션 기록의 메인 대화에서 `AskUserQuestion` 도구를 호출한 횟수입니다(서브에이전트 호출은 세지 않습니다). `claude -p`는 비대화형 세션이라 프로토콜이 사용자에게 묻지 말라고 알리므로 기대값은 0이고, 0보다 크면 모델이 물으려 했다는 뜻입니다. 사용자의 답이 있어야 하는 인터뷰(`interview`, `pm`)는 `claude -p`로 측정할 수 없습니다.
-
-## 상태줄 HUD
-
-`statusline/`은 플러그인과 따로 쓰는 Claude Code 상태줄(`statusLine`) 스크립트입니다. 플러그인은 메인 상태줄을 정할 수 없어서(플러그인 `settings.json`은 `agent`와 `subagentStatusLine`만 받습니다) 사용자 설정에 직접 넣습니다.
-
-```
-Opus 5.5 xhigh │ claude-workflow-mods │ ⎇ main ↑1
-ctx ▰▰▰▰▰▰▰▰▱▱ 84% 840k/1M │ 5h 91% ↻2h57m │ cache 2m
- ⚠ 컨텍스트 84% · 품질 저하 구간 → /compact 또는 새 세션  │  ⚠ 캐시 2분 후 만료 · 이어갈 거면 지금 보내세요
-```
-
-- 첫 줄은 모델과 effort(fast 모드면 `fast`), 프로젝트와 하위 디렉터리, git 브랜치와 ahead/behind, 워크트리, PR 번호와 리뷰 상태, `--agent` 이름, 기본이 아닌 출력 스타일입니다. 세션 제목, 비용, 경과 시간, 변경 줄 수, 변경 파일 수는 그리지 않습니다.
-- 둘째 줄은 컨텍스트, 사용 한도, 프롬프트 캐시입니다.
-  - 컨텍스트는 막대, 사용률, 토큰/창 크기입니다. 50% 이상 노란색, 65% 초과 빨간색으로 답의 품질이 떨어지는 구간을 보여 줍니다.
-  - 5시간·7일 사용 한도(게이트웨이의 `spend` 포함)는 70% 미만이면 숨기고, 70% 이상인 창만 초기화까지 남은 시간과 함께 노란색, 85% 이상 빨간색으로 그립니다.
-  - 캐시는 식기까지 남은 시간입니다. 1시간 TTL은 10분 이하 노란색, 3분 이하 빨간색이고, 5분 TTL은 2분과 1분이 기준입니다. 이미 식었으면 빨간 `cold`이고, 다음 요청이 캐시를 처음부터 다시 씁니다.
-  - 캐시 미스가 나면 그다음 요청 전까지(최대 10분) 캐시 바로 옆에 빨간 바탕으로 원인이 붙습니다: `cache 50m  ⚠ 캐시 깨짐: 1시간 넘게 쉬어 만료`. 미스는 Claude Code가 판정합니다. 요청이 캐시에서 읽어야 했던 양의 95%보다 적게 읽고 모자란 양이 2,000토큰 이상이면 미스입니다(압축이나 오래된 도구 결과 정리 직후는 제외). 다음 요청은 미스가 다시 쓴 캐시를 읽으므로 그때 표시가 사라집니다. 세션의 요청 수는 실행 사이에 `$TMPDIR/claude-hud-<session_id>.json`에 기억합니다. 원인은 Claude Code가 진단한 이름을 한국어로 옮긴 것입니다(`도구 목록 바뀜 (+2 −0)`, `모델 바뀜`, `effort 바뀜`, `auto 모드 전환` 등). 모델·effort·auto 모드(shift+tab)·thinking 전환, MCP·플러그인 도구 변경은 대화 중에 바꾸면 캐시를 깹니다. 폭이 좁으면 7일·5시간 한도 다음으로 빠집니다.
-- 셋째 줄은 경고가 있을 때만 빨간 바탕으로 나타납니다.
-  - 컨텍스트 80% 이상: `/compact`나 새 세션을 권합니다.
-  - 캐시가 빨간 구간(1시간 TTL 3분 이하, 5분 TTL 1분 이하): 이어갈 거면 지금 보내라고 알립니다.
-- 터미널 폭(`COLUMNS`)을 넘으면 덜 중요한 항목(출력 스타일, 7일 한도, 5시간 한도, 캐시 미스 순)부터 빼고, 남은 줄은 끝을 자릅니다. `NO_COLOR`가 있으면 색을 쓰지 않습니다.
-- 값이 아직 없는 항목(첫 응답 전의 사용 한도, 캐시)은 그리지 않습니다. git은 `--no-optional-locks`와 `--untracked-files=no`로 500ms 안에서만 읽습니다.
-
-```bash
-bun statusline/install.ts              # ~/.claude/statusline-hud.mjs를 만들고 statusLine을 그 파일로 바꿈
-bun statusline/install.ts --uninstall  # 설치 전 statusLine으로 되돌리고 statusline-hud.mjs를 지움
-bun statusline/install.ts --print      # 파일을 쓰지 않고 넣을 값만 출력
-```
-
-설치는 `hud.ts`와 그것이 가져오는 코드를 `Bun.build`로 한 파일로 묶어 `~/.claude/statusline-hud.mjs`에 씁니다. 설정 명령은 이 파일을 가리키므로 설치한 뒤에는 저장소를 옮기거나 지워도 HUD가 돌고, `statusline/`을 고쳤다면 다시 설치해야 반영됩니다. 기존 설정 파일은 `settings.json.hud-backup`으로, 기존 `statusLine` 값은 `statusline-hud.previous.json`으로 보관합니다(모두 `~/.claude/`, `CLAUDE_CONFIG_DIR`을 따름). 설치는 `bun`으로 실행해야 하고, 명령에는 `bun`의 절대 경로가 들어갑니다. 묶은 파일은 Node 24로도 돕니다. `refreshInterval: 60`이라 세션이 쉬고 있어도 남은 시간과 경고가 1분마다 갱신됩니다. 설정 파일이 바뀌면 열려 있는 세션에도 바로 적용됩니다.
-
-### Orca 연동
-
-HUD는 받은 입력을 바이트 그대로 `~/.orca/agent-hooks/claude-statusline.sh`에 넘깁니다. Orca가 상태줄로 설치하는 이 스크립트는 화면에 아무것도 출력하지 않고 사용 한도와 세션 정보를 Orca 앱으로 보내므로, HUD로 바꿔도 Orca 연동은 그대로입니다. 넘기는 프로세스는 분리(detached)해서 띄우므로 HUD는 Orca의 전송(최대 1.5초)을 기다리지 않고, Claude Code가 다음 갱신에서 HUD를 끊어도 전송은 끝까지 갑니다. `refreshInterval: 60` 때문에 쉬고 있는 세션도 1분마다 Orca로 보냅니다(Orca 스크립트는 15초 안의 반복만 거릅니다).
-
-- 다른 스크립트로 넘기려면 `CLAUDE_HUD_CHAIN=<스크립트 경로>`를, 끄려면 `CLAUDE_HUD_CHAIN=off`를 `settings.json`의 `env`에 넣습니다. 스크립트가 없으면 넘기지 않습니다.
-- Orca는 `statusLine.command`에 `agent-hooks/claude-statusline`이 들어 있으면 자기가 설치한 값으로 보고 다시 쓰거나 지웁니다. 그 밖의 명령은 사용자 값으로 보고 건드리지 않습니다. 그래서 Orca 경로는 명령이 아니라 `hud.ts` 안에 있습니다. 명령에 이 경로를 넣지 마세요.
-
-받은 JSON을 보려면 `CLAUDE_HUD_DEBUG=<파일>`을 줍니다. 손으로 확인할 때는 `echo '{"model":{"display_name":"Opus"}}' | bun statusline/hud.ts`처럼 실행합니다.
-
-## 개발
-
-```bash
-claude plugin validate .
-claude plugin test
-bunx -p typescript@5 tsc -p . --noEmit
-```
-
-이 저장소는 anti-slop 패턴 네 가지를 일부러 씁니다. 스캐너는 로컬 `AGENTS.md`의 `anti-slop allow:` 줄로 이들을 건너뛰고, 검토 노드는 이 문단을 저장소 규칙으로 읽습니다.
-
-- `conditional-empty-spread`: `...(x ? { k: x } : {})`는 `''`, `0`, `false`도 빼므로 `k: x`로 바꾸면 동작이 달라집니다.
-- `two-pass-filter-map`: 노드 수십 개짜리 배열이라 한 번에 도는 이득이 없고, 읽기는 `filter().map()`이 더 쉽습니다.
-- `open-dictionary`: `Record<string, unknown>`은 손으로 짠 파서(`definition.ts`, `yaml.ts`, `verification.ts`)의 작업 타입입니다.
-- `unreasoned-assertion`: 호스트 경계의 `as`와, `noUncheckedIndexedAccess`에서 코드가 이미 범위를 확인한 조회의 `as`입니다. 검사형으로 같은 동작을 낼 수 있는 곳(스택 `pop`, 문자 조회, 두 배열 비교, 그래프 레이아웃)은 2026-10-12에 바꿨습니다.
-
-엔진 로직은 `hooks/engine/`, 패널 모델은 `hooks/ui/`에 `$`를 쓰지 않는 순수 함수로 있습니다.  
-mods API 호출은 모두 `hooks/register.ts`에 있습니다.
+- [사용법과 설정 레퍼런스](docs/reference.md): 전체 명령, DAG 정의, 검증, 검토·보안 검토, 복구, 세션 인계, 패널 조작.
+- [개발 안내](docs/development.md): 개발 규칙, 검사 명령, DAG 형태 평가.
+- [상태줄 HUD](docs/statusline.md): 플러그인과 별도로 설치하는 상태줄과 Orca 연동.
