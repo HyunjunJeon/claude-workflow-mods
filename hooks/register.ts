@@ -41,7 +41,7 @@ import {
   expandNodes,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
-import { familiesOf, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
@@ -184,6 +184,8 @@ const pendingStarts: string[] = []
 let extraAllowed: ReadonlySet<string> = new Set()
 let antiSlopScan = true
 let antiSlopSkip: ReadonlySet<string> = new Set()
+// The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
+let repositoryAllows: ReadonlySet<string> | undefined
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
 let contextOnDisk = false
@@ -633,6 +635,11 @@ async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
   } catch {
     return ''
   }
+}
+
+async function slopSkips($: EngineInterface): Promise<ReadonlySet<string>> {
+  repositoryAllows ??= new Set((await Promise.all(RULE_FILES.map(name => readOrEmpty($, `${projectRoot}/${name}`)))).flatMap(allowedPatterns))
+  return new Set([...antiSlopSkip, ...repositoryAllows])
 }
 
 async function persistContext($: EngineInterface): Promise<void> {
@@ -2490,6 +2497,7 @@ export function register(on: On, options: PluginOptions) {
     paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
     keepAliveQueued = false
+    repositoryAllows = undefined
     // A new process: the conversation it serves (a resume) has not been told this process's state yet.
     forgetDelivered()
     await restorePlanningLoaded($)
@@ -2919,13 +2927,15 @@ export function register(on: On, options: PluginOptions) {
   // rule may need the lines around the edit (a SAFETY: comment above it, the next catch). The tool has already run by
   // the time the scan does, so a scan that throws returns the tool's answer untouched.
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
-    if (!antiSlopScan || (e.tool !== 'Edit' && e.tool !== 'Write') || familiesOf(e.file_path).length === 0) return next(e)
+    if (e.tool !== 'Edit' && e.tool !== 'Write') return next(e)
+    if (RULE_FILES.some(name => e.file_path === `${projectRoot}/${name}`)) repositoryAllows = undefined
+    if (!antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
     const before = await readOrEmpty($, e.file_path)
     const reply = await next(e)
     if (reply.deny !== undefined || reply.isError) return reply
     try {
       const after = e.tool === 'Write' ? e.content : await readOrEmpty($, e.file_path)
-      const hits = scanSlop(e.file_path, before, after, antiSlopSkip)
+      const hits = scanSlop(e.file_path, before, after, await slopSkips($))
       if (hits.length === 0) return reply
       const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
       return { ...reply, context: [...(reply.context ?? []), slopNote(shown, hits)] }

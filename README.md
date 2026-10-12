@@ -367,7 +367,7 @@ verify:
 
 `skills/anti-slop/`은 지워도 동작이 그대로인 코드와, 코드가 이미 아는 타입 정보를 버리는 코드를 막는 규율입니다. 모든 언어에 적용하고 예시는 TS·JS·Python·Go·Java·Rust·Ruby로 듭니다. 세 겹으로 동작합니다.
 
-1. 스캔: Edit이나 Write가 끝나면 플러그인이 그 호출이 추가한 줄만 정규식으로 검사하고, 걸린 패턴을 도구 결과 뒤에 모델이 읽는 컨텍스트로 붙입니다. 메인 대화와 DAG 노드 모두에 적용되고 모델 호출이 없습니다. 모양만 보므로 예외에 해당하면 모델이 그 예외를 밝히고 코드를 남깁니다. `anti_slop_scan`으로 끄고 `anti_slop_skip`으로 패턴을 뺍니다.
+1. 스캔: Edit이나 Write가 끝나면 플러그인이 그 호출이 추가한 줄만 정규식으로 검사하고, 걸린 패턴을 도구 결과 뒤에 모델이 읽는 컨텍스트로 붙입니다. 메인 대화와 DAG 노드 모두에 적용되고 모델 호출이 없습니다. 모양만 보므로 예외에 해당하면 모델이 그 예외를 밝히고 코드를 남깁니다. `anti_slop_scan`으로 끄고 `anti_slop_skip`으로 패턴을 뺍니다. 저장소 하나에서만 빼려면 루트의 `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` 중 하나에 `anti-slop allow: <패턴 id>, ...` 줄을 쓰고 이유를 함께 적습니다. 프로젝트 `.claude/settings.json`의 `pluginConfigs`는 플러그인에 전달되지 않습니다(2026-10-12 측정, `--settings` 파일은 전달됨).
 2. 작성: 계획 스킬은 코드를 쓰거나 고치는 노드의 `load_skills`에 `dag-workflow:anti-slop`을 넣습니다. 노드는 보고하기 전에 자기 diff를 목록 전체와 대조해 고치고, 남긴 예외는 `## Output`에 한 줄씩 적습니다.
 3. 검토: `review`로 생성되는 `review-standards` 노드는 이 스킬을 항상 불러옵니다. diff가 증명하는 하드 패턴은 `## Rule breaches`에 `anti-slop: <패턴> - <file:line> - <증명>; <고칠 방법>`으로 적히고 `Standards verdict: FAIL`이 됩니다. `auto_recovery`가 켜져 있으면 [리뷰 수정 라운드](#자동-복구)가 지적된 생산 노드를 실행당 한 번 다시 실행합니다.
 

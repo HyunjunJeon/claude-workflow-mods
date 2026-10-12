@@ -24,7 +24,8 @@ Generated code is prone to it because each piece looks reasonable on its own.
 ## Scope
 
 - Only lines the change adds or edits count. Code outside the change is never a finding and never a reason to edit.
-- **The repository overrides.** A documented repository rule (CLAUDE.md, AGENTS.md, CONTRIBUTING and similar) that endorses a pattern suppresses it. Surrounding code that already uses a pattern is not an exemption.
+- **Never change behavior.** Every fix keeps what the code does for every input, including edge values (`''`, `0`, `false`, an empty list) and data read from disk or the host. A fix that would change behavior is not a fix; leave the code and name the pattern.
+- **The repository overrides.** A documented repository rule (CLAUDE.md, AGENTS.md, CONTRIBUTING and similar) that endorses a pattern suppresses it. A line `anti-slop allow: <pattern ids>` in the root CLAUDE.md, AGENTS.md or CONTRIBUTING.md turns those patterns off in the scan too. Surrounding code that already uses a pattern is not an exemption.
 - What a formatter, linter or compiler already enforces in the repository is not a finding.
 - The examples name TypeScript (TS), JavaScript (JS), Python, Go, Java, Rust and Ruby. Apply each rule to the same construct in any language; a language without the construct is outside that rule.
 

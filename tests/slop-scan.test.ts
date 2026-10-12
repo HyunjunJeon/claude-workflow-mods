@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { addedLines, codeView, familiesOf, MAX_NOTED_HITS, MAX_SCAN_LINE, scanSlop, slopNote, type SlopHit } from '../hooks/engine/slop-scan.ts'
+import { addedLines, allowedPatterns, codeView, familiesOf, MAX_NOTED_HITS, MAX_SCAN_LINE, scanSlop, slopNote, type SlopHit } from '../hooks/engine/slop-scan.ts'
 
 // [file, new text, the patterns the scan reports]. Every pattern has at least one case it must report and one look-alike
 // it must leave alone, because a false hit reaches the model after every edit.
@@ -75,6 +75,7 @@ const CASES: [string, string, string[]][] = [
   ['A.java', 'if (READY) start();\nint n = (int) total;\nrun(Config.load());', []],
   ['a.ts', '// @ts-ignore\nload()', ['suppression-without-reason']],
   ['a.ts', '// @ts-expect-error -- the host typings miss this field\nload()', []],
+  ['a.ts', 'const directive = /@ts-ignore\\b/', []],
   ['a.js', '// eslint-disable-next-line no-console\nlog()', ['suppression-without-reason']],
   ['a.js', '// eslint-disable-next-line no-console -- the CLI prints its result\nlog()', []],
   ['a.py', 'x = f()  # type: ignore', ['suppression-without-reason']],
@@ -114,6 +115,11 @@ test('only lines the edit adds are reported, so code it kept or re-indented is n
 
 test('a minified or generated file is not scanned', () => {
   expect(scanSlop('a.min.js', '', `debugger;${'x'.repeat(MAX_SCAN_LINE)}`)).toEqual([])
+})
+
+test('a rule file allows patterns on anti-slop allow lines, in a list item or not', () => {
+  const rules = '# Rules\n- anti-slop allow: `open-dictionary`, two-pass-filter-map (parsers)\nAnti-slop allow: top-type\nanti-slop is great: debug-leftover'
+  expect(allowedPatterns(rules)).toEqual(['open-dictionary', 'two-pass-filter-map', 'top-type'])
 })
 
 test('a pattern the user skips is never reported', () => {

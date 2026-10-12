@@ -65,3 +65,18 @@ test('anti_slop_skip drops the patterns it names and keeps the rest', { options:
   expect(reply.context).toEqual([expect.stringContaining('debug-leftover')])
   expect(reply.context?.[0]).not.toContain('top-type')
 })
+
+test('a pattern the repository allows in AGENTS.md is not reported, and editing AGENTS.md is read again', async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.files.set('/work/AGENTS.md', 'anti-slop allow: top-type\n')
+  h.readOnce.set(FILE, 'a\n')
+  h.files.set(FILE, 'function handle(input: any) {}\n')
+  const allowed = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'a', new_string: 'function handle(input: any) {}' })
+  expect(allowed.context).toBeUndefined()
+  h.files.set('/work/AGENTS.md', '# no exceptions\n')
+  await $.tool.call({ tool: 'Write', file_path: '/work/AGENTS.md', content: '# no exceptions\n' })
+  h.readOnce.set(FILE, 'a\n')
+  const reported = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'a', new_string: 'function handle(input: any) {}' })
+  expect(reported.context).toEqual([expect.stringContaining('top-type')])
+})

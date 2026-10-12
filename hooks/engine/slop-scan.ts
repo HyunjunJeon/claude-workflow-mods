@@ -64,6 +64,9 @@ const differ = (match: RegExpExecArray) => match[1] !== match[2]
 
 const balanced = (text: string) => (text.match(/\{/g) ?? []).length === (text.match(/\}/g) ?? []).length
 
+// A directive counts only inside a comment, not in a string or a regular expression that mentions it.
+const inComment = (match: RegExpExecArray, scan: Scan) => /\/\/|\/\*|^[ \t]*\*/.test(scan.raw.slice(scan.raw.lastIndexOf('\n', match.index - 1) + 1, match.index))
+
 // The code view blanks comments, so a match there can span one; the raw text tells whether it did.
 const uncommented = (match: RegExpExecArray, scan: Scan) => !/\/\/|\/\*|#/.test(scan.raw.slice(match.index, match.index + match[0].length))
 
@@ -222,8 +225,8 @@ const RULES: readonly Rule[] = [
     keep: (match, scan, line) => !/\b(?:if|while|for|switch|catch|synchronized)[ \t]*$/.test(lineBefore(scan, match)) && !reasoned(scan, line),
   },
   { pattern: 'unreasoned-assertion', in: ['rs'], view: 'code', regex: /\bunsafe[ \t]*\{/g, keep: (match, scan, line) => !reasoned(scan, line), fix: REASON },
-  { pattern: 'suppression-without-reason', in: ['ts'], view: 'raw', regex: /@ts-ignore\b|@ts-expect-error[ \t]*(?:\*\/)?[ \t]*$/gm, fix: SUPPRESS },
-  { pattern: 'suppression-without-reason', in: JS, view: 'raw', regex: /\beslint-disable(?:-next-line|-line)?\b(?![^\n]*--)/g, fix: SUPPRESS },
+  { pattern: 'suppression-without-reason', in: ['ts'], view: 'raw', regex: /@ts-ignore\b|@ts-expect-error[ \t]*(?:\*\/)?[ \t]*$/gm, keep: inComment, fix: SUPPRESS },
+  { pattern: 'suppression-without-reason', in: JS, view: 'raw', regex: /\beslint-disable(?:-next-line|-line)?\b(?![^\n]*--)/g, keep: inComment, fix: SUPPRESS },
   { pattern: 'suppression-without-reason', in: ['py'], view: 'raw', regex: /#[ \t]*(?:type|pyright):[ \t]*ignore\b(?![ \t]*\[)|#[ \t]*noqa\b(?![ \t]*:)/g, fix: SUPPRESS },
   { pattern: 'suppression-without-reason', in: ['java'], view: 'code', regex: /@SuppressWarnings\b/g, keep: (match, scan, line) => !explained(scan, line), fix: 'say why in a comment on the line or directly above, or fix the code' },
   { pattern: 'suppression-without-reason', in: ['go'], view: 'raw', regex: /\/\/[ \t]*nolint\b(?!:)/g, fix: SUPPRESS },
@@ -247,6 +250,16 @@ const RULES: readonly Rule[] = [
   { pattern: 'module-mock', in: ['java'], view: 'code', regex: /\b(?:Mockito\.)?mock(?:Static|Construction)[ \t]*\(|\bPowerMockito\./g, fix: 'inject the dependency and pass a fake; static mocking rewires classes behind the code' },
   { pattern: 'module-mock', in: JS, view: 'code', regex: /\b(?:vi|jest)\.(?:mock|doMock|unstable_mockModule)[ \t]*\(/g, fix: 'pass the dependency in and hand the test a fake at that seam' },
 ]
+
+// The repository rule files whose `anti-slop allow:` lines the scan honours. A project's settings cannot carry plugin
+// options (measured 2026-10-12: pluginConfigs in a project's .claude/settings.json were ignored, a --settings file was
+// read), so a repository documents its exceptions where its other rules live.
+export const RULE_FILES = ['CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md']
+
+// The pattern ids a rule file allows, from lines such as `anti-slop allow: open-dictionary, two-pass-filter-map`.
+export function allowedPatterns(text: string): string[] {
+  return [...text.matchAll(/^[ \t>*-]*anti-slop allow:[ \t]*([^\n]*)$/gim)].flatMap(match => (match[1] ?? '').split(/[\s,`]+/).filter(id => /^[a-z]+(?:-[a-z]+)*$/.test(id)))
+}
 
 // The lines of `after` that `before` does not account for, 1-based. Lines compare trimmed, so re-indenting is no change,
 // and each line of `before` accounts for one equal line of `after`. Blank lines are never added.
