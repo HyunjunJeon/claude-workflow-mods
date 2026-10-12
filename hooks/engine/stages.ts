@@ -10,6 +10,7 @@ export const REVIEW_SPEC_ID = 'review-spec'
 export const REVIEW_STANDARDS_ID = 'review-standards'
 export const DEFAULT_REVIEW_CATEGORY = 'unspecified-low'
 export const REVIEW_STANDARDS_SKILL = 'dag-workflow:review-standards'
+export const ANTI_SLOP_SKILL = 'dag-workflow:anti-slop'
 export const REVIEW_SECURITY_ID = 'review-security'
 export const SECURE_CODING_SKILL = 'dag-workflow:secure-coding'
 const MAX_RULE_FILES = 20
@@ -213,9 +214,10 @@ function reviewStandardsPrompt(definition: Definition, review: ReviewStage, node
     ...changeBlock(nodes),
     sources,
     `Apply the smell baseline from the ${REVIEW_STANDARDS_SKILL} skill you loaded, and label every smell a judgment call, never a breach. Repository rules override the baseline; skip what a linter or compiler already enforces. If the baseline is not in your context, write "baseline unavailable" and judge only documented rules.`,
+    `Apply the ${ANTI_SLOP_SKILL} skill you loaded to the lines the change adds or edits: list it under ## Rule sources and record each hard pattern the diff proves under ## Rule breaches as \`anti-slop: <pattern> - <file:line> - <proof>; <fix>\`, and its readability calls under ## Judgment calls. Repository rules override it. If it is not in your context, write "anti-slop unavailable" under ## Rule sources.`,
     `DELIVERABLE: ${notes}, written once and in full, with these sections in this order, each \`none\` when empty:`,
     'Keep the file terse: one line per rule source, breach and judgment call; no transcripts or code listings.',
-    '## Rule sources - the files you reviewed against, or `none - baseline only`.',
+    '## Rule sources - the files you reviewed against, or `none - baseline only` when there are none, then the anti-slop skill.',
     '## Rule breaches - each breach of a documented rule, quoting the rule and its source file, with the evidence as file:line.',
     '## Judgment calls - baseline smells, each labelled a judgment call, with file:line.',
     `End the file with exactly one verdict line as its LAST line and write nothing after it: \`${STANDARDS_PASS}\` when Rule breaches is none (judgment calls alone pass); otherwise \`${STANDARDS_FAIL}\`. Write the PASS line nowhere else in the file.`,
@@ -429,7 +431,7 @@ function reviewNodes(definition: Definition, review: ReviewStage, nodes: NodeDef
         { kind: 'file', path: standards, lastLine: STANDARDS_PASS },
         { kind: 'file', path: standards, contains: '## Rule breaches' },
       ]),
-      load_skills: [REVIEW_STANDARDS_SKILL],
+      load_skills: [REVIEW_STANDARDS_SKILL, ANTI_SLOP_SKILL],
     },
     ...(review.security ? securityNodes(definition, review, review.security, nodes) : []),
   ]

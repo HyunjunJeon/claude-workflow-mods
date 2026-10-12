@@ -136,7 +136,7 @@ that prints OK when run with python3 test_app.py.
 - `SKILL.md`: 언제 쓰나, 정의 형태(노드 필드, dependsOn으로 결과가 흐르는 방식), 목표 우선, 실행·복구(retry/amend/send/cancel)·감독 방법, 메인 대화가 할 수 있는 일
 - `SKILL.md`의 `## Alignment` 단계: 계획 읽기 뒤, 실행 계획을 쓰기 전에 질문 라운드를 최대 한 번 가집니다. 산출물 종류(예: CLI인지 문서인지), 범위(들어가고 빠지는 파일·구성요소), 완료 기준 중 하나가 정말 모호하고 Read나 `rg`로도 풀리지 않을 때만 묻습니다. 사실은 찾아보고 묻지 않으며, 모호한 것이 없으면 조용히 건너뜁니다. 라운드는 AskUserQuestion 한 번에 번호 붙인 질문 4개까지이고, 질문마다 추천 답을 첫 옵션으로 두어 "예"만 해도 받아들여집니다. 주입된 프로토콜이 비대화형 세션이라고 알리면 라운드를 건너뛰고 스스로 결정하며 가정은 `definition.goal`과 노드 프롬프트에 적습니다. 요청이 크고 모호하면 `/dag-workflow:interview`나 `/dag-workflow:pm`을 제안할 뿐 모델이 직접 부르지는 않습니다. 답을 받은 뒤 확정한 목표는 `definition.goal`에, 완료 기준은 `verify`에 넣습니다.
 - `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`)와 선택형 보안 축(`review-security`), 안전하지만 틀린 산출물 점검표
-- 노드용 스킬 `skills/debugging/`, `skills/review-standards/`, `skills/secure-coding/`, `skills/testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 시큐어코딩 관점·검증·집계, 테스트)입니다.
+- 노드용 스킬 `skills/anti-slop/`, `skills/debugging/`, `skills/review-standards/`, `skills/secure-coding/`, `skills/testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:debugging"]`)로 불러오는 작업 규율(의미 없는 코드 차단, 디버깅, 표준 리뷰, 시큐어코딩 관점·검증·집계, 테스트)입니다.
 
 계획 스킬은 검증도 묶어서 하게 합니다. 관련 변경은 한 단계 실행으로 묶고 끝에 검증 단계 하나(코드는 검토 한 쌍, 곧 `review-spec`과 `review-standards`)만 둡니다. 작은 변경마다 검토 한 쌍을 붙이지 않고, 단계 전체는 종단 시나리오 테스트로 증명합니다. 검토 한 쌍과 커밋은 정의의 `review`와 `commit` 필드로 선언하면 플러그인이 노드로 만들어 주므로 손으로 쓰지 않습니다([검토와 커밋 단계](#검토와-커밋-단계)).
 
@@ -363,6 +363,33 @@ verify:
 
 `review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `security`가 있으면 `review-security`, `security-<관점>`, `security-verify-`로 시작하는 id도 마찬가지입니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
 
+#### 의미 없는 코드 차단 (anti-slop)
+
+`skills/anti-slop/`은 지워도 동작이 그대로인 코드와, 코드가 이미 아는 타입 정보를 버리는 코드를 막는 규율입니다. 모든 언어에 적용하고 예시는 TS·JS·Python·Go·Java·Rust·Ruby로 듭니다. 세 겹으로 동작합니다.
+
+1. 스캔: Edit이나 Write가 끝나면 플러그인이 그 호출이 추가한 줄만 정규식으로 검사하고, 걸린 패턴을 도구 결과 뒤에 모델이 읽는 컨텍스트로 붙입니다. 메인 대화와 DAG 노드 모두에 적용되고 모델 호출이 없습니다. 모양만 보므로 예외에 해당하면 모델이 그 예외를 밝히고 코드를 남깁니다. `anti_slop_scan`으로 끄고 `anti_slop_skip`으로 패턴을 뺍니다.
+2. 작성: 계획 스킬은 코드를 쓰거나 고치는 노드의 `load_skills`에 `dag-workflow:anti-slop`을 넣습니다. 노드는 보고하기 전에 자기 diff를 목록 전체와 대조해 고치고, 남긴 예외는 `## Output`에 한 줄씩 적습니다.
+3. 검토: `review`로 생성되는 `review-standards` 노드는 이 스킬을 항상 불러옵니다. diff가 증명하는 하드 패턴은 `## Rule breaches`에 `anti-slop: <패턴> - <file:line> - <증명>; <고칠 방법>`으로 적히고 `Standards verdict: FAIL`이 됩니다. `auto_recovery`가 켜져 있으면 [리뷰 수정 라운드](#자동-복구)가 지적된 생산 노드를 실행당 한 번 다시 실행합니다.
+
+등급은 두 가지입니다. 하드는 지우거나 단순하게 바꿔도 동작이 그대로라는 것, 또는 버린 타입 정보를 diff로 증명할 수 있는 패턴입니다. 판단은 가독성(Clean Code) 항목과, 증명보다 읽기가 필요한 세 패턴(코드를 되풀이하는 주석, 일어날 수 없는 상태를 막는 가드, 아직 아무도 필요로 하지 않는 추상화)입니다. 판단 항목도 작성 노드는 고쳐야 하지만, 검토에서는 `## Judgment calls`에만 남고 판정을 FAIL로 만들지 않습니다. 주석 한 줄 때문에 수정 라운드(검토 노드 하나에 150-230초)가 돌지 않게 하려는 것입니다.
+
+변경이 추가하거나 고친 줄만 봅니다. 저장소 규칙 문서(CLAUDE.md, AGENTS.md, CONTRIBUTING 등)가 허용한 패턴과 포매터·린터·컴파일러가 이미 잡는 것은 제외합니다. 포매팅, 함수 길이·인자 수 같은 고정 숫자 제한(AI가 한 번만 쓰는 도우미 함수로 잘게 쪼개게 만듦), "주석은 실패"라는 규칙(이 레포는 이유를 적는 주석을 요구함)은 일부러 넣지 않았습니다.
+
+| 구분 | 패턴 | 스캔 id |
+| --- | --- | --- |
+| 하드: 군더더기 | 디버그 문(`debugger`, `breakpoint()`, `dbg!`, `printStackTrace()`), 주석 처리된 코드, 요청된 동작 대신 남긴 `TODO` | `debug-leftover`, `commented-out-code`, `todo-stub` |
+| | 삼키거나 다시 던지기만 하는 catch·except·`if err != nil {}` | `swallowed-error`, `rethrow-only-catch` |
+| | `c ? true : false`, `if (c) return true; return false`, `result` 같은 이름으로 받아 바로 반환 | `boolean-ceremony`, `pass-through-variable` |
+| 하드: 버린 근거 | 계약의 최상위 타입(`unknown`·`any`, `Any`, `interface{}`, `Object`. 외부 데이터를 파싱하는 함수의 입력은 예외), 열린 딕셔너리(`Record<string, unknown>`, `dict[str, Any]`, `Map<String, Object>`) | `top-type`(TS는 `any`·`object`만), `open-dictionary` |
+| | 연쇄 단언, `SAFETY:` 이유 없는 캐스트(`as T`, `cast()`, `x.(T)`, `(User) obj`, `unsafe`), 이유 없는 억제(`@ts-ignore`, `# type: ignore`, `@SuppressWarnings`) | `chained-assertion`, `unreasoned-assertion`, `suppression-without-reason` |
+| | 이름 문자열로 하는 리플렉션(`Reflect.get`, `getattr(o, "x")`) | `reflection` |
+| | 아는 값을 넓은 타입으로 넓히기, 넓혔다가 다시 단언, 경계 파서 밖의 `typeof`·`isinstance` | 스캔 없음 |
+| 하드: 테스트 | 모듈 패치(`vi.mock`, `jest.mock`, `Mockito.mockStatic`, `mock.patch`) | `module-mock`(JS·TS·Java) |
+| 하드: JS·TS | 연달은 `filter`·`map`, `reduce`에서 누적값 복사, 조건부 빈 객체 스프레드 | `two-pass-filter-map`, `growing-copy`, `conditional-empty-spread` |
+| 판단 | 되풀이 주석, 불가능한 상태 가드, 필요 없는 추상화, 깊은 중첩, 플래그 인자, 이름 없는 매직 값, 상태를 바꾸는 조회 함수, 이중 부정, 형태를 말하는 이름(`UserShape`, `strName`), 여러 일을 하는 함수 | 스캔 없음 |
+
+스캐너는 `hooks/engine/slop-scan.ts`에 있고, 모든 패턴마다 잡아야 할 예와 잡으면 안 되는 비슷한 예를 `tests/slop-scan.test.ts`에 둡니다. 잘못 걸린 경우는 편집마다 모델의 주의를 빼앗으므로, 규칙은 놓치는 쪽을 감수하고 정확도를 우선합니다. 2026-10-12에 이 저장소의 TS 10,573줄에 돌려 TS 파라미터의 `unknown`(36건 중 30건이 파서 입력)과 루프를 닫는 `}`를 if로 읽은 경우를 걸러냈습니다. 남은 186건은 모두 규칙이 겨냥한 모양이며, 그중 이유 없는 단언(72), 조건부 빈 스프레드(65), `filter`·`map`(29), 열린 딕셔너리(17)는 이 저장소가 이미 쓰는 관용구입니다. 확장자로 언어를 고르며, Kotlin·C#·Swift·Scala·Dart·C·C++·PHP는 중괄호 언어 공통 규칙만 받습니다.
+
 #### 보안 검토 (선택)
 
 `review.security`에 시큐어코딩 가이드를 고르면 보안 검토가 멀티에이전트로 붙습니다. 고르지 않으면 보안 노드는 하나도 없고, 기존 정의는 해시와 지문이 이전과 같아서 `amend`해도 다시 실행되는 노드가 없습니다.
@@ -549,6 +576,8 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `retention_days`               | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
 | `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
 | `start_approval`               | `off`     | `always`면 대화형 세션에서 모델이 시작한 실행을 만들되 시작하지 않고 사용자의 승인을 기다림([실행 규칙](#실행-규칙)). 사용자가 입력한 `/dag run`과 비대화형 세션은 기다리지 않음. `/dag approval`로 덮어쓴 값은 다음 `/reload-plugins`까지만 유지되고, `off`·`always`가 아닌 값은 `off`로 처리 |
+| `anti_slop_scan`               | `true`    | Edit·Write가 추가한 줄을 anti-slop 패턴으로 검사해 걸린 것을 모델에게 알림([의미 없는 코드 차단](#의미-없는-코드-차단-anti-slop)). 모델 호출 없음 |
+| `anti_slop_skip`               | `[]`      | 스캔이 보고하지 않을 패턴 id 목록. 예: 이유 없는 캐스트를 허용하는 저장소의 `unreasoned-assertion` |
 
 
 ### 보관 기간

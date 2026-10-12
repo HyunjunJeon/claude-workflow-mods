@@ -60,6 +60,19 @@
       "options": ["off", "always"],
       "default": "off"
     },
+    "anti_slop_scan": {
+      "type": "boolean",
+      "title": "Anti-slop scan after edits",
+      "description": "After every Edit or Write, in the main conversation and in DAG nodes, scan the lines it added for anti-slop patterns and show each hit to the model; no model call",
+      "default": true
+    },
+    "anti_slop_skip": {
+      "type": "string",
+      "title": "Anti-slop patterns to skip",
+      "description": "Pattern ids the scan never reports, such as unreasoned-assertion in a repository that allows casts without a SAFETY comment",
+      "multiple": true,
+      "default": []
+    },
     "main_allowed_tools": {
       "type": "string",
       "title": "Extra main-conversation tools",

@@ -729,7 +729,7 @@ test('scenario 10, stages: review and commit declared on a definition expand int
   expect(specPrompt).toContain('- docs: README.md')
   expect(specPrompt).toContain('<result node="code"')
   expect(standardsPrompt).toContain('/tmp/dag-review/greet-5d65d5/review-standards-notes.md')
-  expect(standardsPrompt).toContain('Before you start, load and follow these skills with the Skill tool: dag-workflow:review-standards.')
+  expect(standardsPrompt).toContain('Before you start, load and follow these skills with the Skill tool: dag-workflow:review-standards, dag-workflow:anti-slop.')
   expect(standardsPrompt).not.toContain(GREET_REQUEST)
   expect(h.spawns[2]?.model).toBe('sonnet')
   expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:running', 'review-standards:running', 'commit:pending'])

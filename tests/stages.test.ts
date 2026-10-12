@@ -49,7 +49,7 @@ test('review adds review-spec and review-standards after every user node, on the
   const standards = node(definition, 'review-standards')
   expect([spec.dependsOn, spec.category, spec.writes, spec.label]).toEqual([['build', 'docs'], 'unspecified-low', [], 'Review: spec axis'])
   expect([standards.dependsOn, standards.category, standards.writes, standards.label]).toEqual([['build', 'docs'], 'unspecified-low', [], 'Review: standards axis'])
-  expect(standards.load_skills).toEqual(['dag-workflow:review-standards'])
+  expect(standards.load_skills).toEqual(['dag-workflow:review-standards', 'dag-workflow:anti-slop'])
   expect(spec.load_skills).toBeUndefined()
 })
 
@@ -211,6 +211,13 @@ test('rules are read first and add to the default search for CONTRIBUTING, CLAUD
   expect(withRules).not.toContain('If none exist, say so and use only the baseline')
   const bad = parseDefinition({ key: 'k', goal: 'g', nodes: USER_NODES, review: { request: REQUEST, rules: [] } })
   expect(bad.ok ? undefined : bad.error.message).toContain('rule file paths')
+})
+
+test('review-standards records proven anti-slop hits as rule breaches, so they fail the standards verdict', () => {
+  const prompt = node(parse({ review: { request: REQUEST } }), 'review-standards').prompt
+  expect(prompt).toContain('Apply the dag-workflow:anti-slop skill you loaded to the lines the change adds or edits')
+  expect(prompt).toContain('record each hard pattern the diff proves under ## Rule breaches as `anti-slop: <pattern> - <file:line> - <proof>; <fix>`')
+  expect(prompt).toContain('its readability calls under ## Judgment calls')
 })
 
 test('the default notes folder keeps a key with slashes or dots inside /tmp/dag-review', () => {

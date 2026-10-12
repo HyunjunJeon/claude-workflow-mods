@@ -41,6 +41,7 @@ import {
   expandNodes,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
+import { familiesOf, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type RecoveryKind, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
@@ -181,6 +182,8 @@ let mainTurnBusy = false
 let deferStarts = false
 const pendingStarts: string[] = []
 let extraAllowed: ReadonlySet<string> = new Set()
+let antiSlopScan = true
+let antiSlopSkip: ReadonlySet<string> = new Set()
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
 let contextOnDisk = false
@@ -621,6 +624,15 @@ function submitRunNews($: EngineInterface, run: Run, text: string): ReturnType<E
 // Plain conversations keep requests in memory; the file appears once the session uses the DAG.
 function contextWanted(): boolean {
   return contextOnDisk || workflowContext.notes.length > 0 || [...runs.values()].some(run => run.sessionId === sessionId)
+}
+
+// A file the plugin reads for the anti-slop scan; a file that does not exist yet reads as empty.
+async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return ''
+  }
 }
 
 async function persistContext($: EngineInterface): Promise<void> {
@@ -2469,6 +2481,8 @@ export function register(on: On, options: PluginOptions) {
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
   if (START_APPROVALS.includes(options.start_approval as StartApproval)) startApproval = options.start_approval as StartApproval
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
+  antiSlopScan = options.anti_slop_scan !== false
+  if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
   jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
 
   on('session.start', async ($, e, next) => {
@@ -2897,6 +2911,28 @@ export function register(on: On, options: PluginOptions) {
         await next(e),
       ],
     })
+  })
+
+  // The deterministic half of the anti-slop skill (engine/slop-scan.ts). Once an Edit or Write is answered, in the main
+  // conversation or a node worker, the lines it added are scanned and the hits reach the model as context after the
+  // tool's result. No model call. The whole file is compared before and after, not the Edit's strings alone, because a
+  // rule may need the lines around the edit (a SAFETY: comment above it, the next catch). The tool has already run by
+  // the time the scan does, so a scan that throws returns the tool's answer untouched.
+  on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
+    if (!antiSlopScan || (e.tool !== 'Edit' && e.tool !== 'Write') || familiesOf(e.file_path).length === 0) return next(e)
+    const before = await readOrEmpty($, e.file_path)
+    const reply = await next(e)
+    if (reply.deny !== undefined || reply.isError) return reply
+    try {
+      const after = e.tool === 'Write' ? e.content : await readOrEmpty($, e.file_path)
+      const hits = scanSlop(e.file_path, before, after, antiSlopSkip)
+      if (hits.length === 0) return reply
+      const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
+      return { ...reply, context: [...(reply.context ?? []), slopNote(shown, hits)] }
+    } catch (error) {
+      debug($, `anti-slop scan skipped ${e.file_path}: ${message(error)}`)
+      return reply
+    }
   })
 
   on('tool.call', { tool: /^SubagentHandback$/ }, async ($, e, next) => {

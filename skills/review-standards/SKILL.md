@@ -47,6 +47,9 @@ Skip rules already enforced by formatters, linters, type checkers or pre-commit 
 List the rule files in the report.
 If none exist, say so and review only against the smell baseline.
 
+When `dag-workflow:anti-slop` is loaded, it is a rule source too: list it with the rule files and apply its Reviewing section.
+Its hard patterns, when the diff proves them, are documented-standard violations; its readability calls are judgment calls. Repository rule files still override it.
+
 ## Step 3: the smell baseline
 
 Always check these twelve Fowler smells (Refactoring, ch. 3), in addition to repository rules.
@@ -79,7 +82,7 @@ Edit nothing else: no source, test or document files.
 
 The standards report uses these three sections, in this order, each holding `none` when empty:
 
-- `## Rule sources`: the files you reviewed against (Step 2), or `none - baseline only` when the repository documents nothing.
+- `## Rule sources`: the files you reviewed against (Step 2), or `none - baseline only` when the repository documents nothing, then `dag-workflow:anti-slop` when it is loaded.
 - `## Rule breaches`: each documented-standard violation cites the file and the rule it breaks, and the file and line in the diff that breaks it. These are hard findings.
 - `## Judgment calls`: each possible smell is named as a judgment call ("possible Duplicated Code") and quotes the hunk.
 
