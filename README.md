@@ -135,8 +135,8 @@ that prints OK when run with python3 test_app.py.
 
 - `SKILL.md`: 언제 쓰나, 정의 형태(노드 필드, dependsOn으로 결과가 흐르는 방식), 목표 우선, 실행·복구(retry/amend/send/cancel)·감독 방법, 메인 대화가 할 수 있는 일
 - `SKILL.md`의 `## Alignment` 단계: 계획 읽기 뒤, 실행 계획을 쓰기 전에 질문 라운드를 최대 한 번 가집니다. 산출물 종류(예: CLI인지 문서인지), 범위(들어가고 빠지는 파일·구성요소), 완료 기준 중 하나가 정말 모호하고 Read나 `rg`로도 풀리지 않을 때만 묻습니다. 사실은 찾아보고 묻지 않으며, 모호한 것이 없으면 조용히 건너뜁니다. 라운드는 AskUserQuestion 한 번에 번호 붙인 질문 4개까지이고, 질문마다 추천 답을 첫 옵션으로 두어 "예"만 해도 받아들여집니다. 주입된 프로토콜이 비대화형 세션이라고 알리면 라운드를 건너뛰고 스스로 결정하며 가정은 `definition.goal`과 노드 프롬프트에 적습니다. 요청이 크고 모호하면 `/dag-workflow:interview`나 `/dag-workflow:pm`을 제안할 뿐 모델이 직접 부르지는 않습니다. 답을 받은 뒤 확정한 목표는 `definition.goal`에, 완료 기준은 `verify`에 넣습니다.
-- `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`), 안전하지만 틀린 산출물 점검표
-- 노드용 스킬 `skills/debugging/`, `skills/review-standards/`, `skills/testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 테스트)입니다.
+- `references/planning.md`: 분해 원칙(TOPOLOGY LOCK, split first, 팬아웃·팬인), 카테고리 사다리, 엣지가 나르는 데이터와 쓰기 범위, 실행 합성, 노드 프롬프트 계약(TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN), 검증 웨이브, 실패 대응, 디버그 체인(진단 run 다음 수정 run), 수직 슬라이스와 넓은 리팩터(expand → migrate → contract), 코드 변경 실행의 두 축 리뷰(`review-spec`, `review-standards`)와 선택형 보안 축(`review-security`), 안전하지만 틀린 산출물 점검표
+- 노드용 스킬 `skills/debugging/`, `skills/review-standards/`, `skills/secure-coding/`, `skills/testing/`: 노드 정의의 `load_skills`(예: `["dag-workflow:debugging"]`)로 불러오는 작업 규율(디버깅, 표준 리뷰, 시큐어코딩 관점·검증·집계, 테스트)입니다.
 
 계획 스킬은 검증도 묶어서 하게 합니다. 관련 변경은 한 단계 실행으로 묶고 끝에 검증 단계 하나(코드는 검토 한 쌍, 곧 `review-spec`과 `review-standards`)만 둡니다. 작은 변경마다 검토 한 쌍을 붙이지 않고, 단계 전체는 종단 시나리오 테스트로 증명합니다. 검토 한 쌍과 커밋은 정의의 `review`와 `commit` 필드로 선언하면 플러그인이 노드로 만들어 주므로 손으로 쓰지 않습니다([검토와 커밋 단계](#검토와-커밋-단계)).
 
@@ -222,7 +222,7 @@ nodes:
 | `load_skills`                          | 노드가 시작 전에 불러올 스킬 이름                                                                                                                                                               |
 | `verify`                               | **`start`·`amend`에서 필수.** 런타임이 직접 실행할 검사 1-16개. 파일 검사(`contains`/`absent`/`matches`/`lastLine`/`equals`)와 명령 검사(`expect`)의 문법은 [검증](#검증)                                                                                                                         |
 | `writes`                               | 이 노드가 쓸 프로젝트 상대 경로나 폴더. 다른 세션과 겹치는지 보여 주는 데만 쓰고, 쓰기를 막지는 않습니다                                                                                                                     |
-| `review` (정의 수준)                      | `{request, notes?, category?, rules?}`. 선언하면 파싱할 때 `review-spec`과 `review-standards` 노드로 확장합니다. `request`는 사용자의 요청 문장으로, `review-spec` 프롬프트에 그대로 붙여 넣습니다. 이 id로 노드를 직접 정의하면 안 됩니다. 자세한 내용은 [검토와 커밋 단계](#검토와-커밋-단계) |
+| `review` (정의 수준)                      | `{request, notes?, category?, rules?, security?}`. 선언하면 파싱할 때 `review-spec`과 `review-standards` 노드로 확장하고, `security`가 있으면 보안 관점 노드 7개와 `review-security`도 만듭니다. `request`는 사용자의 요청 문장으로, `review-spec` 프롬프트에 그대로 붙여 넣습니다. 이 id로 노드를 직접 정의하면 안 됩니다. 자세한 내용은 [검토와 커밋 단계](#검토와-커밋-단계) |
 | `commit` (정의 수준)                      | `[{message, paths}]`. 선언하면 파싱할 때 노드 `commit`으로 확장합니다. 항목마다 `paths`만 스테이징해 `message`로 순서대로 커밋하며, 다른 변경은 스테이징하지 않고 푸시하지 않습니다 |
 
 
@@ -356,10 +356,51 @@ verify:
 
 두 축 검토 한 쌍과 커밋 노드는 모든 코드 변경 실행에 같은 모양으로 들어가므로, 손으로 쓰지 않고 정의 수준의 `review`와 `commit` 필드로 선언합니다. 플러그인이 정의를 파싱할 때(`start`, `amend`, `/dag run`, 드라이런) 이 필드를 노드로 확장하고, 그 노드의 검사도 [검증](#검증)의 검사 문법으로 만들어 붙입니다. 프롬프트는 템플릿입니다. 드라이런(`start {dryRun: true}`)의 `preview`에는 확장된 노드가 보입니다.
 
-- `review: {request, notes?, category?, rules?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다.
-- `commit: [{message, paths}]`: 노드 `commit`을 만듭니다. `review`가 있으면 두 검토 노드 뒤에, 없으면 모든 사용자 노드 뒤에 실행합니다. 항목마다 그 `paths`만 스테이징해 `message`로 순서대로 커밋하고, 다른 변경은 스테이징하지 않으며 푸시하지 않습니다. 검증은 세 가지입니다. 커밋마다 `git log --format=%s`의 제목이 `message`의 첫 줄(제목)과 같은지만 비교하고(본문은 비교하지 않습니다), 나열한 `paths`가 모두 커밋됐는지(`git status --porcelain -- <paths>`가 비었는지) 확인하며, 각 커밋이 자기 `paths` 밖의 파일을 하나도 바꾸지 않았는지 확인합니다. 마지막 검사가 `git add -A` 같은 넓은 스테이징으로 관련 없는 변경이 커밋에 섞이는 것을 막습니다.
+- `review: {request, notes?, category?, rules?, security?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다. `security`는 아래 [보안 검토 (선택)](#보안-검토-선택)에 있습니다.
+- `commit: [{message, paths}]`: 노드 `commit`을 만듭니다. `review`가 있으면 검토 노드(`security`가 있으면 세 개, 없으면 두 개) 뒤에, 없으면 모든 사용자 노드 뒤에 실행합니다. 항목마다 그 `paths`만 스테이징해 `message`로 순서대로 커밋하고, 다른 변경은 스테이징하지 않으며 푸시하지 않습니다. 검증은 세 가지입니다. 커밋마다 `git log --format=%s`의 제목이 `message`의 첫 줄(제목)과 같은지만 비교하고(본문은 비교하지 않습니다), 나열한 `paths`가 모두 커밋됐는지(`git status --porcelain -- <paths>`가 비었는지) 확인하며, 각 커밋이 자기 `paths` 밖의 파일을 하나도 바꾸지 않았는지 확인합니다. 마지막 검사가 `git add -A` 같은 넓은 스테이징으로 관련 없는 변경이 커밋에 섞이는 것을 막습니다.
 
-`review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
+`review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `security`가 있으면 `review-security`, `security-<관점>`, `security-verify-`로 시작하는 id도 마찬가지입니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
+
+#### 보안 검토 (선택)
+
+`review.security`에 시큐어코딩 가이드를 고르면 보안 검토가 멀티에이전트로 붙습니다. 고르지 않으면 보안 노드는 하나도 없고, 기존 정의는 해시와 지문이 이전과 같아서 `amend`해도 다시 실행되는 노드가 없습니다.
+
+| id      | 가이드                                                      | 기준 파일                                     |
+| ------- | ----------------------------------------------------------- | --------------------------------------------- |
+| `kisa`  | KISA·행정안전부 소프트웨어 개발보안 가이드, 구현 단계 보안약점 49개(2021 개정판) | `skills/secure-coding/references/kisa.md`  |
+| `owasp` | OWASP Top 10:2025와 CWE Top 25(2025)                         | `skills/secure-coding/references/owasp.md` |
+
+```yaml
+review:
+  request: 로그인 API를 추가한다.
+  security: [kisa]        # [owasp] 또는 [kisa, owasp]. 빼면 보안 검토 없음
+```
+
+검토는 세 단계이고, 각 에이전트는 자기 몫 하나만 맡습니다.
+
+```
+사용자 노드 ─┬─ security-injection ─┐        (실행 중 추가)
+             ├─ security-resources ─┤   후보마다 security-verify-<관점>-<n>
+             ├─ security-access ────┤          │
+             ├─ security-crypto ────┼──────────┴──── review-security ── commit
+             ├─ security-errors ────┤
+             ├─ security-memory ────┤
+             └─ security-integrity ─┘
+```
+
+1. 관점 노드 7개(`injection`, `resources`, `access`, `crypto`, `errors`, `memory`, `integrity`)가 사용자 노드 뒤에 병렬로 돕니다. 기준 파일의 각 행에는 관점 열이 있고, 관점 노드는 고른 가이드에서 자기 관점 행만 적용해 후보 위반을 찾습니다. 확신이 없으면 후보로 올리고(재현율 우선), 결과는 노트의 `## Candidates`에 JSON 배열로 씁니다. 관점당 최대 8건이고, 같은 패턴의 반복은 한 후보로 합칩니다.
+2. 관점 노드가 끝나면 플러그인이 그 JSON을 읽어 후보마다 검증 노드 `security-verify-<관점>-<n>`을 실행 중에 추가합니다. 검증 노드는 어떤 노드에도 의존하지 않아 관점 노드의 출력도 구현 노드의 보고도 받지 않고, 자기 후보 하나만 봅니다. 그 후보를 반박하려고 시도하면서 (1) 변경이 그 줄을 추가하거나 고쳤는지, (2) 인용한 가이드 행이 해당하는지, (3) 변경 밖 호출부·미들웨어·프레임워크 기본값까지 따라가도 통제가 없는지를 증거와 함께 확인하고, 셋 다 맞을 때만 `Candidate verdict: CONFIRMED`, 아니면 `REFUTED`를 씁니다.
+3. `review-security`는 관점 노드 전부와 추가된 검증 노드 전부를 기다린 뒤, 새로 판단하지 않고 결과만 모아 보고서를 씁니다. 판정은 기계적으로 막습니다. 검증 노트 폴더(`<notes>/security-verify/`)에 `Candidate verdict: CONFIRMED`가 하나라도 있으면 `review-security`의 검사가 실패하므로, 보고서가 PASS라고 써도 커밋되지 않습니다. `commit`이 있으면 세 검토(spec, standards, security)가 모두 PASS일 때만 커밋합니다.
+
+- 위반 기준: 변경이 추가하거나 고친 줄에 고른 가이드의 행이 해당하고 그 행이 요구하는 통제가 없을 때만 위반입니다. 변경하지 않은 코드, 고르지 않은 가이드에만 있는 위험, 반박된 후보는 판단 사항으로 적고 통과합니다. 저장소에 설정된 린터나 보안 스캐너가 잡는 것은 적지 않습니다.
+- 실패 처리: 관점 노드의 JSON이 깨졌거나, 8건을 넘거나, 고르지 않은 가이드를 인용하거나, 프로젝트 밖 경로를 가리키면 그 관점 노드가 이유와 함께 실패합니다. 이때 검증 노드는 만들지 않고 `review-security`와 커밋은 건너뜁니다.
+- 이전 결과 정리: 생성된 노드는 시도 전에 자기 노트를 지우고, 관점 노드는 자기 검증 폴더(`security-verify/<관점>/`)를 통째로 지웁니다. 같은 key로 돌린 이전 실행이 남긴 CONFIRMED 파일로 실패하지 않게 하기 위해서입니다.
+- 비용: 검증 노드는 어떤 노드에도 의존하지 않아서 관점 노드의 추론도, 구현 노드의 자기 보고도 받지 않습니다. 그래서 그래프에서는 시작 노드처럼 보입니다. 검토 한 번에 에이전트 8개(관점 7 + 집계 1)와 후보 수만큼의 검증 에이전트가 듭니다. 드라이런 미리보기와 승인 화면에는 관점 노드까지만 보이고, 검증 노드는 실행 중에 나타납니다. 동시 실행 한도(`max_concurrent`, 기본 8)를 넘는 노드는 차례를 기다립니다.
+- `amend`: 선언된 정의에는 실행 중 추가된 검증 노드가 없으므로, `amend`하면 검증 노드를 만든 관점 노드가 다시 실행되어 검증 노드를 새로 만듭니다. 검증 노드가 실행 중이면 `amend`는 거부됩니다.
+- 고르는 방법: 계획 스킬은 요청이 시큐어코딩, 보안 검토, KISA, OWASP를 언급하거나 프로젝트 규칙 파일이 가이드를 지정할 때만 `security`를 넣고, 기본으로는 넣지 않습니다. 실행마다 고르려면 요청에 "KISA 기준으로 보안 검토까지"처럼 적거나 정의 파일에 `security`를 씁니다. 프로젝트 전체에 적용하려면 그 프로젝트의 `CLAUDE.md`나 `AGENTS.md`에 "코드 변경 실행은 `review.security: [kisa]`로 검토한다" 같은 한 줄을 둡니다.
+- 구현 노드: 코드를 쓰는 노드도 `load_skills: ["dag-workflow:secure-coding"]`과 프롬프트의 가이드 id로 같은 기준을 따르게 할 수 있습니다. 가이드 id가 없으면 그 노드는 `missing-input`으로 실패합니다.
+- 모델 등급: 보안 노드는 모두 `review.category`(기본 `unspecified-low`)를 씁니다. 더 깊게 보려면 `category: unspecified-high`로 올립니다.
+- 가이드 추가: `hooks/engine/stages.ts`의 `SECURITY_GUIDES`에 id와 이름을 한 줄 넣고, `skills/secure-coding/references/<id>.md`에 항목, 판본, 행마다 관점 열(`SECURITY_LENSES`의 id 중 하나)을 쓰고, `skills/secure-coding/SKILL.md`의 가이드 표와 이 표에 한 줄씩 더합니다. 도구 스키마의 허용 값은 `SECURITY_GUIDES`에서 만들어집니다.
 
 ## 자동 복구
 

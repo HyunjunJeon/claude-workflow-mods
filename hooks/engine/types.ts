@@ -58,15 +58,20 @@ export type NodeDef = {
   load_skills?: string[]
   verify?: VerificationCheck[]
   writes?: string[]
+  // Set only on a node added at run time (run.ts expandNodes): the id of the completed node it came from. Never parsed from
+  // a definition and outside the fingerprint, so a declared definition never carries it.
+  expandedFrom?: string
 }
 
-// The review pair a definition declares in one field. parseDefinition expands it into the review-spec and review-standards nodes.
+// The review stage a definition declares in one field. parseDefinition expands it into the review-spec and review-standards nodes,
+// plus review-security when security names guides.
 // Kept with its defaults filled in (notes folder, category), so a definition that spells a default out hashes like one that leaves it out.
 export type ReviewStage = {
   request: string // the user's request, pasted verbatim into review-spec
   notes: string // absolute folder for both notes files; default /tmp/dag-review/<cleaned key>-<6 hex>
   category: string // the reviewers' category; default unspecified-low
   rules?: string[] // repository rule files for review-standards; absent means it searches for them
+  security?: string[] // secure-coding guide ids for review-security, in SECURITY_GUIDES order (stages.ts); absent means no security reviewer
 }
 
 // One commit of the commit stage, in commit order. The first line of message is the subject; the rest is the body.
@@ -79,7 +84,7 @@ export type Definition = {
   // The user's nodes followed by the nodes expanded from review and commit (stages.ts).
   nodes: NodeDef[]
   // Kept so a reused or amended definition re-expands identically. An amend sends these original fields with the user's
-  // nodes only: a node named review-spec, review-standards or commit next to its field is refused as a duplicate stage.
+  // nodes only: a node named review-spec, review-standards, review-security (with security) or commit next to its field is refused as a duplicate stage.
   review?: ReviewStage
   commit?: CommitEntry[]
 }

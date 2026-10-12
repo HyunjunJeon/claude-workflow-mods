@@ -1,7 +1,7 @@
 import { definitionHash, nodeFingerprint } from './definition.ts'
 import { extractOutput } from './node-prompt.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
-import { fail, type Definition, type NodeRun, type NodeState, type Result, type Run, type RunStatus } from './types.ts'
+import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type Run, type RunStatus } from './types.ts'
 
 export const MAX_ANSWER_CHARS = 20_000
 
@@ -283,14 +283,53 @@ export function retryRun(input: Run, options: RetryOptions, now: number): Result
   return { ok: true, value: advance(run, now) }
 }
 
+// Adds the nodes a node produced at run time, before it is marked finished: each child records parentId in expandedFrom,
+// sits before the gate node in both lists, and the gate waits on it. Children from an earlier expansion of the same parent
+// are replaced. markFinished then schedules the children whose dependencies have completed.
+// definitionHash stays the declared definition's, so findReusable still matches the definition the model sends again, and
+// the gate keeps its declared fingerprint; amendRun reruns the parent rather than keeping children no declaration carries.
+export function expandNodes(input: Run, parentId: string, gateId: string, children: NodeDef[]): Result<Run> {
+  const previous = new Set(input.definition.nodes.filter(n => n.expandedFrom === parentId).map(n => n.id))
+  // Nothing to add and nothing to replace: the parent completes as is, even when the gate has already ended (a smoke run on
+  // 2026-10-12 failed a lens with no candidates because a sibling lens had failed and skipped review-security first).
+  if (children.length === 0 && previous.size === 0) return { ok: true, value: input }
+  const gateNode = input.nodes.find(n => n.id === gateId)
+  if (!gateNode) return fail('invalid_expansion', `The gate node "${gateId}" is not in run ${input.runId}.`)
+  if (gateNode.state !== 'pending') {
+    return fail('invalid_expansion', `${gateId} already ended as ${gateNode.state}, most likely because another node it waits on failed, so it cannot wait on new nodes; retry this node together with that one.`)
+  }
+  if (!input.definition.nodes.some(n => n.id === parentId)) return fail('invalid_expansion', `Unknown parent node "${parentId}".`)
+  const kept = input.definition.nodes.filter(n => !previous.has(n.id))
+  const ids = new Set(kept.map(n => n.id))
+  for (const child of children) {
+    if (ids.has(child.id)) return fail('invalid_expansion', `The new node "${child.id}" clashes with an existing node.`)
+    ids.add(child.id)
+  }
+  const missing = children.flatMap(child => child.dependsOn).find(dep => !ids.has(dep) || dep === gateId)
+  if (missing !== undefined) return fail('invalid_expansion', `A new node depends on "${missing}", which it cannot wait on.`)
+  const run = clone(input)
+  const added = children.map(child => ({ ...child, expandedFrom: parentId }))
+  const defs = kept.map(n => n.id === gateId ? { ...n, dependsOn: [...n.dependsOn.filter(dep => !previous.has(dep)), ...added.map(child => child.id)] } : n)
+  const at = defs.findIndex(n => n.id === gateId)
+  run.definition = { ...run.definition, nodes: [...defs.slice(0, at), ...added, ...defs.slice(at)] }
+  const states = run.nodes.filter(n => !previous.has(n.id))
+  const stateAt = states.findIndex(n => n.id === gateId)
+  run.nodes = [...states.slice(0, stateAt), ...added.map(child => freshNode(child.id, child.label ?? child.id, nodeFingerprint(child))), ...states.slice(stateAt)]
+  return { ok: true, value: run }
+}
+
 export function amendRun(input: Run, definition: Definition, now: number): Result<{ run: Run; rerun: string[] }> {
   if (definition.key !== input.key) {
     return fail('key_mismatch', `The amended definition's key "${definition.key}" differs from the run's key "${input.key}".`)
   }
   const old = new Map(input.nodes.map(n => [n.id, n]))
-  const changed = definition.nodes
-    .filter(n => old.get(n.id)?.fingerprint !== nodeFingerprint(n))
-    .map(n => n.id)
+  // A declared definition never carries the nodes a parent added at run time, so a kept parent reruns and expands again.
+  const declared = new Set(definition.nodes.map(n => n.id))
+  const parents = input.definition.nodes.flatMap(n => n.expandedFrom !== undefined && declared.has(n.expandedFrom) ? [n.expandedFrom] : [])
+  const changed = [...new Set([
+    ...definition.nodes.filter(n => old.get(n.id)?.fingerprint !== nodeFingerprint(n)).map(n => n.id),
+    ...parents,
+  ])]
   const rerun = new Set([...changed, ...downstream(definition.nodes, changed)])
   const keptIds = new Set(definition.nodes.map(n => n.id))
   for (const node of input.nodes) {

@@ -1,8 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { definitionHash, nodeFingerprint, parseDefinition } from '../hooks/engine/definition.ts'
-import { defaultNotesFolder } from '../hooks/engine/stages.ts'
+import { defaultNotesFolder, MAX_SECURITY_CANDIDATES, parseCandidates, SECURITY_GUIDES, SECURITY_LENSES, verifierNodes, type SecurityCandidate } from '../hooks/engine/stages.ts'
 import { lintDefinition } from '../hooks/engine/lint.ts'
-import { amendRun, createRun } from '../hooks/engine/run.ts'
+import { amendRun, createRun, expandNodes, findReusable, markFinished, markRunning } from '../hooks/engine/run.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION, TOOL_DESCRIPTION_LIMIT } from '../hooks/engine/tool-spec.ts'
 import type { Definition, NodeDef } from '../hooks/engine/types.ts'
 import { parseChecks } from '../hooks/engine/verification.ts'
@@ -419,7 +419,8 @@ test('a YAML definition file declares review and commit in block style', () => {
 
 test('the dag tool schema declares review and commit, and the description names both within its limit', () => {
   const { review, commit } = INPUT_SCHEMA.properties.definition.properties
-  expect([review.required, Object.keys(review.properties)]).toEqual([['request'], ['request', 'notes', 'category', 'rules']])
+  expect([review.required, Object.keys(review.properties)]).toEqual([['request'], ['request', 'notes', 'category', 'rules', 'security']])
+  expect(review.properties.security.items.enum).toEqual(Object.keys(SECURITY_GUIDES))
   expect([commit.minItems, commit.maxItems, commit.items.required, commit.items.properties.paths.maxItems]).toEqual([1, 5, ['message', 'paths'], 50])
   expect(TOOL_DESCRIPTION).toContain('"review":{request} and "commit":[{message,paths}]')
   expect(TOOL_DESCRIPTION.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_LIMIT)
@@ -430,4 +431,248 @@ test('the description keeps the wording it had before review and commit, and sti
     expect({ phrase, found: TOOL_DESCRIPTION.includes(phrase) }).toEqual({ phrase, found: true })
   }
   expect(TOOL_DESCRIPTION.length).toBeLessThanOrEqual(2048)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The optional security axis: review.security names secure-coding guides. Seven lens nodes look for candidate breaches, each
+// candidate gets its own verifier node at run time, and review-security compiles the verdict that gates the commit.
+
+const LENSES = ['injection', 'resources', 'access', 'crypto', 'errors', 'memory', 'integrity']
+const LENS_IDS = LENSES.map(lens => `security-${lens}`)
+const SECURITY_NOTES = `${CLI_FOLDER}/review-security-notes.md`
+const VERIFY_FOLDER = `${CLI_FOLDER}/security-verify`
+
+test('security adds seven lens nodes on the user nodes and review-security on the lenses, and the commit waits on all three reviewers', () => {
+  expect(Object.keys(SECURITY_LENSES)).toEqual(LENSES)
+  const definition = parse({ review: { request: REQUEST, security: ['kisa'] }, commit: COMMITS })
+  expect(definition.nodes.map(candidate => candidate.id)).toEqual(['build', 'docs', 'review-spec', 'review-standards', ...LENS_IDS, 'review-security', 'commit'])
+  for (const lens of LENSES) {
+    const current = node(definition, `security-${lens}`)
+    const notes = `${CLI_FOLDER}/security-${lens}-notes.md`
+    expect([current.dependsOn, current.category, current.writes, current.label, current.load_skills])
+      .toEqual([['build', 'docs'], 'unspecified-low', [], `Security lens: ${lens}`, ['dag-workflow:secure-coding']])
+    expect(current.verify).toEqual([{ kind: 'file', path: notes, lastLine: 'Security lens: done' }, { kind: 'file', path: notes, contains: '## Candidates' }])
+  }
+  const security = node(definition, 'review-security')
+  expect([security.dependsOn, security.label, security.load_skills]).toEqual([LENS_IDS, 'Review: security axis', ['dag-workflow:secure-coding']])
+  expect(security.verify).toEqual([
+    { kind: 'file', path: SECURITY_NOTES, lastLine: 'Security verdict: PASS' },
+    { kind: 'file', path: SECURITY_NOTES, contains: '## Breaches' },
+    { kind: 'file', path: VERIFY_FOLDER, absent: 'Candidate verdict: CONFIRMED' },
+  ])
+  for (const id of [...LENS_IDS, 'review-security']) expect(parseChecks(node(definition, id).verify)).toEqual({ ok: true, value: node(definition, id).verify })
+  const commit = node(definition, 'commit')
+  expect(commit.dependsOn).toEqual(['review-spec', 'review-standards', 'review-security'])
+  expect(commit.prompt).toContain(`Read ${SPEC_NOTES}, ${STANDARDS_NOTES} and ${SECURITY_NOTES} first. Commit NOTHING unless all 3 exist and their last lines are exactly \`Spec verdict: PASS\`, \`Standards verdict: PASS\` and \`Security verdict: PASS\``)
+})
+
+test('without security there is no security node and the commit gate reads the pair as before', () => {
+  const definition = parse({ review: { request: REQUEST }, commit: COMMITS })
+  expect(definition.nodes.map(candidate => candidate.id).filter(id => id.includes('security'))).toEqual([])
+  expect(definition.review?.security).toBeUndefined()
+  expect(node(definition, 'commit').prompt).toContain(`Read ${SPEC_NOTES} and ${STANDARDS_NOTES} first. Commit NOTHING unless both exist and their last lines are exactly \`Spec verdict: PASS\` and \`Standards verdict: PASS\`;`)
+})
+
+test('a lens prompt applies only its lens rows of the chosen guides, favours recall, caps and shapes the candidates', () => {
+  const prompt = node(parse({ review: { request: REQUEST, security: ['kisa'] } }), 'security-crypto').prompt
+  for (const text of [
+    'TASK:', 'DELIVERABLE:', 'SCOPE:', 'VERIFY:', 'STOP WHEN', 'THE CHANGE:', 'GOAL: A greet CLI ships with docs.',
+    'through one lens, crypto (', 'a separate agent verifies each one', 'references/kisa.md', 'never judge from memory',
+    'only the rows whose Lens column is `crypto`', 'When you are unsure whether the control is present, list it',
+    'Code the change does not touch is never a candidate', `at most ${MAX_SECURITY_CANDIDATES} candidates`, 'Merge repeats of one pattern',
+    '## Scope', '## Candidates', '```json', '"missing_control"', '## Judgment calls', 'Security lens: done', 'You are READ-ONLY on the repository',
+  ]) expect({ text, found: prompt.includes(text) }).toEqual({ text, found: true })
+  expect(prompt).not.toContain('references/owasp.md')
+  expect(prompt).not.toContain(REQUEST)
+})
+
+test('the review-security prompt compiles the lens and verifier notes, counts verdicts against candidates and judges nothing anew', () => {
+  const prompt = node(parse({ review: { request: REQUEST, security: ['kisa', 'owasp'] } }), 'review-security').prompt
+  for (const text of [
+    'TASK:', 'DELIVERABLE:', 'SCOPE:', 'VERIFY:', 'STOP WHEN', 'Judge nothing anew', `${CLI_FOLDER}/security-injection-notes.md`,
+    `every notes file under ${VERIFY_FOLDER}/`, 'must number exactly the candidates', 'missing-input',
+    '## Guides', '## Breaches', '## Judgment calls', 'each CONFIRMED candidate', 'each REFUTED candidate',
+    '`Security verdict: PASS` when no verifier confirmed a candidate', '`Security verdict: FAIL`',
+  ]) expect({ text, found: prompt.includes(text) }).toEqual({ text, found: true })
+})
+
+test('guide ids are trimmed, lower-cased, deduplicated and kept in registry order, so the spelling never changes the fingerprint', () => {
+  const plain = parse({ review: { request: REQUEST, security: ['kisa', 'owasp'] } })
+  const spelled = parse({ review: { request: REQUEST, security: [' OWASP', 'kisa', 'Kisa '] } })
+  expect(spelled.review?.security).toEqual(['kisa', 'owasp'])
+  expect(definitionHash(spelled)).toBe(definitionHash(plain))
+  expect(spelled.nodes.map(nodeFingerprint)).toEqual(plain.nodes.map(nodeFingerprint))
+})
+
+test('amend that adds security runs the new security nodes and the commit, and leaves the spec and standards reviewers alone', () => {
+  const input = { review: { request: REQUEST }, commit: COMMITS }
+  const run = createRun(parse(input), { runId: 'r1', sessionId: 's1', now: 1_000 })
+  const amended = amendRun(run, parse({ ...input, review: { request: REQUEST, security: ['owasp'] } }), 2_000)
+  if (!amended.ok) throw new Error(amended.error.message)
+  expect(amended.value.run.nodes.map(current => current.id)).toContain('review-security')
+  expect(amended.value.rerun).not.toContain('review-spec')
+  expect(amended.value.rerun).not.toContain('review-standards')
+  expect(amended.value.rerun).toContain('commit')
+})
+
+test('security refuses anything but a nonempty list of known guide ids', () => {
+  for (const security of [[], ['iso27001'], ['kisa', 'cert'], 'kisa', [''], [1]]) {
+    const parsed = parseDefinition({ key: 'k', goal: 'g', nodes: USER_NODES, review: { request: REQUEST, security } })
+    expect({ security, message: parsed.ok ? undefined : parsed.error.message })
+      .toEqual({ security, message: 'definition.review.security must list secure-coding guide ids from: kisa, owasp; leave it out for no security review.' })
+  }
+})
+
+test('with security, a user node may not take a lens, verifier or review-security id; without it, it may', () => {
+  for (const id of ['review-security', 'security-injection', 'security-verify-access-2']) {
+    const nodes = [...USER_NODES, { id, prompt: full('check secrets'), dependsOn: ['build'], verify: [{ kind: 'file', path: 'x.md', contains: 'y' }] }]
+    expect({ id, ok: parseDefinition({ key: 'k', goal: 'g', nodes, review: { request: REQUEST } }).ok }).toEqual({ id, ok: true })
+    const taken = parseDefinition({ key: 'k', goal: 'g', nodes, review: { request: REQUEST, security: ['kisa'] } })
+    expect({ id, message: taken.ok ? undefined : taken.error.message }).toEqual({
+      id,
+      message: `A node is named "${id}" while definition.review is set; drop the node, since review adds review-spec, review-standards, review-security, the security-* lens nodes and the security-verify-* verifiers itself.`,
+    })
+  }
+})
+
+test('lint finds no warning in a definition expanded with the security nodes', () => {
+  expect(lintDefinition(parse({ review: { request: REQUEST, security: ['kisa', 'owasp'] }, commit: COMMITS }))).toEqual([])
+})
+
+test('a YAML definition names guides in a flow or a block list', () => {
+  const head = ['key: yaml-sec', 'name: Sec', 'review:', '  request: Add a login form.']
+  const tail = ['nodes:', '  - id: build', '    prompt: build it', '    verify:', '      - kind: command', '        argv: [bun, test]']
+  for (const security of [['  security: [kisa, owasp]'], ['  security:', '    - owasp', '    - kisa']]) {
+    const parsed = parseDefinition(parseYaml([...head, ...security, ...tail].join('\n')))
+    if (!parsed.ok) throw new Error(parsed.error.message)
+    expect(parsed.value.review?.security).toEqual(['kisa', 'owasp'])
+    expect(parsed.value.nodes.map(candidate => candidate.id)).toEqual(['build', 'review-spec', 'review-standards', ...LENS_IDS, 'review-security'])
+  }
+})
+
+const CANDIDATE: SecurityCandidate = {
+  items: ['kisa 1-1 SQL 삽입', 'owasp A05 Injection / CWE-89'],
+  file: 'src/db.ts',
+  line: 42,
+  claim: 'The query concatenates req.query.id into the SQL text.',
+  missing_control: 'Bind id as a query parameter.',
+}
+const lensNotes = (json: string) => `## Scope\nsrc/db.ts query\n## Candidates\n\`\`\`json\n${json}\n\`\`\`\n## Judgment calls\nnone\nSecurity lens: done`
+
+test('parseCandidates reads the json block under ## Candidates, and an empty list is no candidate', () => {
+  expect(parseCandidates(lensNotes(JSON.stringify([CANDIDATE], null, 2)), ['kisa', 'owasp'])).toEqual({ ok: true, value: [CANDIDATE] })
+  expect(parseCandidates(lensNotes('[]'), ['kisa'])).toEqual({ ok: true, value: [] })
+  const padded = { ...CANDIDATE, file: ' src/db.ts ', claim: `  ${CANDIDATE.claim}  ` }
+  expect(parseCandidates(lensNotes(JSON.stringify([padded])), ['kisa', 'owasp'])).toEqual({ ok: true, value: [CANDIDATE] })
+})
+
+test('parseCandidates refuses a candidates block that is missing, malformed, over the cap or off shape', () => {
+  const many = JSON.stringify(Array.from({ length: MAX_SECURITY_CANDIDATES + 1 }, () => CANDIDATE))
+  const cases: [string, string, string][] = [
+    ['no block', '## Candidates\nnone\nSecurity lens: done', 'no ```json block under ## Candidates'],
+    ['a block under another heading', '## Scope\n```json\n[]\n```\n## Candidates\nnone', 'no ```json block under ## Candidates'],
+    ['bad JSON', lensNotes('[{'), 'not valid JSON'],
+    ['an object', lensNotes('{}'), 'must be a JSON array'],
+    ['too many', lensNotes(many), `listed ${MAX_SECURITY_CANDIDATES + 1} candidates; the limit is ${MAX_SECURITY_CANDIDATES}`],
+    ['an unchosen guide', lensNotes(JSON.stringify([{ ...CANDIDATE, items: ['owasp A05 Injection'] }])), 'starting with a chosen guide id (kisa)'],
+    ['no items', lensNotes(JSON.stringify([{ ...CANDIDATE, items: [] }])), 'items must list'],
+    ['a climbing path', lensNotes(JSON.stringify([{ ...CANDIDATE, file: '../etc/passwd' }])), 'file must be a project-relative path'],
+    ['an absolute path', lensNotes(JSON.stringify([{ ...CANDIDATE, file: '/etc/passwd' }])), 'file must be a project-relative path'],
+    ['line zero', lensNotes(JSON.stringify([{ ...CANDIDATE, line: 0 }])), 'line must be a positive line number'],
+    ['a text line', lensNotes(JSON.stringify([{ ...CANDIDATE, line: '42' }])), 'line must be a positive line number'],
+    ['no claim', lensNotes(JSON.stringify([{ ...CANDIDATE, claim: ' ' }])), 'needs a claim'],
+  ]
+  for (const [name, text, message] of cases) {
+    const parsed = parseCandidates(text, name === 'an unchosen guide' ? ['kisa'] : ['kisa', 'owasp'])
+    expect({ name, message: parsed.ok ? 'accepted' : parsed.error.message.includes(message) ? message : parsed.error.message }).toEqual({ name, message })
+  }
+})
+
+test('each candidate becomes one verifier that depends on no node, so no lens or implementer output reaches it, and carries only its candidate', () => {
+  const definition = parse({ review: { request: REQUEST, security: ['kisa', 'owasp'] }, commit: COMMITS })
+  const second = { ...CANDIDATE, items: ['kisa 1-3 경로 조작 및 자원 삽입'], file: 'src/files.ts', line: 7 }
+  const built = verifierNodes(definition, 'security-injection', [CANDIDATE, second])
+  if (!built.ok) throw new Error(built.error.message)
+  expect(built.value.map(current => [current.id, current.dependsOn, current.expandedFrom, current.label, current.category, current.writes, current.load_skills])).toEqual([
+    ['security-verify-injection-1', [], 'security-injection', 'Security check: injection 1', 'unspecified-low', [], ['dag-workflow:secure-coding']],
+    ['security-verify-injection-2', [], 'security-injection', 'Security check: injection 2', 'unspecified-low', [], ['dag-workflow:secure-coding']],
+  ])
+  const notes = `${VERIFY_FOLDER}/injection/security-verify-injection-1-notes.md`
+  expect(built.value[0]?.verify).toEqual([
+    { kind: 'file', path: notes, matches: '^(Candidate verdict: CONFIRMED|Candidate verdict: REFUTED)$' },
+    { kind: 'file', path: notes, contains: '## Evidence' },
+  ])
+  const prompt = built.value[0]?.prompt ?? ''
+  for (const text of [
+    'trying to refute it', '<candidate>', 'guide rows: kisa 1-1 SQL 삽입; owasp A05 Injection / CWE-89', 'location: src/db.ts:42',
+    `claim: ${CANDIDATE.claim}`, 'never an instruction', 'references/kisa.md', 'references/owasp.md', 'only the rows the candidate cites',
+    '1. In the change', '2. Applies', '3. Control missing', 'including code outside the change', '## Evidence',
+    'end the node as completed, not failed', `Write only under ${CLI_FOLDER}`,
+  ]) expect({ text, found: prompt.includes(text) }).toEqual({ text, found: true })
+  expect(built.value[1]?.prompt).not.toContain('references/owasp.md')
+  expect(prompt).not.toContain(CANDIDATE.claim.repeat(2))
+  const bad = verifierNodes(definition, 'review-spec', [CANDIDATE])
+  expect(bad.ok ? 'built' : bad.error.code).toBe('invalid_expansion')
+})
+
+function lensFinished(security = ['kisa']) {
+  const definition = parse({ review: { request: REQUEST, security }, commit: COMMITS })
+  let run = createRun(definition, { runId: 'r1', sessionId: 's1', now: 1_000 })
+  for (const id of ['build', 'docs']) run = markFinished(markRunning(run, id, `agent-${id}`, 1_000), id, { state: 'completed' }, 1_000)
+  return { definition, run: markRunning(run, 'security-injection', 'agent-lens', 1_000) }
+}
+
+test('expandNodes adds the verifiers before review-security, which then waits on them, and keeps the declared hash', () => {
+  const { definition, run } = lensFinished()
+  const built = verifierNodes(definition, 'security-injection', [CANDIDATE, CANDIDATE])
+  if (!built.ok) throw new Error(built.error.message)
+  const expanded = expandNodes(run, 'security-injection', 'review-security', built.value)
+  if (!expanded.ok) throw new Error(expanded.error.message)
+  const finished = markFinished(expanded.value, 'security-injection', { state: 'completed' }, 2_000)
+  const ids = finished.nodes.map(current => current.id)
+  expect(ids.slice(ids.indexOf('security-integrity'))).toEqual(['security-integrity', 'security-verify-injection-1', 'security-verify-injection-2', 'review-security', 'commit'])
+  expect(finished.definition.nodes.map(current => current.id)).toEqual(ids)
+  expect(finished.nodes.filter(current => current.id.startsWith('security-verify-')).map(current => current.state)).toEqual(['scheduled', 'scheduled'])
+  expect(finished.definition.nodes.find(current => current.id === 'review-security')?.dependsOn).toEqual([...LENS_IDS, 'security-verify-injection-1', 'security-verify-injection-2'])
+  expect(finished.nodes.find(current => current.id === 'review-security')?.state).toBe('pending')
+  expect(finished.definitionHash).toBe(definitionHash(definition))
+  const reused = findReusable([finished], definition)
+  expect(reused.ok && reused.value?.runId).toBe('r1')
+})
+
+test('expanding a lens again replaces its verifiers, and a gate that is no longer pending refuses new nodes', () => {
+  const { definition, run } = lensFinished()
+  const two = verifierNodes(definition, 'security-injection', [CANDIDATE, CANDIDATE])
+  const one = verifierNodes(definition, 'security-injection', [CANDIDATE])
+  if (!two.ok || !one.ok) throw new Error('verifiers')
+  const first = expandNodes(run, 'security-injection', 'review-security', two.value)
+  if (!first.ok) throw new Error(first.error.message)
+  const again = expandNodes(first.value, 'security-injection', 'review-security', one.value)
+  if (!again.ok) throw new Error(again.error.message)
+  expect(again.value.nodes.map(current => current.id).filter(id => id.startsWith('security-verify-'))).toEqual(['security-verify-injection-1'])
+  expect(again.value.definition.nodes.find(current => current.id === 'review-security')?.dependsOn).toEqual([...LENS_IDS, 'security-verify-injection-1'])
+  const gateGone = { ...run, nodes: run.nodes.map(current => current.id === 'review-security' ? { ...current, state: 'skipped' as const } : current) }
+  const refused = expandNodes(gateGone, 'security-injection', 'review-security', one.value)
+  expect(refused.ok ? 'expanded' : refused.error.code).toBe('invalid_expansion')
+  // A lens with no candidates adds nothing, so it completes even after a sibling lens failed and review-security was skipped.
+  const nothing = expandNodes(gateGone, 'security-integrity', 'review-security', [])
+  expect(nothing).toEqual({ ok: true, value: gateGone })
+})
+
+test('amend with the declared definition drops the run-time verifiers and reruns their lens, which expands again', () => {
+  const { definition, run } = lensFinished()
+  const built = verifierNodes(definition, 'security-injection', [CANDIDATE])
+  if (!built.ok) throw new Error(built.error.message)
+  const expanded = expandNodes(run, 'security-injection', 'review-security', built.value)
+  if (!expanded.ok) throw new Error(expanded.error.message)
+  const finished = markFinished(expanded.value, 'security-injection', { state: 'completed' }, 2_000)
+  const amended = amendRun(finished, definition, 3_000)
+  if (!amended.ok) throw new Error(amended.error.message)
+  expect([...amended.value.rerun].sort()).toEqual(['commit', 'review-security', 'security-injection'])
+  expect(amended.value.run.nodes.map(current => current.id).filter(id => id.startsWith('security-verify-'))).toEqual([])
+  expect(amended.value.run.nodes.find(current => current.id === 'security-injection')?.state).toBe('scheduled')
+  expect(amended.value.run.definition.nodes.find(current => current.id === 'review-security')?.dependsOn).toEqual(LENS_IDS)
+  const running = markRunning(finished, 'security-verify-injection-1', 'agent-v', 2_500)
+  const refused = amendRun(running, definition, 3_000)
+  expect(refused.ok ? 'amended' : refused.error.code).toBe('amend_running_node')
 })

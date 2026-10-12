@@ -12,7 +12,7 @@ import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
 import { exitProblem, textProblem } from './engine/check-eval.ts'
 import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
-import { REVIEW_SPEC_ID, REVIEW_STANDARDS_ID } from './engine/stages.ts'
+import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
 import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode } from './engine/policy.ts'
 import {
   amendRun,
@@ -35,6 +35,7 @@ import {
   retryRun,
   snapshotOf,
   advance,
+  expandNodes,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { parseYaml } from './engine/yaml.ts'
@@ -818,11 +819,11 @@ async function recoverRuns($: EngineInterface): Promise<void> {
   }
 }
 
-// The notes file a generated reviewer will write, found in its own file checks. Only the review-spec and review-standards
-// nodes that the definition's review field expanded qualify (parseDefinition refuses a user node with either id next to
-// review), and only a file named exactly <id>-notes.md, so nothing a user node verifies is ever returned.
+// The notes file a generated reviewer will write, found in its own file checks. Only the nodes the definition's review field
+// expanded qualify, at parse time or at run time (parseDefinition refuses a user node with such an id next to review), and
+// only a file named exactly <id>-notes.md, so nothing a user node verifies is ever returned.
 function generatedNotesFiles(run: Run, def: NodeDef): string[] {
-  if (run.definition.review === undefined || (def.id !== REVIEW_SPEC_ID && def.id !== REVIEW_STANDARDS_ID)) return []
+  if (run.definition.review === undefined || !isReviewStageNode(run.definition.review, def.id)) return []
   const paths = (def.verify ?? []).flatMap(check => check.kind === 'file' && readOnlyAbsolutePath(check.path) && check.path.endsWith(`/${def.id}-notes.md`) ? [check.path] : [])
   return [...new Set(paths)]
 }
@@ -842,6 +843,15 @@ async function clearStaleNotes($: EngineInterface, run: Run, def: NodeDef): Prom
     }
     if (!(await removePath($, '-f', path, 'remove stale review notes'))) {
       return `could not remove the stale review notes ${path}, so the reviewer's verdict check could pass on an old verdict. Remove the file and retry.`
+    }
+  }
+  // A lens's verifier folder can hold files an earlier run or attempt left, with numbers this run never reaches, and one
+  // CONFIRMED line among them fails review-security. The lens empties its own folder; other lenses' folders stay as they are.
+  const lens = securityLensOf(run.definition, def.id)
+  if (lens !== undefined && run.definition.review) {
+    const folder = lensVerifyFolder(run.definition.review, lens)
+    if (!(await removePath($, '-rf', folder, 'remove stale verifier notes'))) {
+      return `could not remove the stale verifier notes ${folder}, so review-security could fail on an old verdict. Remove the folder and retry.`
     }
   }
   return undefined
@@ -971,6 +981,8 @@ type CompletionClaim = {
 type CompletionResult = {
   readonly outcome: ReturnType<typeof parseOutcome>
   readonly verification?: NodeRun['verification']
+  // The verifier nodes a security lens's candidates expand into, built once the lens passed verification.
+  readonly expansion?: NodeDef[]
 }
 
 function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
@@ -1090,17 +1102,48 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
     const reportPath = answer ? await writeReport($, run.runId, node.id, answer) : undefined
     let outcome = reportPath ? { ...parsed, reportPath } : parsed
     let verification: NodeRun['verification']
+    let expansion: NodeDef[] | undefined
     if (parsed.state === 'completed') {
       verification = await verifyNode($, run, node)
       if (verification.status !== 'passed') {
         outcome = { ...outcome, state: 'failed', error: verification.error ?? verification.evidence.find(item => !item.passed)?.detail ?? 'Verification checks are missing.' }
+      } else if (securityLensOf(run.definition, node.id) !== undefined) {
+        const expanded = await lensExpansion($, run, node.id)
+        if (expanded.ok) expansion = expanded.value
+        else outcome = { ...outcome, state: 'failed', error: expanded.error.message }
       }
     }
-    result = { outcome, verification }
+    result = { outcome, verification, ...(expansion ? { expansion } : {}) }
   } catch (error) {
     result = { outcome: { state: 'failed', error: `Completion processing failed: ${message(error)}` } }
   }
   await serialized(() => applyCompletion($, claim, result))
+}
+
+// A security lens that passed its checks: read its candidates and build one verifier node per candidate, after creating the
+// lens's verifier folder, which review-security's folder check needs even when there are no candidates. Any problem fails
+// the lens with the reason, so recovery or a retry can redo it; nothing is spawned from a candidates block read in part.
+async function lensExpansion($: EngineInterface, run: Run, lensId: string): Promise<Result<NodeDef[]>> {
+  const review = run.definition.review
+  const lens = securityLensOf(run.definition, lensId)
+  if (!review?.security || !lens) return fail('invalid_expansion', `"${lensId}" is not a security lens of this run.`)
+  const notes = lensNotesFile(review, lens)
+  let text: string
+  try {
+    text = await $.fs.read(notes)
+  } catch (error) {
+    return fail('invalid_candidates', `could not read ${notes} (${message(error)}).`)
+  }
+  const candidates = parseCandidates(text, review.security)
+  if (!candidates.ok) return fail('invalid_candidates', `${notes}: ${candidates.error.message}`)
+  const folder = lensVerifyFolder(review, lens)
+  try {
+    const made = await $.process.run(['mkdir', '-p', folder])
+    if (made.exitCode !== 0) return fail('invalid_expansion', `could not create ${folder}: ${made.stderr.trim() || `exit ${made.exitCode}`}`)
+  } catch (error) {
+    return fail('invalid_expansion', `could not create ${folder}: ${message(error)}`)
+  }
+  return verifierNodes(run.definition, lensId, candidates.value)
 }
 
 async function applyCompletion($: EngineInterface, claim: CompletionClaim, result: CompletionResult): Promise<void> {
@@ -1112,9 +1155,16 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
     return
   }
   let prepared = run
-  const { outcome, verification } = result
+  let { outcome } = result
+  const { verification, expansion } = result
   if (verification) {
     prepared = { ...run, nodes: run.nodes.map(current => current.id === node.id ? { ...current, verification } : current) }
+  }
+  // The verifiers join before the lens is marked finished, so review-security already waits on them when the last lens ends.
+  if (expansion) {
+    const expanded = expandNodes(prepared, node.id, REVIEW_SECURITY_ID, expansion)
+    if (expanded.ok) prepared = expanded.value
+    else outcome = { ...outcome, state: 'failed', error: `Could not add the verifier nodes: ${expanded.error.message}` }
   }
   const finished = markFinished(prepared, node.id, outcome, await $.clock.now())
   runs.set(runId, outcome.state === 'failed' ? await attemptRecovery($, finished, node.id) : finished)

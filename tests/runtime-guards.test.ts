@@ -313,15 +313,28 @@ const STANDARDS_AXIS = 'Gate: Review: standards axis'
 const reviewed = (notes?: string) => ({ key: 'gate', name: 'Gate', nodes: [node('a')], review: { request: 'Add a greeting', ...(notes ? { notes } : {}) } })
 
 // The harness answers every `rm` with exit 0 and leaves its files alone, which would hide a missing removal. This makes
-// `rm <path>` delete the harness file as the real program does, and records which files existed under `folder` at each
-// agent spawn. It wraps the harness's capture arrays, which the harness fills as the host events arrive; the test kit locks
+// `rm <path>` delete the harness file as the real program does (`rm -rf <dir>` every file below it), makes `mkdir -p` inside
+// `folder` a folder that `stat` reports as one, and records which files existed under `folder` at each agent spawn. It wraps the harness's capture arrays, which the harness fills as the host events arrive; the test kit locks
 // Array.prototype, so the wrapper goes in with defineProperty, not by assignment.
 function watchNotes(h: ReturnType<typeof harness>, folder: string) {
   const atSpawn: { description: string; present: string[] }[] = []
   const pushRun = h.processes.push.bind(h.processes)
   Object.defineProperty(h.processes, 'push', {
     value: (...runs: typeof h.processes) => {
-      for (const run of runs) if (run.argv[0] === 'rm') h.files.delete(run.argv.at(-1) ?? '')
+      for (const run of runs) {
+        const target = run.argv.at(-1) ?? ''
+        if (run.argv[0] === 'rm') {
+          h.files.delete(target)
+          if (run.argv[1] === '-rf') {
+            for (const path of [...h.files.keys()]) if (path.startsWith(`${target}/`)) h.files.delete(path)
+            h.locks.delete(target)
+          }
+        }
+        if (run.argv[0] === 'mkdir' && run.argv[1] === '-p' && target.startsWith(`${folder}/`)) {
+          const parts = target.slice(folder.length + 1).split('/')
+          parts.forEach((_, index) => h.locks.add(`${folder}/${parts.slice(0, index + 1).join('/')}`))
+        }
+      }
       return pushRun(...runs)
     },
   })
@@ -389,6 +402,86 @@ test('a reviewer that writes its notes still passes: the removal runs before the
   await finish($, h, 'agent-2')
   await finish($, h, 'agent-3')
   expect(checkpoint(h, runId).nodes.map(current => [current.id, current.state])).toEqual([['a', 'completed'], ['review-spec', 'completed'], ['review-standards', 'completed']])
+})
+
+const LENSES = ['injection', 'resources', 'access', 'crypto', 'errors', 'memory', 'integrity']
+const SECURITY_AXIS = 'Gate: Review: security axis'
+const VERIFIER = 'Gate: Security check: injection 1'
+const PASS_SPEC = '## Request sentences\n## Findings\nnone\nSpec verdict: PASS'
+const PASS_STANDARDS = '## Rule sources\n## Rule breaches\nnone\n## Judgment calls\nnone\nStandards verdict: PASS'
+const CANDIDATE = { items: ['kisa 1-1 SQL 삽입'], file: 'src/db.ts', line: 3, claim: 'concatenates the id into the SQL text', missing_control: 'bind the id as a parameter' }
+const VERIFIER_NOTES = `${NOTES}/security-verify/injection/security-verify-injection-1-notes.md`
+const MANY = { options: { auto_recovery: false, max_concurrent: 20 } } as const
+const secured = () => ({ key: 'gate', name: 'Gate', nodes: [node('a')], review: { request: 'Add a greeting', notes: NOTES, security: ['kisa'] } })
+const lensText = (candidates: unknown) => `## Scope\nsrc/db.ts\n## Candidates\n\`\`\`json\n${JSON.stringify(candidates)}\n\`\`\`\n## Judgment calls\nnone\nSecurity lens: done`
+const verdictText = (verdict: 'CONFIRMED' | 'REFUTED') => `## Candidate\nSQL concatenation at src/db.ts:3\n## Evidence\n1. added by the change\n2. kisa 1-1 applies\n3. traced\nCandidate verdict: ${verdict}`
+const agentOf = (h: ReturnType<typeof harness>, description: string) => `agent-${h.spawns.findIndex(spawn => spawn.description === description) + 1}`
+
+// Runs the gate run up to the point where the verifier has spawned: every lens but injection reports nothing, injection one candidate.
+async function upToVerifier($: Engine, h: ReturnType<typeof harness>) {
+  await boot($)
+  const runId = await start($, secured())
+  await finish($, h, 'agent-1')
+  h.files.set(`${NOTES}/review-spec-notes.md`, PASS_SPEC)
+  h.files.set(`${NOTES}/review-standards-notes.md`, PASS_STANDARDS)
+  for (const lens of LENSES) h.files.set(`${NOTES}/security-${lens}-notes.md`, lensText(lens === 'injection' ? [CANDIDATE] : []))
+  for (const description of [SPEC_AXIS, STANDARDS_AXIS, ...LENSES.map(lens => `Gate: Security lens: ${lens}`)]) await finish($, h, agentOf(h, description))
+  return runId
+}
+
+test('each lens candidate spawns its own verifier, review-security waits for every verdict, and a refuted candidate passes', MANY, async ($, on) => {
+  const h = harness(on)
+  watchNotes(h, NOTES)
+  const stale = `${NOTES}/security-verify/injection/security-verify-injection-5-notes.md`
+  h.files.set(stale, verdictText('CONFIRMED'))
+  const runId = await upToVerifier($, h)
+  expect(h.spawns.slice(0, 10).map(spawn => spawn.description)).toEqual(['Gate: a', SPEC_AXIS, STANDARDS_AXIS, ...LENSES.map(lens => `Gate: Security lens: ${lens}`)])
+  expect(h.files.has(stale)).toBe(false)
+  expect(h.spawns.map(spawn => spawn.description).filter(description => description.startsWith('Gate: Security check'))).toEqual([VERIFIER])
+  const verifier = h.spawns.find(spawn => spawn.description === VERIFIER)
+  expect(verifier?.prompt).toContain('location: src/db.ts:3')
+  expect(verifier?.prompt).not.toContain('<result node="security-injection"')
+  expect(verifier?.prompt).not.toContain('<result node="a"')
+  expect(checkpoint(h, runId).nodes.find(current => current.id === 'review-security')?.state).toBe('pending')
+  expect(h.spawns.some(spawn => spawn.description === SECURITY_AXIS)).toBe(false)
+
+  h.files.set(VERIFIER_NOTES, verdictText('REFUTED'))
+  await finish($, h, agentOf(h, VERIFIER))
+  expect(h.spawns.at(-1)?.description).toBe(SECURITY_AXIS)
+  h.files.set(`${NOTES}/review-security-notes.md`, '## Guides\nkisa\n## Breaches\nnone\n## Judgment calls\nrefuted: bound at src/db.ts:2\nSecurity verdict: PASS')
+  await finish($, h, agentOf(h, SECURITY_AXIS))
+  const saved = checkpoint(h, runId)
+  expect(saved.status).toBe('completed')
+  expect(saved.nodes.map(current => current.id)).toContain('security-verify-injection-1')
+})
+
+test('a confirmed candidate fails review-security through its folder check even when the compiled report says PASS', MANY, async ($, on) => {
+  const h = harness(on)
+  watchNotes(h, NOTES)
+  const runId = await upToVerifier($, h)
+  h.files.set(VERIFIER_NOTES, verdictText('CONFIRMED'))
+  await finish($, h, agentOf(h, VERIFIER))
+  expect(checkpoint(h, runId).nodes.find(current => current.id === 'security-verify-injection-1')?.state).toBe('completed')
+  h.files.set(`${NOTES}/review-security-notes.md`, '## Guides\nkisa\n## Breaches\nnone\n## Judgment calls\nnone\nSecurity verdict: PASS')
+  await finish($, h, agentOf(h, SECURITY_AXIS))
+  const security = checkpoint(h, runId).nodes.find(current => current.id === 'review-security')
+  expect(security?.state).toBe('failed')
+  expect(security?.verification?.evidence.find(item => !item.passed)?.detail).toContain('security-verify/injection/security-verify-injection-1-notes.md')
+})
+
+test('a lens whose candidates block is malformed fails with the reason, spawns no verifier and skips review-security', MANY, async ($, on) => {
+  const h = harness(on)
+  watchNotes(h, NOTES)
+  await boot($)
+  const runId = await start($, secured())
+  await finish($, h, 'agent-1')
+  h.files.set(`${NOTES}/security-injection-notes.md`, '## Scope\nx\n## Candidates\n```json\n[{\n```\n## Judgment calls\nnone\nSecurity lens: done')
+  await finish($, h, agentOf(h, 'Gate: Security lens: injection'))
+  const saved = checkpoint(h, runId)
+  const lens = saved.nodes.find(current => current.id === 'security-injection')
+  expect([lens?.state, lens?.error?.includes('the ## Candidates block is not valid JSON')]).toEqual(['failed', true])
+  expect(saved.nodes.find(current => current.id === 'review-security')?.state).toBe('skipped')
+  expect(h.spawns.some(spawn => String(spawn.description).startsWith('Gate: Security check'))).toBe(false)
 })
 
 test('every attempt clears the notes: a retried reviewer starts without the verdict its failed attempt left', NO_RECOVERY, async ($, on) => {

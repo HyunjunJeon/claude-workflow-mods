@@ -1,4 +1,5 @@
 import { CATEGORIES } from './node-prompt.ts'
+import { SECURITY_GUIDES } from './stages.ts'
 import { TEXT_FIELDS, type TextField } from './types.ts'
 
 // Claude Code passes the model only the first 2048 characters of a tool description, so the
@@ -92,6 +93,7 @@ export const INPUT_SCHEMA = {
             notes: { type: 'string', description: 'Absolute folder for the notes files; default /tmp/dag-review/<key>-<6 hex digits of its hash>' },
             category: { type: 'string', description: 'The reviewers\' category; default unspecified-low' },
             rules: { type: 'array', items: { type: 'string' }, description: 'Rule file paths review-standards reads first; it still searches for CONTRIBUTING, CLAUDE.md, AGENTS.md and similar' },
+            security: { type: 'array', items: { type: 'string', enum: Object.keys(SECURITY_GUIDES) }, description: 'Secure-coding guides (kisa: KISA guide; owasp: OWASP Top 10 and CWE Top 25); adds seven lens nodes, one verifier per candidate at run time and review-security, which gates the commit. Opt-in: set it only when the request or a project rule file asks' },
           },
           required: ['request'],
         },

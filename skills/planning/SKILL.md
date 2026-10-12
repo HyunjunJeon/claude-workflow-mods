@@ -111,6 +111,7 @@ Optional extras are `agent`, `label`, `task_summary`, `description` and `load_sk
 
 - `dag-workflow:debugging` for diagnosis and fix nodes.
 - `dag-workflow:review-standards` for the review-standards node.
+- `dag-workflow:secure-coding` for an implementation node that must meet secure-coding guides; name the guides (`kisa`, `owasp`) in its prompt.
 - `dag-workflow:testing` for nodes that write code and tests.
 
 `dependsOn` controls order and passes data.
@@ -195,6 +196,7 @@ Use `lastLine` for a verdict line, `absent` on a file or folder for text that mu
 The reference's verify contract lists the fields and their rules; a Bash wrapper is needed only for pipelines.
 For a code-changing run, declare `review: {request}` and `commit: [{message, paths}]` instead of writing the review pair and commit node by hand.
 The plugin expands them into `review-spec`, `review-standards` and `commit`; the reference's two-axis review shows the fields.
+Add `security: [kisa]`, `[owasp]` or both to `review` only when the request or a project rule file (CLAUDE.md, AGENTS.md) asks for a secure-coding guide; it adds seven lens nodes, one verifier per candidate at run time and `review-security`, which gates the commit. Never add it by default.
 
 Never name deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name.
 Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295).
