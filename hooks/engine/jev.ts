@@ -233,6 +233,11 @@ export function boundInput(value: unknown): unknown {
   return value
 }
 
+// Tools whose call is put to the person: a question, a plan to approve. The host lets a tool.check hook only tighten
+// these (its allow does not dismiss the dialog), so the permission question could change nothing but deny the person's
+// own question, and it held every popup for a Jev call (221 ms over HTTP, about 1.5 s and a Sonnet call on the model).
+export const PERSON_TOOLS: ReadonlySet<string> = new Set(['AskUserQuestion', 'ExitPlanMode'])
+
 export function permissionRequest(tool: string, input: unknown, context: JevContext): JevRequest {
   return {
     model: 'jev-latest',

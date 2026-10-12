@@ -4,7 +4,7 @@ import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine,
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { answerModeRequest, MODE_CONFIDENCE, modeRequest, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
+import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
@@ -2535,6 +2535,7 @@ export function register(on: On, options: PluginOptions) {
       }
       return decided
     }
+    if (PERSON_TOOLS.has(e.tool)) return asked('Jev not asked: the host keeps the dialog of a tool that asks the person')
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
     if (jevPermissionScope === 'dag' && context?.task === undefined) return asked('Jev not asked: jev_permission_scope is dag and the call carries no node task')
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })

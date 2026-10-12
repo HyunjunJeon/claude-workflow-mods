@@ -295,6 +295,19 @@ for (const item of FALLBACKS) {
   })
 }
 
+// The host keeps these dialogs whatever a hook allows, so Jev could only deny the person's own question.
+for (const tool of ['AskUserQuestion', 'ExitPlanMode']) {
+  test(`${tool} keeps its ask without asking Jev`, async ($, on) => {
+    const h = harness(on)
+    h.control.reply = response({ permission: choice('deny', 1) })
+    on('tool.check', () => { h.order.push('baseline'); return { decision: 'ask', reason: 'baseline reason', rule: 'baseline rule' } })
+    await boot($)
+    expect(await $.tool.check({ tool, input: {} })).toEqual({ decision: 'ask', reason: 'baseline reason', rule: 'baseline rule' })
+    expect(h.order).toEqual(['baseline'])
+    expect(h.requests).toHaveLength(0)
+  })
+}
+
 for (const decision of DECISIONS) {
   test(`confident ${decision} controls the actual wrapped tool call`, async ($, on) => {
     const h = harness(on)
