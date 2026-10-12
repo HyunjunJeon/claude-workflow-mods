@@ -122,5 +122,3 @@ Only after "Yes", load `dag-workflow:planning` and hand off:
 
 Never call `start` for the planned work before the user confirms.
 The read-only facts run is the only earlier `start`.
-
-Doctrine adapted from the grilling skill of mattpocock/skills and the interview skill of Q00/ouroboros (both MIT). No MCP tooling from either is used.

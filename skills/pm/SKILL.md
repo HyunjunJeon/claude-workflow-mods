@@ -4,7 +4,6 @@ description: User-invoked only; interviews the user as product owner, sorts ever
 disable-model-invocation: true
 argument-hint: "[product idea]"
 ---
-
 # pm
 
 The user starts this skill with `/dag-workflow:pm [idea]`.
@@ -29,11 +28,13 @@ Run the rounds the way `/dag-workflow:interview` does:
 Classify every question BEFORE asking it.
 Give each question exactly one of three classes:
 
-| Class | Covers | Action |
-| --- | --- | --- |
-| Product decision | Who the users are, the problem, scope, priorities, success measures, user-visible behaviour. | Ask the user. |
-| Technical decision | Stack, architecture, libraries, data model, implementation approach. | Do not ask the product owner. Defer it to the development phase. |
-| Unknown | The user does not know, it depends on someone else, or it cannot be decided now. | Record it as an open item. |
+
+| Class              | Covers                                                                                       | Action                                                           |
+| ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Product decision   | Who the users are, the problem, scope, priorities, success measures, user-visible behaviour. | Ask the user.                                                    |
+| Technical decision | Stack, architecture, libraries, data model, implementation approach.                         | Do not ask the product owner. Defer it to the development phase. |
+| Unknown            | The user does not know, it depends on someone else, or it cannot be decided now.             | Record it as an open item.                                       |
+
 
 Keep three running lists while you interview.
 They hold the decided product decisions, the deferred technical decisions and the open items.
@@ -87,9 +88,9 @@ Tell the node to write `## Open items` even when it holds only "None", so the ch
 
 Do not write the PRD yourself.
 Do not try to spawn an agent.
+  
 When the run settles, Read the PRD file.
 Show the user its path and its open items.
 If the run failed, recover it with the rules of the planning skill.
+  
 Suggest `/dag-workflow:interview` or normal planning as the next step.
-
-Doctrine adapted from the pm skill of Q00/ouroboros (MIT): the three question classes and the open-items list. No MCP tooling is used.

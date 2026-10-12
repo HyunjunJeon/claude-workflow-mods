@@ -118,5 +118,3 @@ The plugin reruns that proof after the report.
 Use the evidence for the mode above: red-to-green, before-and-after green, or independent assertions with a passing run.
 An initially passing test is not necessarily vacuous.
 An assertion that passes by construction or cannot detect a relevant defect is not evidence.
-
-Adapted from mattpocock/skills (MIT), skills/engineering/tdd (SKILL.md, tests.md, mocking.md); see THIRD_PARTY_NOTICES.md at the repository root.

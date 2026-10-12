@@ -99,5 +99,3 @@ In the final answer, add the runtime-required `## Output` before the final statu
 Include key findings and the report path if a file was requested.
 Do not add `## Output` to the notes file.
 On PASS, finish with the completion line required by the prompt.
-
-Adapted from mattpocock/skills (MIT), skills/engineering/code-review (Standards axis and smell baseline; the smells are from Fowler, Refactoring, ch. 3); see THIRD_PARTY_NOTICES.md at the repository root.

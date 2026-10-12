@@ -167,5 +167,3 @@ Hypotheses:
 1. If <X> is the cause, changing <Y> will make the bug disappear or worse. (ranked, falsifiable; 3 to 5 in total)
 Root cause: <file and line, or "not yet determined">
 ```
-
-Adapted from mattpocock/skills (MIT), skills/engineering/diagnosing-bugs; see THIRD_PARTY_NOTICES.md at the repository root.
