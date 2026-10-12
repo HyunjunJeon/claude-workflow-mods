@@ -283,6 +283,38 @@ export function retryRun(input: Run, options: RetryOptions, now: number): Result
   return { ok: true, value: advance(run, now) }
 }
 
+// Reruns completed producers with a note appended to their prompt, and every node downstream of them, after a reviewer's
+// FAIL verdict (rework.ts plans it). Unlike retry it takes completed nodes; unlike amend it changes no definition, so the
+// fingerprints stay and a later amend still compares against the declared prompts. The round is recorded on the run.
+export function reworkRun(input: Run, producers: string[], note: string, reviewers: string[], now: number): Result<Run> {
+  if (deriveStatus(input) === 'running') return fail('run_still_active', 'The run still has pending or running nodes.')
+  if (producers.length === 0) return fail('nothing_to_retry', 'No producer to rework.')
+  const run = clone(input)
+  for (const id of producers) {
+    if (nodeOf(run, id).state !== 'completed') return fail('node_not_retryable', `Node "${id}" is ${nodeOf(run, id).state}; only a completed producer is reworked.`)
+  }
+  const reset = new Set([...producers, ...downstream(run.definition.nodes, producers)])
+  for (const node of run.nodes) {
+    if (!reset.has(node.id)) continue
+    node.state = 'pending'
+    delete node.agentId
+    delete node.error
+    delete node.answer
+    delete node.output
+    delete node.reportPath
+    delete node.finishedAt
+    if (producers.includes(node.id)) {
+      const declared = run.definition.nodes.find(def => def.id === node.id)?.prompt ?? ''
+      node.promptOverride = [node.promptOverride ?? declared, '', note].join('\n')
+    }
+  }
+  const rounds = (run.reviewFix?.rounds ?? 0) + 1
+  run.reviewFix = { rounds, history: [...(run.reviewFix?.history ?? []), { at: now, reviewers, producers }] }
+  delete run.cancelReason
+  run.settledNotified = false
+  return { ok: true, value: advance(run, now) }
+}
+
 // Adds the nodes a node produced at run time, before it is marked finished: each child records parentId in expandedFrom,
 // sits before the gate node in both lists, and the gate waits on it. Children from an earlier expansion of the same parent
 // are replaced. markFinished then schedules the children whose dependencies have completed.

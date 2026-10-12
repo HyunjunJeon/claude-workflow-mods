@@ -58,6 +58,9 @@ export type NodeDef = {
   load_skills?: string[]
   verify?: VerificationCheck[]
   writes?: string[]
+  // true when the node changes something outside the project's files: a push, a deploy, a database, storage or settings
+  // change, a sent message. The review-fix round (rework.ts) never reruns such a node; outside the fingerprint, like load_skills.
+  external?: boolean
   // Set only on a node added at run time (run.ts expandNodes): the id of the completed node it came from. Never parsed from
   // a definition and outside the fingerprint, so a declared definition never carries it.
   expandedFrom?: string
@@ -150,6 +153,9 @@ export type Run = {
   // Set when the user rejected the run while it awaited approval (reason is theirs, possibly empty). Every transition and
   // the checkpoint keep it: the model may not retry, amend or restart the run; only the user's own /dag retry runs it again.
   rejected?: { at: number; reason: string }
+  // The automatic review-fix rounds this run used (rework.ts): each reran the producers a FAIL verdict pointed at.
+  // skipped holds why the last failed settle got no round, for the settle message.
+  reviewFix?: { rounds: number; history: { at: number; reviewers: string[]; producers: string[] }[]; skipped?: { at: number; reason: string } }
 }
 
 export type EngineError = { code: string; message: string }

@@ -50,6 +50,8 @@ export const SPEC_PASS = 'Spec verdict: PASS'
 export const SPEC_FAIL = 'Spec verdict: FAIL'
 export const STANDARDS_PASS = 'Standards verdict: PASS'
 export const STANDARDS_FAIL = 'Standards verdict: FAIL'
+// The status a final audit reports when the safe-but-wrong checklist finds a shortfall (SAFE_BUT_WRONG_AUDIT item 5).
+export const PARTIAL_OUTPUT = 'partial/supporting-output'
 export const SECURITY_PASS = 'Security verdict: PASS'
 export const SECURITY_FAIL = 'Security verdict: FAIL'
 export const LENS_DONE = 'Security lens: done'
@@ -57,8 +59,11 @@ export const CANDIDATE_CONFIRMED = 'Candidate verdict: CONFIRMED'
 export const CANDIDATE_REFUTED = 'Candidate verdict: REFUTED'
 
 // Copied from skills/planning/references/planning.md "Safe-but-wrong audit checklist"; keep the two in step.
+// The budget line is measured: on 2026-10-10 a final audit spent about 95 s writing its own verifier script with mutants
+// (14k output tokens) and a review-spec about 35 s on mutation probes of a five-file app, both on the critical path.
 export const SAFE_BUT_WRONG_AUDIT = [
-  'AUDIT FOR SAFE-BUT-WRONG OUTPUT. Answer every item with evidence (command output or a file excerpt with its path), not assertion; write `n/a` plus the reason only when an item cannot apply.',
+  'AUDIT FOR SAFE-BUT-WRONG OUTPUT. Answer every item in one or two lines with evidence (one command and its decisive output line, or a file excerpt with its path), not assertion; write `n/a` plus the reason only when an item cannot apply.',
+  'Keep it proportionate: besides the declared checks, run at most two probes of your own (items 2 and 3), each one command; never write verifier scripts, test harnesses or mutants.',
   '1. Name the requested kind of artifact and the produced kind; they must match (a CLI request is not met by documents alone).',
   '2. Run the deliverable again with an input no producer used and quote the result.',
   '3. Feed it missing data; missing data must show as `unchecked`, `insufficient data` or `blocked`, never as OK, 0 or an empty value.',
@@ -66,6 +71,15 @@ export const SAFE_BUT_WRONG_AUDIT = [
   '5. On any shortfall in 1-4, write `Status: partial/supporting-output` in ## Output naming the missing artifact kind or behavior, then end with `DAG_NODE_STATUS: failed: partial/supporting-output - <what is missing>`.',
   'Write complete only when 1-4 all pass with evidence.',
 ].join('\n')
+
+// A reviewer's or audit's own FAIL: the generated verdict lines, a hand-written "<Axis> verdict: FAIL", and the audit's
+// partial/supporting-output status. It covers both ways one reaches node.error: the worker's
+// `DAG_NODE_STATUS: failed: Spec verdict: FAIL - ...` line, and a lastLine check that got the FAIL line instead of PASS.
+const VERDICT_FAILURE = /\bverdict:?\s+FAIL\b/i
+
+export function isVerdictFailure(error: string | undefined): boolean {
+  return error !== undefined && (VERDICT_FAILURE.test(error) || error.includes(PARTIAL_OUTPUT))
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -172,6 +186,7 @@ function reviewSpecPrompt(definition: Definition, review: ReviewStage, nodes: No
     '</request>',
     ...changeBlock(nodes),
     `DELIVERABLE: ${notes}, written once and in full, with these sections in this order:`,
+    'Keep the file terse: one line per request sentence, finding, real check and audit item, quoting only the decisive line of any output; no transcripts or code listings.',
     '## Request sentences - every sentence of the request and the goal, quoted, one per line.',
     '## Findings - three groups, each `none` when empty: (a) missing or partial implementation; (b) unrequested behavior (scope creep); (c) implemented but wrong-looking behavior. Each finding quotes its request sentence and cites its evidence as file:line. For (b) quote the nearest sentence it exceeds, or state that no sentence covers it.',
     '## Real check - rerun every command check the nodes declared, from the project root, and record each command, its exit code and the decisive output. Each must meet its expectation; one that does not is a (c) finding.',
@@ -199,6 +214,7 @@ function reviewStandardsPrompt(definition: Definition, review: ReviewStage, node
     sources,
     `Apply the smell baseline from the ${REVIEW_STANDARDS_SKILL} skill you loaded, and label every smell a judgment call, never a breach. Repository rules override the baseline; skip what a linter or compiler already enforces. If the baseline is not in your context, write "baseline unavailable" and judge only documented rules.`,
     `DELIVERABLE: ${notes}, written once and in full, with these sections in this order, each \`none\` when empty:`,
+    'Keep the file terse: one line per rule source, breach and judgment call; no transcripts or code listings.',
     '## Rule sources - the files you reviewed against, or `none - baseline only`.',
     '## Rule breaches - each breach of a documented rule, quoting the rule and its source file, with the evidence as file:line.',
     '## Judgment calls - baseline smells, each labelled a judgment call, with file:line.',

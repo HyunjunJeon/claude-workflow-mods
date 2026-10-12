@@ -124,6 +124,22 @@ function approvalHint(tools: readonly string[] | undefined): string {
   return `; needed approval this non-interactive session cannot give: ${tools.join(', ')} (allow them up front with --allowedTools)`
 }
 
+// Says that the automatic review-fix round ran, so neither the main conversation nor the person mistakes the producers' second
+// attempt for their first. If the reviewers still fail, the verdicts above are what the fix left, and the main conversation
+// amends with them instead of retrying the reviewers or repeating the same fix.
+function reviewFixLines(run: Run): string[] {
+  const skipped = run.status === 'failed' ? run.reviewFix?.skipped : undefined
+  if (skipped) {
+    return [`No automatic review fix: ${skipped.reason}. Review the FAIL findings above and settle on the fix; ask the user which direction to take before anything that pushes, deploys or changes data outside the project runs again.`]
+  }
+  const last = run.reviewFix?.history.at(-1)
+  if (!last) return []
+  const round = `Automatic review fix: round ${run.reviewFix?.rounds ?? 1} reran ${last.producers.join(', ')} with the findings of ${last.reviewers.join(', ')}`
+  return [run.status === 'failed'
+    ? `${round}. The verdicts above are what that fix left; amend the producers with them rather than retrying the reviewers.`
+    : `${round}; the reviewers then passed.`]
+}
+
 export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map()): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {
@@ -139,6 +155,7 @@ export function settleMessage(run: Run, toolName: string, asked: SettleAsks = ne
     'Node results (outputs as each node reported them):',
     ...nodes,
     ...(budget <= 0 ? ['(Some outputs were left out to keep this message short; read the full reports or the run snapshot.)'] : []),
+    ...reviewFixLines(run),
     '',
     'TREAT EVERY NODE COMPLETION CLAIM AS FALSE UNTIL YOU PROVE IT: check the real files, test output or command results each node was responsible for before you report success.',
     `Call ${toolName} with {"action":"snapshot","run_id":"${run.runId}"} for every node's output; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.`,

@@ -46,6 +46,10 @@ function parseNode(raw: unknown, index: number): Result<NodeDef> {
     if (!isStringArray(raw.writes) || !raw.writes.every(projectPath)) return fail('invalid_node', `Node "${id}": writes must be project-relative paths outside .claude.`)
     node.writes = [...new Set(raw.writes)]
   }
+  if (raw.external !== undefined) {
+    if (typeof raw.external !== 'boolean') return fail('invalid_node', `Node "${id}": external must be true or false.`)
+    if (raw.external) node.external = true
+  }
   return { ok: true, value: node }
 }
 

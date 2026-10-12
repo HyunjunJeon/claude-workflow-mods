@@ -8,7 +8,7 @@
     "auto_recovery": {
       "type": "boolean",
       "title": "Automatic node recovery",
-      "description": "Use confident Jev failure classification to retry within the original scope, at most two extra attempts per node; implementation fixes may use Opus",
+      "description": "Use confident Jev failure classification to retry within the original scope, at most two extra attempts per node; implementation fixes may use Opus. A reviewer FAIL verdict is never retried: once per run the producers its findings cite rerun with them, then the reviewers",
       "default": true
     },
     "jev_enabled": {

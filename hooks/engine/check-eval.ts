@@ -1,4 +1,4 @@
-import type { CommandExpect, TextExpect } from './types.ts'
+import type { CommandExpect, TextExpect, VerificationEvidence } from './types.ts'
 
 // A problem quotes at most this many characters of any one text, so a large stdout or file cannot flood the report.
 const QUOTE_LIMIT = 120
@@ -47,4 +47,36 @@ export function exitProblem(code: number | undefined, expect?: CommandExpect): s
   if (code === undefined) return 'the program did not run or timed out'
   const accepted = expect?.exit === undefined ? [0] : Array.isArray(expect.exit) ? expect.exit : [expect.exit]
   return accepted.includes(code) ? undefined : `exit code ${code} is not accepted (expected ${accepted.join(' or ')})`
+}
+
+// A failure that starts with this word is a defect of the check, not of the node's work: a retry, even on Opus, runs the
+// same check and fails again. On 2026-10-10 two eval runs spent 94 s and 117 s on such Opus retries before an amend fixed
+// the check. Recovery leaves these nodes failed, and the settle message asks the main conversation to amend the check.
+export const CHECK_DEFECT = 'check-defect'
+
+export function isCheckDefect(error: string | undefined): boolean {
+  return error !== undefined && error.trimStart().toLowerCase().startsWith(CHECK_DEFECT)
+}
+
+const NAME = '([A-Za-z_][\\w.+-]*)'
+// How bash, dash and zsh say a script called a command they cannot find; each exits 127.
+const SHELL_NOT_FOUND = [new RegExp(`\\b${NAME}: command not found`), new RegExp(`command not found: ${NAME}`), new RegExp(`: \\d+: ${NAME}: not found`)]
+const START_FAILED = /ENOENT|not found|no such file/i
+
+// The bare-named program a failed command check could not find: the host could not start argv[0], or the check's shell
+// exited 127 naming a command it could not find. A path such as ./dist/cli is left out, since producing it may have been
+// the node's job and a retry can still help; so is a check that lists 127 among its accepted exit codes.
+export function missingProgram(item: VerificationEvidence): string | undefined {
+  if (item.passed || item.check.kind !== 'command') return undefined
+  const program = item.check.argv[0] ?? ''
+  if (item.exitCode === undefined) {
+    return /^[A-Za-z_][\w.+-]*$/.test(program) && item.detail.startsWith('Verification could not run') && START_FAILED.test(item.detail) ? program : undefined
+  }
+  const accepted = item.check.expect?.exit
+  if (item.exitCode !== 127 || accepted === 127 || (Array.isArray(accepted) && accepted.includes(127))) return undefined
+  for (const pattern of SHELL_NOT_FOUND) {
+    const name = pattern.exec(item.detail)?.[1]
+    if (name) return name
+  }
+  return undefined
 }

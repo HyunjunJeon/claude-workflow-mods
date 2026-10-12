@@ -2,16 +2,18 @@ import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderS
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
-import { isBlockedReportPath, isFinalAudit, lintDefinition } from './engine/lint.ts'
+import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
 import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
 import { hash, stableStringify } from './engine/hash.ts'
-import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES } from './engine/recovery.ts'
-import { exitProblem, textProblem } from './engine/check-eval.ts'
+import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES, verdictFailure } from './engine/recovery.ts'
+import { CHECK_DEFECT, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
 import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
+import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
+import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
 import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode } from './engine/policy.ts'
 import {
@@ -33,6 +35,7 @@ import {
   requeueLost,
   resumePaused,
   retryRun,
+  reworkRun,
   snapshotOf,
   advance,
   expandNodes,
@@ -915,6 +918,15 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
     }
     await refreshSessions($)
     if (run.handoff?.offeredAt !== undefined && current.handoff?.offeredAt === undefined) await notifyHandoff($, run)
+    // A run that settled only on reviewer FAIL verdicts reruns the producers they point at before anyone is told it settled.
+    if (isSettled(run) && run.status === 'failed') {
+      const rework = await attemptRework($, run)
+      if (rework) {
+        run = rework.run
+        await persist($, run)
+        if (rework.reworked) continue
+      }
+    }
     // A run held for approval keeps its roots scheduled with nothing running: looping again would never end.
     if (!run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
     if (!isSettled(run)) {
@@ -1106,7 +1118,12 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
     if (parsed.state === 'completed') {
       verification = await verifyNode($, run, node)
       if (verification.status !== 'passed') {
-        outcome = { ...outcome, state: 'failed', error: verification.error ?? verification.evidence.find(item => !item.passed)?.detail ?? 'Verification checks are missing.' }
+        const detail = verification.error ?? verification.evidence.find(item => !item.passed)?.detail ?? 'Verification checks are missing.'
+        const program = verification.evidence.map(missingProgram).find(name => name !== undefined)
+        const error = program
+          ? `${CHECK_DEFECT}: ${program} is not on the PATH verify commands run with, so this check cannot pass as written; amend the check (the node's work may be right) instead of retrying the node.\n${detail}`
+          : detail
+        outcome = { ...outcome, state: 'failed', error }
       } else if (securityLensOf(run.definition, node.id) !== undefined) {
         const expanded = await lensExpansion($, run, node.id)
         if (expanded.ok) expansion = expanded.value
@@ -1182,9 +1199,59 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   }
 }
 
+// What a failed reviewer found, for the producers it sends back: its error, its ## Output, and for a generated reviewer the
+// notes file, read now because the reviewer's next start removes it (clearStaleNotes).
+async function reviewerFindings($: EngineInterface, run: Run, nodeId: string): Promise<string> {
+  const node = run.nodes.find(current => current.id === nodeId)
+  const def = run.definition.nodes.find(current => current.id === nodeId)
+  const parts = [node?.error ?? '', node?.output ?? '']
+  for (const path of def ? generatedNotesFiles(run, def) : []) {
+    try {
+      parts.push(`From ${path}:\n${findingSections(await $.fs.read(path))}`)
+    } catch (error) {
+      debug($, `could not read review notes ${path}: ${message(error)}`)
+    }
+  }
+  return parts.filter(part => part.trim() !== '').join('\n\n')
+}
+
+// One automatic review-fix round (rework.ts), only with auto_recovery on. reworked: the producers are queued again. Otherwise
+// the run may carry why it got no round (work outside the project, findings with no single owner) for its settle message.
+async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; reworked: boolean } | undefined> {
+  if (!autoRecovery || run.sessionId !== sessionId) return undefined
+  const findings = new Map<string, string>()
+  for (const node of run.nodes) {
+    if (node.state === 'failed' && verdictFailure(run, node.id)) findings.set(node.id, await reviewerFindings($, run, node.id))
+  }
+  const plan = reworkPlan(run, findings, projectRoot)
+  if (!plan) return undefined
+  const now = await $.clock.now()
+  if ('skip' in plan) {
+    $.ui.log(`No automatic review fix for ${run.runId}: ${plan.skip}`)
+    return { run: withReworkSkip(run, plan.skip, now), reworked: false }
+  }
+  const reworked = reworkRun(run, plan.producers, plan.note, plan.reviewers, now)
+  if (!reworked.ok) {
+    debug($, `review fix for ${run.runId} not applied: ${reworked.error.message}`)
+    return undefined
+  }
+  $.ui.log(`Automatic review fix ${run.runId}: ${plan.reviewers.join(', ')} failed on a FAIL verdict; rerunning ${plan.producers.join(', ')} with the findings, then the reviewers`)
+  return { run: reworked.value, reworked: true }
+}
+
 async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Promise<Run> {
   const node = run.nodes.find(current => current.id === nodeId)
   if (!autoRecovery || !node || node.state !== 'failed' || run.cancelReason || run.handoff || node.verification?.status === 'missing' || (node.recovery?.used ?? 0) >= MAX_AUTO_RECOVERIES) return run
+  // A defect of the check fails every attempt alike, so no Jev call and no retry: the main conversation amends the check.
+  if (isCheckDefect(node.error)) {
+    debug($, `no automatic recovery for ${run.runId}/${node.id}: ${CHECK_DEFECT}`)
+    return run
+  }
+  // A FAIL verdict repeats on a retry: the work it judged has to change first (see verdictFailure).
+  if (verdictFailure(run, node.id)) {
+    debug($, `no automatic recovery for ${run.runId}/${node.id}: FAIL verdict`)
+    return run
+  }
   const request = recoveryRequest(run, node)
   const evaluation = await evaluateJev($, request)
   const choice = evaluation.choices.get('recovery')
@@ -1399,10 +1466,36 @@ function screenDefinition(input: unknown): Result<{ definition: Definition; exis
   return { ok: true, value: { definition: parsed.value, existing: undefined } }
 }
 
+// Verify commands run through $.process.run: the host process's PATH, no shell profile. Programs the model's Bash tool has
+// (Claude Code's own rg, profile aliases and functions) can be missing there, and such a check fails however right the
+// deliverable is. On 2026-10-09 a 450-file run lost about 140 s that way: all six batch checks piped through rg, every node
+// failed verification, then the settle, an amend and a rerun. One sh call reads the names on stdin, so no argv filter on
+// process.run mistakes it for a check, and prints those command -v cannot find. When sh cannot start or answers oddly the
+// definition goes through unjudged: the verify run reports a missing program anyway, only later.
+const PROGRAM_LOOKUP = 'while IFS= read -r p; do command -v "$p" >/dev/null 2>&1 || printf "%s\\n" "$p"; done'
+
+async function missingProgramProblem($: EngineInterface, definition: Definition): Promise<EngineError | undefined> {
+  const uses = commandPrograms(definition)
+  const names = [...new Set(uses.map(use => use.program))]
+  if (names.length === 0) return undefined
+  let missing: Set<string>
+  try {
+    const result = await $.process.run(['sh', '-c', PROGRAM_LOOKUP], { cwd: projectRoot || undefined, stdin: `${names.join('\n')}\n`, timeoutMs: 5_000 })
+    if (result.exitCode !== 0) return undefined
+    missing = new Set(result.stdout.split('\n').map(line => line.trim()).filter(name => names.includes(name)))
+  } catch {
+    return undefined
+  }
+  const absent = uses.filter(use => missing.has(use.program))
+  return absent.length > 0 ? { code: 'invalid_verification', message: missingProgramsMessage(absent) } : undefined
+}
+
 // A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
-function previewRequest(input: unknown): Result<{ preview: Preview; existing: Run | undefined }> {
+async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
   const screened = screenDefinition(input)
   if (!screened.ok) return screened
+  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition)
+  if (missing) return { ok: false, error: missing }
   return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
 }
 
@@ -1424,6 +1517,8 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
     return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
   }
   if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
+  const missing = await missingProgramProblem($, definition)
+  if (missing) return err(missing)
   const now = await $.clock.now()
   const runId = `dag_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
   const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
@@ -1452,6 +1547,23 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   })
 }
 
+// A dry run's definition, kept by preview_id for this session so start {preview_id} runs it without the model writing the
+// definition out again. On 2026-10-10 three eval runs spent 11-31 s of output on that second copy (about 4k tokens each).
+// Only the newest PREVIEW_LIMIT are kept, and start screens a kept one exactly as it screens a definition sent inline.
+const PREVIEW_LIMIT = 8
+const previews = new Map<string, unknown>()
+
+function rememberPreview(source: unknown): string {
+  const id = `pv_${hash(stableStringify(source))}`
+  previews.delete(id)
+  previews.set(id, source)
+  for (const old of previews.keys()) {
+    if (previews.size <= PREVIEW_LIMIT) break
+    previews.delete(old)
+  }
+  return id
+}
+
 // The one read-and-parse step behind /dag run and start {path}: .yaml/.yml go through the YAML subset, anything else is JSON.
 // `shown` is how the failure names the file (the path the caller gave); `path` is where it is read.
 async function readDefinitionFile($: EngineInterface, path: string, shown = path): Promise<Result<unknown>> {
@@ -1472,24 +1584,31 @@ async function startRequest($: EngineInterface, input: ToolInput): Promise<ToolR
   const source = await requestedDefinition($, input)
   if (!source.ok) return err(source.error)
   if (input.dryRun !== true) return startDefinition($, source.value, 'model')
-  const previewed = previewRequest(source.value)
+  const previewed = await previewRequest($, source.value)
   if (!previewed.ok) return err(previewed.error)
   const { preview, existing } = previewed.value
   return ok({
     dry_run: true,
     preview: { ...preview, warnings: [...preview.warnings, ...planningWarning()] },
-    ...(existing ? { existing_run_id: existing.runId } : {}),
+    ...(existing ? { existing_run_id: existing.runId } : { preview_id: rememberPreview(source.value) }),
   })
 }
 
 async function requestedDefinition($: EngineInterface, input: ToolInput): Promise<Result<unknown>> {
   const hasDefinition = input.definition !== undefined && input.definition !== null
   const hasPath = input.path !== undefined && input.path !== null
-  if (hasDefinition === hasPath) {
+  const hasPreview = input.preview_id !== undefined && input.preview_id !== null
+  const sources = [hasDefinition, hasPath, hasPreview].filter(Boolean).length
+  if (sources !== 1) {
     return fail(
       'invalid_request',
-      `start takes exactly one of "definition" (the definition object) and "path" (a project-relative .yaml, .yml or .json definition file); got ${hasPath ? 'both' : 'neither'}.`,
+      `start takes exactly one of "definition" (the definition object), "path" (a project-relative .yaml, .yml or .json definition file) and "preview_id" (from a dry run in this session); got ${sources === 0 ? 'none' : sources}.`,
     )
+  }
+  if (hasPreview) {
+    const kept = typeof input.preview_id === 'string' ? previews.get(input.preview_id) : undefined
+    if (kept === undefined) return fail('unknown_preview', `No dry run in this session returned preview_id ${JSON.stringify(input.preview_id)}; send the definition or path again.`)
+    return { ok: true, value: kept }
   }
   if (!hasPath) return { ok: true, value: input.definition }
   const given = input.path
@@ -1607,7 +1726,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   if (input.action === 'amend') {
     const parsed = parseDefinition(input.definition)
     if (!parsed.ok) return err(parsed.error)
-    const problem = verificationProblem(parsed.value)
+    const problem = verificationProblem(parsed.value) ?? await missingProgramProblem($, parsed.value)
     if (problem) return err(problem)
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
@@ -1860,7 +1979,7 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
     if (!given) return { text: USAGE }
     const read = await readDefinitionFile($, await commandFilePath($, given))
     if (!read.ok) return { text: read.error.message }
-    const previewed = previewRequest(read.value)
+    const previewed = await previewRequest($, read.value)
     if (!previewed.ok) return { text: `DAG not previewed:\n${JSON.stringify({ error: previewed.error }, null, 2)}` }
     return { text: previewText(previewed.value.preview, previewed.value.existing?.runId) }
   }
@@ -2637,7 +2756,7 @@ export function register(on: On, options: PluginOptions) {
       }
       const target = (e as { file_path?: unknown }).file_path
       if (owner && e.tool === 'Write' && typeof target === 'string' && isBlockedReportPath(target)) {
-        return { deny: `Claude Code refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files ("Subagents should return findings as text, not write report files"). Put the full file text in ## Output (or write ${owner.nodeId}-notes.md); the main conversation writes the requested file after the run settles. Bash, mv or a rename is no way around it.` }
+        return { deny: `Claude Code refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files ("Subagents should return findings as text, not write report files"). Put the full file text in ## Output (or write ${notesNameFor(owner.nodeId)}); the main conversation writes the requested file after the run settles. Bash, mv or a rename is no way around it.` }
       }
       activity.set(agentId, toolStarted(e.tool, Date.now()))
       // A node loads its skills with the Skill tool (node-prompt.ts), and skill.prompt carries no agent id, so it cannot

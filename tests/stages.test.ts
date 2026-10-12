@@ -259,6 +259,15 @@ test('review-spec prompt carries the request verbatim, the goal, the change, the
   ]) expect({ text, found: prompt.includes(text) }).toEqual({ text, found: true })
 })
 
+test('both reviewers keep their notes terse and the spec audit caps its own probes', () => {
+  const definition = parse({ review: { request: REQUEST } })
+  const spec = node(definition, 'review-spec').prompt
+  for (const text of ['Keep the file terse', 'at most two probes of your own', 'never write verifier scripts, test harnesses or mutants', 'in one or two lines']) {
+    expect({ text, found: spec.includes(text) }).toEqual({ text, found: true })
+  }
+  expect(node(definition, 'review-standards').prompt).toContain('Keep the file terse')
+})
+
 test('review-spec says so when the user nodes declare no command check', () => {
   const nodes = [{ id: 'docs', prompt: full('document'), verify: [{ kind: 'file', path: 'README.md', contains: '## CLI' }] }]
   const parsed = parseDefinition({ key: 'k', goal: 'g', nodes, review: { request: REQUEST } })

@@ -166,7 +166,7 @@ mod는 이 스킬을 강제로 연결합니다.
 - 노드가 끝나면 전체 보고서는 `.claude/dag/runs/<run_id>/<node>.md`에 저장되고, 출력(`## Output` 섹션, 없으면 보고서 전체)은 상태에 기록됩니다.
 - 하위 노드의 프롬프트에는 `dependsOn`에 적힌 직접 의존 노드들의 출력(노드당 4,000자까지)과 전체 보고서 경로가 `<upstream_results>`로 자동으로 들어갑니다. 정의의 `goal`은 모든 노드에 전달됩니다.
 - 메인 대화는 노드마다 출력 발췌가 담긴 짧은 진행 알림을 받고, 정착하면 모든 노드의 출력과 보고서 경로가 담긴 요약을 받습니다.
-- 사용자가 `report.md`처럼 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*` 이름의 파일을 요구하면 노드는 호스트가 서브에이전트의 쓰기를 거부하므로 전체 텍스트를 `## Output`에 돌려주고(또는 `<node-id>-notes.md`에 쓰고), 메인 대화가 정착 뒤에 그 내용을 해당 파일로 그대로 씁니다([강제](#강제)).
+- 사용자가 `report.md`처럼 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*` 이름의 파일을 요구하면 노드는 호스트가 서브에이전트의 쓰기를 거부하므로 전체 텍스트를 `## Output`에 돌려주고(또는 `<node-id>-notes.md`에 쓰고), 메인 대화가 정착 뒤에 그 내용을 해당 파일로 그대로 씁니다([강제](#강제)). 노드 id가 `report-draft`처럼 이 이름들로 시작하면 `<node-id>-notes.md`도 거부되므로 `notes-<node-id>.md`를 씁니다. lint 경고와 거부 메시지도 이 이름을 제안하며, 경고는 같은 경로를 여러 번 적어도 노드마다 한 번만 나옵니다.
 
 **비대화형 세션에서 세션 유지**: 비대화형 세션(`claude -p` 등)에서는 메인 턴이 끝나도 이 세션의 실행이 `running`인 동안 플러그인이 그 턴의 `turn.complete`를 `sleep 1` 반복으로 붙잡아 세션을 열어 둡니다. 그런데 호스트는 붙잡힌 메인 턴을 끝난 뒤 60초까지만 기다립니다. 넘기면 `[WARN] headless session: turn events still running after 60000ms; the turn ends without them and their late notes are dropped`를 남기고, 그 뒤에는 살아 있는 노드 에이전트만 프로세스를 붙잡습니다. 그래서 메인 턴이 끝나고 60초가 지난 뒤에 노드가 끝나면 플러그인이 그 노드를 검증하거나 다음 노드를 띄우는 도중에 세션이 종료되어, 실행은 `running`, 노드는 `scheduled`나 `running`인 채 종료 코드 0으로 끝나곤 했습니다(백로그 B6). 이제 메인 턴이 붙잡힌 동안 노드 에이전트가 끝나면 플러그인이 검증보다 먼저 짧은 진행 프롬프트를 제출합니다. 노드가 끝났고 검증과 후속 실행은 백그라운드에서 이어진다고 알리며, 도구를 부르지 말고 한 줄로 답한 뒤 턴을 끝내라고 요청하는 내용입니다. 호스트가 이 프롬프트로 새 메인 턴을 시작하면 세션이 유지되고, 그 턴이 끝나면 플러그인은 실행이 정착할 때까지 다시 붙잡습니다. 비용은 노드가 끝날 때마다 메인 모델 턴이 짧게 한 번 더 도는 것입니다(그 프롬프트의 턴이 시작되기 전에 겹쳐 끝난 노드는 프롬프트 하나로 묶습니다). 이 턴의 한 줄 답변은 `claude -p`의 stdout에 그대로 나타납니다. 제출이 거부되거나 버려지면 `could not keep the session open for <run_id>/<node>`를 로그에 남깁니다. 대화형 세션은 영향을 받지 않습니다.
 
@@ -222,6 +222,7 @@ nodes:
 | `load_skills`                          | 노드가 시작 전에 불러올 스킬 이름                                                                                                                                                               |
 | `verify`                               | **`start`·`amend`에서 필수.** 런타임이 직접 실행할 검사 1-16개. 파일 검사(`contains`/`absent`/`matches`/`lastLine`/`equals`)와 명령 검사(`expect`)의 문법은 [검증](#검증)                                                                                                                         |
 | `writes`                               | 이 노드가 쓸 프로젝트 상대 경로나 폴더. 다른 세션과 겹치는지 보여 주는 데만 쓰고, 쓰기를 막지는 않습니다                                                                                                                     |
+| `external`                             | 이 노드가 프로젝트 파일 밖을 바꾸면 `true`(push, 배포, DB·스토리지·설정 변경, 메시지 전송). 자동 리뷰 수정 라운드는 이런 노드를 다시 실행하지 않습니다 |
 | `review` (정의 수준)                      | `{request, notes?, category?, rules?, security?}`. 선언하면 파싱할 때 `review-spec`과 `review-standards` 노드로 확장하고, `security`가 있으면 보안 관점 노드 7개와 `review-security`도 만듭니다. `request`는 사용자의 요청 문장으로, `review-spec` 프롬프트에 그대로 붙여 넣습니다. 이 id로 노드를 직접 정의하면 안 됩니다. 자세한 내용은 [검토와 커밋 단계](#검토와-커밋-단계) |
 | `commit` (정의 수준)                      | `[{message, paths}]`. 선언하면 파싱할 때 노드 `commit`으로 확장합니다. 항목마다 `paths`만 스테이징해 `message`로 순서대로 커밋하며, 다른 변경은 스테이징하지 않고 푸시하지 않습니다 |
 
@@ -284,7 +285,7 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 | --- | --- |
 | `contains` | 그 문자열이 들어 있음(빈 문자열 불가) |
 | `absent` | 그 문자열이 없음 |
-| `matches` | 자바스크립트 정규식이 텍스트에서 일치. 여러 줄 모드라서 `^`와 `$`가 줄마다 맞음 |
+| `matches` | 자바스크립트 정규식이 텍스트에서 일치. 여러 줄 모드라서 `^`와 `$`가 줄마다 맞음. 다른 정규식 문법(`\A`, `\Z`, `\z`, `\p{L}`, `[[:digit:]]` 등)은 자바스크립트에서 오류 없이 평범한 글자로 읽혀 절대 통과하지 않으므로 `invalid_verification`으로 거부합니다. 텍스트 맨 앞은 `(?<![\s\S])`, 맨 끝은 `(?![\s\S])`로 씁니다 |
 | `lastLine` | 끝의 공백을 지운 텍스트의 마지막 줄이 이 문자열과 같음 |
 | `equals` | 끝의 공백을 지운 전체 텍스트가 이 문자열과 같음 |
 
@@ -301,6 +302,7 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 - 형식은 `{exit?, stdout?, stderr?}`입니다. `exit`는 숫자 하나이거나 숫자 배열이고, 종료 코드가 거기에 들어 있어야 통과합니다. `exit`를 주지 않으면 종료 코드 0만 통과합니다.
 - `stdout`과 `stderr`에는 위 텍스트 필드를 씁니다.
 - 프로그램이 시작되지 못하거나(없는 프로그램, 권한 오류) 30초 제한을 넘기면 `expect`에 무엇을 적었든 실패입니다.
+- 명령은 Claude Code 프로세스의 PATH로 셸 프로필 없이 실행됩니다. 그래서 `start`·`amend`·dry run·`/dag preview`는 노드를 띄우기 전에 `argv[0]`과 `sh -c`/`bash -c` 스크립트 안의 명령 이름을 그 PATH에서 찾아보고, 없는 프로그램이 있으면 `invalid_verification`으로 거부합니다. Claude의 Bash 도구에는 있는 `rg` 같은 프로그램이 이 환경에는 없을 수 있기 때문입니다. `./run.sh`처럼 경로로 부른 프로그램, 로그인 셸(`-l`), here-document·`case`·`source`·`PATH=` 등 해석하지 않는 구문이 있는 스크립트는 찾아보지 않습니다.
 
 예시입니다. 첫 검사는 폴더 전체에서 지운 옵션 이름이 남지 않았는지, 둘째는 `/tmp`의 노트 파일 마지막 줄이 판정 줄인지, 셋째는 잘못된 입력을 넣었을 때 종료 코드 1로 끝나며 이유를 stderr에 적는지 확인합니다.
 
@@ -356,7 +358,7 @@ verify:
 
 두 축 검토 한 쌍과 커밋 노드는 모든 코드 변경 실행에 같은 모양으로 들어가므로, 손으로 쓰지 않고 정의 수준의 `review`와 `commit` 필드로 선언합니다. 플러그인이 정의를 파싱할 때(`start`, `amend`, `/dag run`, 드라이런) 이 필드를 노드로 확장하고, 그 노드의 검사도 [검증](#검증)의 검사 문법으로 만들어 붙입니다. 프롬프트는 템플릿입니다. 드라이런(`start {dryRun: true}`)의 `preview`에는 확장된 노드가 보입니다.
 
-- `review: {request, notes?, category?, rules?, security?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다. `security`는 아래 [보안 검토 (선택)](#보안-검토-선택)에 있습니다.
+- `review: {request, notes?, category?, rules?, security?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. 검토는 크리티컬 패스 끝에 있으므로 템플릿이 범위를 정해 둡니다. 노트는 항목마다 한 줄로 쓰고 출력은 결정적인 줄만 인용합니다. `review-spec`은 선언된 검사 외에 직접 만든 probe를 두 개까지만 실행하고(안전하지만 틀린 산출물 점검표의 2·3번), 검증 스크립트·테스트 하네스·mutant를 만들지 않습니다. 2026-10-10 eval에서 최종 감사 노드는 150-230초, 생산 노드는 5-30초였고, 감사 하나는 직접 만든 검증 스크립트와 mutant에 약 95초를 썼습니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다. `security`는 아래 [보안 검토 (선택)](#보안-검토-선택)에 있습니다.
 - `commit: [{message, paths}]`: 노드 `commit`을 만듭니다. `review`가 있으면 검토 노드(`security`가 있으면 세 개, 없으면 두 개) 뒤에, 없으면 모든 사용자 노드 뒤에 실행합니다. 항목마다 그 `paths`만 스테이징해 `message`로 순서대로 커밋하고, 다른 변경은 스테이징하지 않으며 푸시하지 않습니다. 검증은 세 가지입니다. 커밋마다 `git log --format=%s`의 제목이 `message`의 첫 줄(제목)과 같은지만 비교하고(본문은 비교하지 않습니다), 나열한 `paths`가 모두 커밋됐는지(`git status --porcelain -- <paths>`가 비었는지) 확인하며, 각 커밋이 자기 `paths` 밖의 파일을 하나도 바꾸지 않았는지 확인합니다. 마지막 검사가 `git add -A` 같은 넓은 스테이징으로 관련 없는 변경이 커밋에 섞이는 것을 막습니다.
 
 `review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `security`가 있으면 `review-security`, `security-<관점>`, `security-verify-`로 시작하는 id도 마찬가지입니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
@@ -409,6 +411,8 @@ review:
 - `transient`(일시 오류): 같은 등급 모델로 다시 실행합니다.
 - `implementation`(구현 실수): Opus로 다시 실행합니다.
 - `missing-input`, `clarification`, `permanent`, 낮은 확신도, API 실패, 사용자 취소, 인계 중인 실행, 검증 계약이 없는 노드는 자동으로 재시도하지 않습니다.
+- 리뷰·감사 노드의 FAIL 판정(`Spec`/`Standards`/`Security verdict: FAIL`, `partial/supporting-output`)도 재시도하지 않습니다. 같은 결과물을 다시 리뷰해도 판정은 그대로이기 때문입니다(2026-10-12, 실제 run 4개에서 Opus 재시도 7번이 같은 FAIL을 되풀이하며 54분을 썼습니다). 대신 실행에서 실패한 노드가 이런 판정뿐이면, 실행당 한 번 **리뷰 수정 라운드**를 돕니다. 지적이 가리키는 producer(생산 노드가 하나면 그 노드, 여럿이면 지적에 나온 `파일:줄`이 `writes` 범위에 드는 노드)를 지적 내용을 프롬프트에 붙여 다시 실행하고, 그 뒤의 노드(리뷰·커밋)도 다시 실행합니다. 생성된 리뷰 노드의 지적은 노트의 `## Findings`·`## Rule breaches`·`## Breaches` 절에서 읽습니다. 리뷰가 통과하면 정착 메시지에 "자동 수정 라운드가 producer를 다시 실행했다"는 줄이 붙고, 다시 FAIL이면 "라운드를 이미 썼다"는 줄과 남은 지적을 담아 정착 메시지를 보내고, 지적이 어느 `writes`에도 닿지 않으면 예전처럼 바로 정착합니다. 라운드가 다시 실행할 노드 중 이미 끝난 노드가 프로젝트 밖을 바꾸는 노드면 라운드를 돌지 않습니다. `external: true`로 표시했거나, `writes`를 선언하지 않았거나, id·라벨·요약에 push·deploy·publish·upload·migrate·delete·commit·prod 같은 단어가 있는 노드가 여기에 해당합니다. 실제 run에서 외부 작업을 한 노드(`apply-env`, `setup-assets`, `delete-token-row`, `commit-push`)는 모두 `writes`가 없었습니다. 이때 FAIL은 바로 정착하고, 정착 메시지에 이유와 함께 "지적을 검토하고 외부 작업을 다시 하기 전에 사용자에게 수정 방향을 물으라"는 안내가 붙습니다. 지적이 어느 producer에도 닿지 않아 라운드를 돌지 않을 때도 이유가 붙습니다. `auto_recovery=false`면 이 라운드도 돌지 않습니다.
+- 검사 자체의 결함(`check-defect`)도 재시도하지 않고 Jev에 묻지도 않습니다. 검사 프로그램이 PATH에 없어 시작되지 못했거나, 검사의 셸이 종료 코드 127로 "command not found"를 냈거나(`./dist/cli`처럼 경로로 부른 프로그램은 제외), 워커가 `DAG_NODE_STATUS: failed: check-defect - <이유>`로 보고한 경우입니다. 다시 실행해도 같은 검사가 또 실패하기 때문입니다. 오류는 `check-defect:`로 시작하고, 메인 대화가 검사를 `amend`로 고칩니다.
 - 노드마다 자동 추가 시도는 최대 2번입니다. 원래 프롬프트·범위·목표를 그대로 두고 실패 이유와 "선언한 검증을 다시 실행하라"는 지시만 덧붙이며, 사용한 횟수는 체크포인트에 남아 다시 늘어나지 않습니다.
 - 실패 때문에 건너뛴 하위 노드도 함께 대기 상태로 돌아갑니다. 모든 복구 판단은 [판단 기록](#판단-기록)에 남습니다.
 
@@ -453,7 +457,7 @@ review:
 | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | `start {definition}`                       | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict`. 결과에 계약 점검 `warnings` 포함             |
 | `start {path}`                             | `definition` 대신 프로젝트 상대 `.yaml`/`.yml`/`.json` 정의 파일 경로를 받습니다. `/dag run`과 똑같이 읽고 파싱한 뒤 `start {definition}`과 똑같이 시작하므로 계획 스킬 게이트, 린트 `warnings`, 키 재사용이 같습니다. `definition`과 `path` 중 정확히 하나만 허용하며 둘 다 주거나 둘 다 없으면 `invalid_request`입니다. 경로는 `..` 없는 프로젝트 상대 경로이고 `.claude` 밖이며 위 확장자여야 하고, 어기면 `invalid_request`입니다. 읽기나 파싱에 실패하면 경로를 담은 `definition_unreadable`을 돌려줍니다. 모델이 YAML 흐름을 JSON으로 직접 옮겨 적지 않아도 되며, `/dag run`은 계속 사용자 명령이고 절대 경로도 받습니다 |
-| `start {dryRun: true}`                     | 정의를 검증만 하고 실행은 만들지 않은 채 `{dry_run: true, preview}`를 돌려줍니다. `definition` 또는 `path`와 함께 씁니다. `preview`에는 단계별 노드 id `waves`, `critical_path`, `node_count`, 노드별 `nodes`(`wave`, 실효 `category`, `model`, `agent`, `depends_on`, `checks`, `writes`, `load_skills`), 동시에 실행될 수 있는 노드끼리 `writes`가 겹치는 쌍 `write_conflicts`, `widest_wave`, `max_concurrent`, `start`가 돌려주는 것과 같은 린트 `warnings`가 들어 있고, 같은 키로 같은 정의가 이미 실행됐다면 `existing_run_id`도 붙습니다. `writes`를 선언하지 않은 노드는 `writes`가 null이고, 그런 노드 중 다른 노드와 동시에 실행될 수 있는 것은 `unchecked_writes`에 나열됩니다. 이 노드들은 충돌을 점검하지 못했다는 뜻이며, `writes: []`는 읽기 전용으로 선언한 범위입니다. 알 수 없는 category는 `warnings`에 경고가 추가됩니다. `routing_note`는 category와 모델이 정의가 내놓은 제안값이며 실제로 시작할 때 Jev가 노드를 다시 분류할 수 있다고 알려 주므로, 표시된 category는 최종 감사 규칙까지 적용한 제안값입니다. 계획 스킬 게이트는 드라이런에도 적용됩니다. `dryRun`이 불리언이 아니면 `invalid_request`로 거부하고, `amend`는 `dryRun`을 받지 않고 거부합니다. 사용자는 `/dag preview <file>`로 정의 파일에 같은 미리보기를 볼 수 있습니다. `/dag preview`는 계획 스킬 게이트를 받지 않는 사용자 명령이며, 아무것도 시작하지 않으므로 `/dag run`과 달리 모델 턴 중에도 즉시 실행됩니다 |
+| `start {dryRun: true}`                     | 정의를 검증만 하고 실행은 만들지 않은 채 `{dry_run: true, preview}`를 돌려줍니다. `definition` 또는 `path`와 함께 씁니다. `preview`에는 단계별 노드 id `waves`, `critical_path`, `node_count`, 노드별 `nodes`(`wave`, 실효 `category`, `model`, `agent`, `depends_on`, `checks`, `writes`, `load_skills`), 동시에 실행될 수 있는 노드끼리 `writes`가 겹치는 쌍 `write_conflicts`, `widest_wave`, `max_concurrent`, `start`가 돌려주는 것과 같은 린트 `warnings`가 들어 있고, 같은 키로 같은 정의가 이미 실행됐다면 `existing_run_id`도 붙고, 아니면 `preview_id`가 붙습니다. `start {preview_id}`는 미리 본 정의를 그대로 시작하므로 모델이 정의를 다시 쓰지 않아도 됩니다(eval에서 이 두 번째 출력에 11-31초가 들었습니다). 시작할 때 키 재사용·검증·PATH 검사를 처음처럼 다시 하며, `preview_id`는 이 세션의 최근 드라이런 8개까지만 기억합니다. 모르는 값은 `unknown_preview`로 거부합니다. `writes`를 선언하지 않은 노드는 `writes`가 null이고, 그런 노드 중 다른 노드와 동시에 실행될 수 있는 것은 `unchecked_writes`에 나열됩니다. 이 노드들은 충돌을 점검하지 못했다는 뜻이며, `writes: []`는 읽기 전용으로 선언한 범위입니다. 알 수 없는 category는 `warnings`에 경고가 추가됩니다. `routing_note`는 category와 모델이 정의가 내놓은 제안값이며 실제로 시작할 때 Jev가 노드를 다시 분류할 수 있다고 알려 주므로, 표시된 category는 최종 감사 규칙까지 적용한 제안값입니다. 계획 스킬 게이트는 드라이런에도 적용됩니다. `dryRun`이 불리언이 아니면 `invalid_request`로 거부하고, `amend`는 `dryRun`을 받지 않고 거부합니다. 사용자는 `/dag preview <file>`로 정의 파일에 같은 미리보기를 볼 수 있습니다. `/dag preview`는 계획 스킬 게이트를 받지 않는 사용자 명령이며, 아무것도 시작하지 않으므로 `/dag run`과 달리 모델 턴 중에도 즉시 실행됩니다 |
 | `snapshot {run_id}` / `list`               | 상태 조회(노드 답변 발췌 포함)                                                                            |
 | `wait {run_id}`                            | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다                                   |
 | `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |
@@ -533,7 +537,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 
 | 키                              | 기본값       | 설명                                                                                                                |
 | ------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `auto_recovery`                | `true`    | 확신도 높은 Jev 실패 분류로 노드당 최대 2번 자동 재시도([자동 복구](#자동-복구))                                                               |
+| `auto_recovery`                | `true`    | 확신도 높은 Jev 실패 분류로 노드당 최대 2번 자동 재시도, 리뷰 FAIL은 실행당 한 번 리뷰 수정 라운드([자동 복구](#자동-복구))                                                               |
 | `jev_enabled`                  | `true`    | Jev의 카테고리 배정·도구 자동 승인 사용(키 또는 세션 모델 대체가 필요)                                                                       |
 | `jev_model_fallback`           | `true`    | 키가 없거나 TypeSafe API가 실패·시간 초과·오류 상태일 때 세션의 Sonnet 모델로 대신 판단. 사용량은 사용자의 Claude 요금제에 포함                             |
 | `jev_confidence`               | `0.9`     | TypeSafe API의 카테고리 배정과 모든 도구 승인·복구 판단을 자동 적용할 최소 확신도(0–1)                                                         |
@@ -579,10 +583,10 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 
 ```bash
 bun eval/run.ts --list
-bun eval/run.ts [--only id,id] [--concurrency 4] [--model sonnet] [--timeout-min 15] [--keep]
+bun eval/run.ts [--only id,id] [--concurrency 4] [--model sonnet] [--timeout-min 15] [--keep] [--enforcement strict]
 ```
 
-러너는 시나리오마다 `/tmp/dag-shapes/<stamp>/<id>`에 고정 파일을 만들어 첫 커밋 하나가 있는 git 저장소로 초기화하고 `claude -p --plugin-dir <이 저장소>`를 실행합니다(현재 계정의 사용량을 씁니다). 생성되는 검토 노드(`review-spec`, `review-standards`)가 `git diff`로 변경을 읽기 때문입니다. 머리말에 `Fixtures: git repositories with one initial commit.`이 없는 결과(스탬프 `20261010113334`까지)는 git 저장소가 아닌 고정 파일에서 측정한 것입니다. 끝나면 체크포인트의 정의로 노드 수, 깊이, 레이어 폭, 팬인 노드, 검증 노드, 경고, 카테고리, 형태(전체와 검증 노드를 뺀 생산자 형태)를 측정하고, 세션 기록에서 스킬 로드가 start보다 먼저였는지와 거부 횟수를 확인하며, 결과 확인 명령을 실행합니다. 결과는 `eval/results/<stamp>.md`와 `.json`에 저장되고, 고정 파일 디렉터리는 `--keep`이 없으면 지워집니다.
+러너는 시나리오마다 `/tmp/dag-shapes/<stamp>/<id>`에 고정 파일을 만들어 첫 커밋 하나가 있는 git 저장소로 초기화하고 `claude -p --plugin-dir <이 저장소>`를 실행합니다(현재 계정의 사용량을 씁니다). 생성되는 검토 노드(`review-spec`, `review-standards`)가 `git diff`로 변경을 읽기 때문입니다. 머리말에 `Fixtures: git repositories with one initial commit.`이 없는 결과(스탬프 `20261010113334`까지)는 git 저장소가 아닌 고정 파일에서 측정한 것입니다. 끝나면 체크포인트의 정의로 노드 수, 깊이, 레이어 폭, 팬인 노드, 검증 노드, 경고, 카테고리, 형태(전체와 검증 노드를 뺀 생산자 형태)를 측정하고, 세션 기록에서 스킬 로드가 start보다 먼저였는지와 거부 횟수를 확인하며, 결과 확인 명령을 실행합니다. 결과는 `eval/results/<stamp>.md`와 `.json`에 저장되고, 고정 파일 디렉터리는 `--keep`이 없으면 지워집니다. `--enforcement <수준>`은 `--settings`의 `pluginConfigs`로 그 실행의 `enforcement`를 정합니다. 기본값이 `auto`가 된 뒤로는 작은 시나리오가 직접 실행될 수 있으므로, `strict`에서 찍은 기준선과 비교할 때는 `--enforcement strict`를 줍니다. 머리말에 `Enforcement: strict.`가 붙습니다.
 
 결과 표의 `AskUserQuestion calls` 열(`refusals (planning/tools)` 바로 뒤)은 시나리오 세션 기록의 메인 대화에서 `AskUserQuestion` 도구를 호출한 횟수입니다(서브에이전트 호출은 세지 않습니다). `claude -p`는 비대화형 세션이라 프로토콜이 사용자에게 묻지 말라고 알리므로 기대값은 0이고, 0보다 크면 모델이 물으려 했다는 뜻입니다. 사용자의 답이 있어야 하는 인터뷰(`interview`, `pm`)는 `claude -p`로 측정할 수 없습니다.
 

@@ -102,6 +102,35 @@ test('a dry run reads a definition file by path and previews it like the inline 
   expect(await dag($, { action: 'start', definition: DEFINITION, path: 'flows/demo.yaml', dryRun: true })).toMatchObject({ error: { code: 'invalid_request' } })
 })
 
+test('start {preview_id} starts the previewed definition without sending it again', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flows/demo.yaml', DEFINITION_YAML)
+  await boot($)
+  const previewed = await dag($, { action: 'start', definition: DEFINITION, dryRun: true })
+  expect(typeof previewed.preview_id).toBe('string')
+  const started = await dag($, { action: 'start', preview_id: previewed.preview_id })
+  expect(started).toMatchObject({ reused: false })
+  expect(h.spawns).toHaveLength(2)
+  const saved = JSON.parse(h.files.get(`${ROOT}/runs/${String(started.run_id)}.json`) ?? 'null')
+  expect(saved.definition.nodes.map((node: { id: string }) => node.id)).toEqual(['api', 'ui', 'wrap'])
+  // Started again, the same preview is the same definition under its key, so start hands back the run.
+  expect(await dag($, { action: 'start', preview_id: previewed.preview_id })).toMatchObject({ reused: true, run_id: started.run_id })
+  const byPath = await dag($, { action: 'start', path: 'flows/demo.yaml', dryRun: true })
+  expect(byPath).toMatchObject({ dry_run: true, existing_run_id: started.run_id })
+})
+
+test('a preview_id is screened again at start, and one no dry run returned is refused', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const previewed = await dag($, { action: 'start', definition: DEFINITION, dryRun: true })
+  // Between the dry run and the start another definition took the key, so the kept preview now conflicts.
+  await start($, { ...DEFINITION, nodes: DEFINITION.nodes.slice(0, 2) })
+  expect(await dag($, { action: 'start', preview_id: previewed.preview_id })).toMatchObject({ error: { code: 'definition_conflict' } })
+  expect(await dag($, { action: 'start', preview_id: 'pv_unknown' })).toMatchObject({ error: { code: 'unknown_preview' } })
+  expect(await dag($, { action: 'start', preview_id: previewed.preview_id, definition: DEFINITION })).toMatchObject({ error: { code: 'invalid_request' } })
+  expect(h.spawns).toHaveLength(2)
+})
+
 test('an invalid definition fails a dry run with the same error code as start', async ($, on) => {
   const h = harness(on)
   await boot($)
@@ -215,7 +244,8 @@ test('a dry run opens no pane and schedules nothing, while a real start does', a
   await h.clock.settle()
   expect(opened).toHaveLength(0)
   expect(h.spawns).toHaveLength(0)
-  expect(h.processes).toHaveLength(processes)
+  // The one process a dry run may start is the read-only PATH lookup of its verify programs.
+  expect(h.processes.slice(processes).filter(run => !(run.argv[0] === 'sh' && run.argv[2]?.includes('command -v')))).toHaveLength(0)
   expect(h.requests).toHaveLength(0)
   expect(h.sends).toHaveLength(0)
   expect(h.toasts).toHaveLength(0)

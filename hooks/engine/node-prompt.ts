@@ -1,5 +1,6 @@
 import type { NodeOutcome } from './run.ts'
 import type { NodeDef, NodeRun, Run } from './types.ts'
+import { CHECK_DEFECT } from './check-eval.ts'
 
 export const STATUS_PREFIX = 'DAG_NODE_STATUS:'
 export const UPSTREAM_OUTPUT_CHARS = 4_000
@@ -86,6 +87,7 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
     `${STATUS_PREFIX} completed`,
     'or, if you could not complete the task:',
     `${STATUS_PREFIX} failed: <one-line reason>`,
+    ...(def.verify ? [`If a plugin-run check cannot pass even on a correct deliverable (it needs a program that is missing, or its pattern can never match), finish the task, show the deliverable is right another way, and end with ${STATUS_PREFIX} failed: ${CHECK_DEFECT} - <which check and why>. A retry cannot fix a check, so the main conversation amends it.`] : []),
   ].join('\n')
 }
 

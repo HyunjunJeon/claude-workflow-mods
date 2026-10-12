@@ -95,6 +95,7 @@ Each node has these fields:
 | `dependsOn` | Optional list of node ids that must complete first. |
 | `verify` | Required: 1-16 checks that the runtime executes after the node reports completion. |
 | `writes` | Optional project-relative files or folders the node will change. Makes overlapping scopes across sessions visible. |
+| `external` | `true` when the node changes anything outside the project files: a push, a deploy, a database, storage or settings change, a sent message. The automatic review fix never reruns it. |
 
 Each check uses one of these forms:
 
@@ -171,7 +172,7 @@ The run is done when the goal's observable condition holds, not merely when the 
 - Group related changes into one phase run with one verification wave at the end (one review pair for code), not a review pair per small change.
 - The user can execute definition files with `/dag run <file.yaml|json>` and watch runs in the `/dag` pane.
 - To run a definition that already exists as a file (for example `flows/<name>.yaml`), call `start {path}` with the project-relative `.yaml`, `.yml` or `.json` path instead of transcribing it into `definition`. Pass exactly one of `path` and `definition`. The same planning gate, lint `warnings` and key reuse apply. A bad path returns `invalid_request`; an unreadable or unparsable file returns `definition_unreadable`.
-- To check the waves, models, write conflicts and lint warnings before starting, call `start` with `dryRun: true` (with `definition` or `path`); it validates and returns a preview but creates no run. Nodes without `writes` that can run beside another node are listed in `unchecked_writes`.
+- To check the waves, models, write conflicts and lint warnings before starting, call `start` with `dryRun: true` (with `definition` or `path`); it validates and returns a preview but creates no run. Nodes without `writes` that can run beside another node are listed in `unchecked_writes`. When the preview needs no change, start it with `start {preview_id}` (the dry run returns the id) instead of sending the definition again.
 
 ## Recovering a node - retry, amend, send
 
@@ -187,8 +188,12 @@ You can recover a settled run. Completed nodes keep their results:
 
 After a node reports completion, the runtime executes its `verify` checks.
 Commands run from the project root without a shell, with a 30-second limit. Exit code 0 passes unless `expect.exit` names other codes.
+They run with the host's PATH and no shell profile, so `start` refuses a check whose program (or a command inside its `sh -c` script) is not on that PATH; your Bash tool has `rg`, the verify run may not, so prefer `grep -E`.
 The runtime saves evidence to `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking the node `completed`.
 A failed check or missing evidence makes the node `failed` and prevents its dependents from starting.
+An error that starts with `check-defect` means the check itself cannot pass (its program is missing, or the worker showed it can never hold); no automatic retry runs, so `amend` the check.
+A reviewer or audit FAIL verdict is never retried. Once per run the plugin reruns the producers whose `writes` the findings cite (or the only producer), with the findings in their prompt, then the reviewers. Declare `writes` so it can find them. A second FAIL settles with what the fix left: amend with it.
+The round never reruns a completed node marked `external: true`, one that declares no `writes`, or one named for a push, deploy, upload, migration, delete or commit. Such a FAIL settles at once with the reason: review the findings, then ask the user which way to fix it before anything external runs again.
 
 A passing check proves only what it checks, not semantic correctness.
 Choose checks that fail when the deliverable is wrong. Never use a no-op such as `true`.
@@ -200,7 +205,7 @@ Add `security: [kisa]`, `[owasp]` or both to `review` only when the request or a
 
 Never name deliverables REPORT*.md, SUMMARY*.md, FINDINGS*.md or ANALYSIS*.md when you choose the name.
 Claude Code refuses subagent Write calls to those names (2.1.288, re-checked on 2.1.295).
-Use `<node-id>-notes.md` or return text in `## Output`.
+Use `<node-id>-notes.md` (`notes-<node-id>.md` when the id itself starts with report, summary, findings or analysis) or return text in `## Output`.
 When the user requires such a name, the producing node puts the full file text in `## Output` (or writes `<node-id>-notes.md`).
 After the run settles, the main conversation writes the requested file verbatim with Write, then Reads it back.
 Never ask a node to work around the block with Bash, `mv` or a rename: that circumvents a host guard.

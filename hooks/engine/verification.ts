@@ -27,6 +27,40 @@ export const TEXT_FIELD_LIST = `${TEXT_FIELDS.slice(0, -1).join(', ')} or ${TEXT
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string }
 
+// The letter escapes a check's RegExp (m flag, no u flag) gives a meaning: \d \D \w \W \s \S \b \B \n \r \t \v \f, \cX, \xHH,
+// \uHHHH and \k<name>. Any other backslash-letter is an identity escape that matches the letter itself, so PCRE's and Python's
+// \A, \Z and \z compile and silently match "A", "Z" and "z", and \p{L} matches "p{L}". On 2026-10-10 two eval runs each lost
+// 100-125 s to a `\A# ...` check that could never pass on a correct file: an Opus retry, the settle, an amend and a rerun.
+const JS_LETTER_ESCAPES = new Set('dDwWsSbBnrtvfcxuk')
+const POSIX_CLASS = /^\[:[a-z]+:\]/
+
+const FOREIGN_HINTS: Readonly<Record<string, string>> = {
+  A: 'use ^ for a line start, or (?<![\\s\\S]) for the start of the text',
+  Z: 'use $ for a line end, or (?![\\s\\S]) for the end of the text',
+  z: 'use $ for a line end, or (?![\\s\\S]) for the end of the text',
+  p: 'Unicode property escapes need the u flag, which checks do not set; use a character class such as [A-Za-z]',
+  P: 'Unicode property escapes need the u flag, which checks do not set; use a negated character class',
+}
+
+// The first construct of another regex dialect that compiles in JavaScript with a different meaning, with how to write it.
+export function foreignRegexSyntax(pattern: string): string | undefined {
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index]
+    if (char === '\\') {
+      const next = pattern[index + 1] ?? ''
+      if (/^[A-Za-z]$/.test(next) && !JS_LETTER_ESCAPES.has(next)) {
+        return `\\${next}, which JavaScript reads as the plain letter "${next}"; ${FOREIGN_HINTS[next] ?? 'write the character class or anchor JavaScript knows'}`
+      }
+      index++
+      continue
+    }
+    // Any unescaped [ may open [:name:], so the negated and mixed forms ([^[:space:]], [a-z[:digit:]]) are caught too.
+    const posix = char === '[' ? POSIX_CLASS.exec(pattern.slice(index)) : null
+    if (posix) return `the POSIX class ${posix[0]}, which JavaScript reads as a set of single characters; use \\d, \\s, \\w or a range such as [A-Za-z]`
+  }
+  return undefined
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -49,6 +83,8 @@ function parseTextFields(raw: Record<string, unknown>, where: string): Parsed<Te
       } catch (error) {
         return { ok: false, message: `${where}matches is not a valid regular expression (${error instanceof Error ? error.message : String(error)}).` }
       }
+      const foreign = foreignRegexSyntax(value)
+      if (foreign) return { ok: false, message: `${where}matches is a JavaScript regular expression (m flag) and uses ${foreign}.` }
     }
     parsed[field] = value
   }

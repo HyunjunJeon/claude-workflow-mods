@@ -2,6 +2,7 @@ import { expect, test, type Engine, type Plugin } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { parseContext } from '../hooks/engine/context.ts'
 import { protocolFor } from '../hooks/engine/policy.ts'
+import { defaultNotesFolder } from '../hooks/engine/stages.ts'
 import { boot, checkpoint, command, dag, finish, folder, harness, PROGRAMS, ROOT, start } from './control-harness.ts'
 
 // End-to-end scenarios: each one drives the plugin through a whole lifecycle across features (preview, approval, the
@@ -823,6 +824,115 @@ test('scenario 10, stages: a reviewer whose notes end with a FAIL verdict fails 
   expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: failed.`])
   expect(pluginNews(h)[0]?.text).toContain('- review-spec: failed')
   expect(pluginNews(h)[0]?.text).toContain('- commit: skipped')
+})
+
+// With automatic recovery on, a FAIL verdict is not retried: the run reruns the producer its findings point at, with the
+// findings in its prompt, then both reviewers. Seen in four real runs on 2026-10-12, where Opus retries repeated the verdict.
+async function reviewFixRound($: Engine, h: Harness, key: string) {
+  const notes = defaultNotesFolder(key)
+  await boot($)
+  const runId = await start($, greetFlow(key))
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-4')
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: FAIL', '(a) README.md:3 documents greet(name) but never says what it returns\n(b) none\n(c) none'))
+  await finish($, h, 'agent-3')
+  return { runId, notes }
+}
+
+test('scenario 10, stages: a FAIL verdict reruns only the producer its findings cite, with the findings, and then both reviewers', { plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  const { runId, notes } = await reviewFixRound($, h, 'greet-fix')
+  // No Jev recovery question and no reviewer retry: docs owns README.md, so docs alone goes back.
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(0)
+  expect(h.spawns.map(spawn => spawn.description).slice(4)).toEqual(['Greet: docs'])
+  expect(h.spawns[4]?.prompt).toContain('[Review fix 1/1] After this node completed, review-spec failed')
+  expect(h.spawns[4]?.prompt).toContain('(a) README.md:3 documents greet(name) but never says what it returns')
+  expect(h.spawns[4]?.prompt).not.toContain('## Request sentences')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:running', 'review-spec:pending', 'review-standards:pending', 'commit:pending'])
+  expect(pluginNews(h).filter(submit => submit.text.includes('settled:'))).toEqual([])
+  expect(checkpoint(h, runId).reviewFix).toMatchObject({ rounds: 1, history: [{ reviewers: ['review-spec'], producers: ['docs'] }] })
+
+  // The fixed docs pass, and both reviewers run again on the new work.
+  h.files.set('/work/README.md', '# app\n\nCall greet(name); it returns the greeting string.\n')
+  await finish($, h, 'agent-5')
+  expect(h.spawns.map(spawn => spawn.description).slice(5)).toEqual(['Greet: Review: spec axis', 'Greet: Review: standards axis'])
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: PASS', '(a) none\n(b) none\n(c) none'))
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-6')
+  await finish($, h, 'agent-7')
+  expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:completed', 'review-standards:completed', 'commit:running'])
+  // The commit lands, and the settle message says the producer's second attempt came from the fix round.
+  h.files.set('/repo/log', `${DOCS_SUBJECT}\n${FEAT_SUBJECT}\n`)
+  h.files.set('/repo/changed', 'HEAD~1 src/greet.ts\nHEAD README.md\n')
+  expect(h.spawns.map(spawn => spawn.description).at(-1)).toBe('Greet: Commit')
+  await finish($, h, `agent-${h.spawns.length}`)
+  const settled = pluginNews(h).filter(submit => submit.text.includes('settled:'))
+  expect(settled.map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: ${checkpoint(h, runId).status}.`])
+  expect(settled[0]?.text).toContain('Automatic review fix: round 1 reran docs with the findings of review-spec; the reviewers then passed.')
+})
+
+test('scenario 10, stages: a second FAIL after the review-fix round settles for the main conversation with what the fix left', { plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  const { runId, notes } = await reviewFixRound($, h, 'greet-fix-twice')
+  await finish($, h, 'agent-5')
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: FAIL', '(a) README.md:3 still never says what greet returns\n(b) none\n(c) none'))
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-6')
+  await finish($, h, 'agent-7')
+  expect(checkpoint(h, runId).status).toBe('failed')
+  expect(h.spawns).toHaveLength(7)
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(0)
+  const settled = pluginNews(h).filter(submit => submit.text.includes('settled: failed'))
+  expect(settled).toHaveLength(1)
+  expect(settled[0]?.text).toContain('Automatic review fix: round 1 reran docs with the findings of review-spec. The verdicts above are what that fix left')
+})
+
+test('scenario 10, stages: with two producers and findings that cite no declared write scope, the FAIL settles as before', { plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  const notes = defaultNotesFolder('greet-uncited')
+  await boot($)
+  const runId = await start($, greetFlow('greet-uncited'))
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-4')
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: FAIL', '(a) the greeting is not localised\n(b) none\n(c) none'))
+  await finish($, h, 'agent-3')
+  expect(checkpoint(h, runId).status).toBe('failed')
+  expect(checkpoint(h, runId).reviewFix).toMatchObject({ rounds: 0, history: [] })
+  expect(h.spawns).toHaveLength(4)
+  const settled = pluginNews(h).filter(submit => submit.text.includes('settled: failed'))
+  expect(settled).toHaveLength(1)
+  expect(settled[0]?.text).toContain("No automatic review fix: the findings of review-spec name no file inside one producer's declared writes")
+})
+
+test('scenario 10, stages: a FAIL whose round would rerun a node marked external settles at once, so the fix is reviewed and asked about first', { plugins: [GIT] }, async ($, on) => {
+  const h = harness(on)
+  const notes = defaultNotesFolder('greet-external')
+  await boot($)
+  const flow = greetFlow('greet-external')
+  const runId = await start($, { ...flow, nodes: flow.nodes.map(node => node.id === 'docs' ? { ...node, external: true } : node) })
+  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set('/work/README.md', '# app\n\nCall greet(name) to say hello.\n')
+  await finish($, h, 'agent-1')
+  await finish($, h, 'agent-2')
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-4')
+  h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: FAIL', '(a) README.md:3 never says what greet returns\n(b) none\n(c) none'))
+  await finish($, h, 'agent-3')
+  expect(checkpoint(h, runId).status).toBe('failed')
+  expect(h.spawns).toHaveLength(4)
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(0)
+  const settled = pluginNews(h).filter(submit => submit.text.includes('settled: failed'))
+  expect(settled).toHaveLength(1)
+  expect(settled[0]?.text).toContain('No automatic review fix: docs already ran and declares external: true, so the round does not rerun it unattended.')
+  expect(settled[0]?.text).toContain('ask the user which direction to take')
 })
 
 // The harness answers every `rm` with exit 0 and leaves its files alone, which would hide a missing removal. This makes

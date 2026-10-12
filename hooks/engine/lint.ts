@@ -16,6 +16,13 @@ export function isBlockedReportPath(path: string): boolean {
   return HOST_BLOCKED_REPORT_NAME.test(path.split(/[\\/]/).pop() ?? '')
 }
 
+// The notes file name to suggest instead of a report name. <id>-notes.md is the doctrine's name, but an id that itself starts
+// like a report (report-draft) gives report-draft-notes.md, which the host refuses as well, so the id moves behind notes-.
+export function notesNameFor(nodeId: string): string {
+  const name = `${nodeId}-notes.md`
+  return isBlockedReportPath(name) ? `notes-${nodeId}.md` : name
+}
+
 export function isVerificationNode(node: NodeDef): boolean {
   if (node.dependsOn.length === 0) return false
   return [node.id, node.label, node.task_summary, node.description].some(text => text !== undefined && hasVerificationWord(text))
@@ -110,11 +117,11 @@ export function lintDefinition(definition: Definition): string[] {
       warnings.push(`node "${node.id}": the prompt lacks ${missing.join(' and ')} - follow the node prompt contract (TASK, DELIVERABLE, SCOPE, VERIFY, STOP WHEN).`)
     }
   }
+  // One warning per node: a notes path is usually both checked (lastLine, contains) and written, and each mention used to repeat it.
   for (const node of definition.nodes) {
-    for (const path of [...checkedFiles(node), ...(node.writes ?? [])]) {
-      if (isBlockedReportPath(path)) {
-        warnings.push(`node "${node.id}": "${path}" is named like a report, and Claude Code 2.1.295 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${node.id}-notes.md or return the text in ## Output; if the user requires this exact name, the main conversation writes the file after the run settles.`)
-      }
+    const blocked = [...new Set([...checkedFiles(node), ...(node.writes ?? [])].filter(isBlockedReportPath))]
+    if (blocked.length > 0) {
+      warnings.push(`node "${node.id}": ${blocked.map(path => `"${path}"`).join(', ')} ${blocked.length === 1 ? 'is' : 'are'} named like a report, and Claude Code 2.1.295 refuses subagent writes to REPORT*, SUMMARY*, FINDINGS* and ANALYSIS* Markdown files - use a different name such as ${notesNameFor(node.id)} or return the text in ## Output; if the user requires this exact name, the main conversation writes the file after the run settles.`)
     }
   }
   for (const node of definition.nodes) {

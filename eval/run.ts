@@ -9,7 +9,18 @@ import { shapeOf, type ShapeMetrics } from './shape.ts'
 const REPO = realpathSync(new URL('..', import.meta.url).pathname)
 const MAIN_TOOLS = ['mcp__dag-workflow__dag', 'Skill', 'Read', 'Write', 'Edit', 'Bash', 'TaskStop', 'ToolSearch', 'LSP']
 
-type Options = { list: boolean; only?: string[]; concurrency: number; model: string; timeoutMin: number; keep: boolean }
+type Options = { list: boolean; only?: string[]; concurrency: number; model: string; timeoutMin: number; keep: boolean; enforcement?: string }
+
+// The plugin's userConfig lives in settings.json pluginConfigs under its name; a --plugin-dir copy may load as <name>@inline.
+// Since the default became auto (2026-10-11), Jev runs small scenarios directly, so a run measured against a baseline taken
+// under strict passes --enforcement strict to force the same DAG path.
+const PLUGIN_KEYS = ['dag-workflow', 'dag-workflow@inline']
+
+function settingsArgs(options: Options): string[] {
+  if (!options.enforcement) return []
+  const pluginConfigs = Object.fromEntries(PLUGIN_KEYS.map(key => [key, { options: { enforcement: options.enforcement } }]))
+  return ['--settings', JSON.stringify({ pluginConfigs })]
+}
 
 type RunReport = ShapeMetrics & {
   runId: string
@@ -55,6 +66,7 @@ function parseArgs(argv: string[]): Options {
     model: value('--model') ?? 'sonnet',
     timeoutMin: Number(value('--timeout-min') ?? 15),
     keep: argv.includes('--keep'),
+    ...(value('--enforcement') ? { enforcement: value('--enforcement') } : {}),
   }
 }
 
@@ -120,7 +132,7 @@ async function runScenario(scenario: Scenario, root: string, options: Options): 
   await Bun.$`git add -A`.cwd(dir).quiet()
   await Bun.$`git -c user.name=dag-eval -c user.email=dag-eval@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m fixture`.cwd(dir).quiet()
   const started = Date.now()
-  const proc = Bun.spawn(['claude', '-p', scenario.prompt, '--plugin-dir', REPO, '--model', options.model, '--allowedTools', ...MAIN_TOOLS], {
+  const proc = Bun.spawn(['claude', '-p', scenario.prompt, '--plugin-dir', REPO, '--model', options.model, ...settingsArgs(options), '--allowedTools', ...MAIN_TOOLS], {
     cwd: dir,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -200,7 +212,7 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
   return [
     `# DAG shape evaluation ${stamp}`,
     '',
-    `Model: ${options.model}. Plugin: ${REPO}. Fixtures: git repositories with one initial commit.`,
+    `Model: ${options.model}. Plugin: ${REPO}. Fixtures: git repositories with one initial commit.${options.enforcement ? ` Enforcement: ${options.enforcement}.` : ''}`,
     '',
     `Distinct shapes: ${shapes.size} (${[...shapes].join(', ')}). Distinct producer shapes: ${producerShapes.size} (${[...producerShapes].join(', ')}). Scenarios matching their expected shape: ${matches}/${results.length}.`,
     '',

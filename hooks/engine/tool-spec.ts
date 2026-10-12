@@ -13,8 +13,8 @@ export const TOOL_DESCRIPTION = [
   'A node receives the outputs of the nodes in its dependsOn, so list exactly the nodes whose results it needs. Ready nodes run in parallel waves; a failed node skips its dependents.',
   'Definition: "key" (same key and definition returns the existing run; a different definition under that key is refused), "name", optional "goal" (shown to every node) and "nodes".',
   '"review":{request} and "commit":[{message,paths}] add the review pair and a commit node.',
-  'Node: "id", a self-contained "prompt" saying what to do and produce, optional "dependsOn", "category" (model routing; Jev may override it), "agent" (subagent type such as Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
-  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} validates and previews waves, models, write conflicts and warnings, starting nothing; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
+  'Node: "id", a self-contained "prompt" saying what to do and produce, optional "dependsOn", "category" (model routing; Jev may override), "agent" (subagent type such as Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
+  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} previews waves, models, write conflicts and warnings, starting nothing; start {preview_id} runs it as previewed; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
   'retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and their skipped dependents; completed nodes are reused); amend {run_id, definition} (re-runs changed nodes and their dependents, adds nodes);',
   'send {run_id, node_id, message} (steer a running node); attach {run_id} (adopt a run from another session).',
 ].join(' ')
@@ -46,6 +46,7 @@ const NODE_SCHEMA = {
     description: { type: 'string' },
     load_skills: { type: 'array', items: { type: 'string' } },
     writes: { type: 'array', items: { type: 'string' }, description: 'Project-relative write scopes; [] for read-only work' },
+    external: { type: 'boolean', description: 'true when the node changes anything outside the project files (push, deploy, database, storage, settings, messages); the automatic review fix never reruns it' },
     verify: {
       type: 'array',
       minItems: 1,
@@ -115,7 +116,8 @@ export const INPUT_SCHEMA = {
       required: ['key', 'nodes'],
     },
     path: { type: 'string', description: 'start only: project-relative .yaml, .yml or .json definition file, instead of definition' },
-    dryRun: { type: 'boolean', description: 'start only: true previews the definition (waves, critical path, models, write conflicts, warnings) and starts nothing' },
+    dryRun: { type: 'boolean', description: 'start only: true previews the definition (waves, critical path, models, write conflicts, warnings), starts nothing and returns preview_id' },
+    preview_id: { type: 'string', description: 'start only: the preview_id of a dry run in this session, instead of definition or path; starts that exact definition, screened again' },
     run_id: { type: 'string' },
     node_id: { type: 'string' },
     node_ids: { type: 'array', items: { type: 'string' } },

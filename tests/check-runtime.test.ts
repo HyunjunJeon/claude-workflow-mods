@@ -427,3 +427,44 @@ test('the evidence file records the failed condition of each failed check', SETT
   expect(saved.evidence[0]?.detail).toContain('out/report.txt: lastLine expected "PASS 3 of 3", got "PASS 2 of 2"')
   expect(saved.evidence[1]?.detail).toContain('stdout: contains "PASS" not found')
 })
+
+// Automatic recovery stays on here: a check that cannot pass must not reach Jev or spawn another attempt.
+const RECOVERING = { plugins: [PROGRAMS] }
+
+async function failedOnce($: Engine, h: Harness, checks: unknown[], answer = 'DAG_NODE_STATUS: completed') {
+  await boot($)
+  const runId = await start($, { key: 'check-defect', nodes: [{ id: 'a', prompt: 'Produce the artifact', verify: checks }] })
+  await $.turn.complete({ turnId: 'turn-agent-1', agentId: 'agent-1', reason: 'answer', isAborted: false, answer, durationMs: 1 })
+  await h.clock.settle()
+  return checkpoint(h, runId).nodes[0]
+}
+
+for (const [label, checks, program] of [
+  ['a program the host cannot start', [{ kind: 'command', argv: ['missing-program'] }], 'missing-program'],
+  ['a shell that exits 127 for a command it cannot find', [{ kind: 'command', argv: ['report', '127', '', 'bash: line 1: rg: command not found'] }], 'rg'],
+] as const) {
+  test(`${label} fails as a check defect with no Jev call and no retry`, RECOVERING, async ($, on) => {
+    const h = harness(on)
+    const node = await failedOnce($, h, [...checks])
+    expect(node?.state).toBe('failed')
+    expect(node?.error?.startsWith(`check-defect: ${program} is not on the PATH`)).toBe(true)
+    expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(0)
+    expect(h.spawns).toHaveLength(1)
+  })
+}
+
+test('a worker that reports check-defect is not retried either', RECOVERING, async ($, on) => {
+  const h = harness(on)
+  const node = await failedOnce($, h, [{ kind: 'command', argv: ['check-control'] }], 'Done.\nDAG_NODE_STATUS: failed: check-defect - check 1 can never match')
+  expect(node?.error).toBe('check-defect - check 1 can never match')
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(0)
+  expect(h.spawns).toHaveLength(1)
+})
+
+test('a path the node was meant to build stays an ordinary failure that recovery retries', RECOVERING, async ($, on) => {
+  const h = harness(on)
+  const node = await failedOnce($, h, [{ kind: 'command', argv: ['report', '127', '', './dist/cli: No such file or directory'] }])
+  expect(node?.recovery?.used).toBe(1)
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(1)
+  expect(h.spawns).toHaveLength(2)
+})

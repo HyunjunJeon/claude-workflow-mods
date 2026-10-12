@@ -58,6 +58,28 @@ test('a file check refuses empty or non-text expectations', () => {
   }
 })
 
+test('matches refuses other dialects that JavaScript would read as plain letters, in files and in command output', () => {
+  for (const [pattern, named] of [
+    ['\\A# Changes\\n', '\\A'],
+    ['^done\\Z', '\\Z'],
+    ['ok\\z', '\\z'],
+    ['\\p{L}+', '\\p'],
+    ['\\h+', '\\h'],
+    ['[[:digit:]]+', '[:digit:]'],
+    ['[^[:space:]]+', '[:space:]'],
+    ['[a-z[:digit:]]', '[:digit:]'],
+  ] as const) {
+    const message = refusal({ kind: 'file', path: 'a.md', matches: pattern })
+    expect({ pattern, named: message.includes(named), js: message.includes('JavaScript') }).toEqual({ pattern, named: true, js: true })
+    expect(refusal(command({ stdout: { matches: pattern } }))).toContain('expect.stdout.matches')
+  }
+  expect(refusal({ kind: 'file', path: 'a.md', matches: '\\A#' })).toContain('(?<![\\s\\S])')
+  // Escapes JavaScript knows, an escaped backslash before a letter and an escaped bracket all stay accepted.
+  for (const pattern of ['^\\d+\\s\\w\\b$', '\\x41\\u0041\\cJ\\t\\n\\r\\f\\v', '(?<n>a)\\k<n>', '\\\\A', '\\[:digit:]', '[a-z]\\1', '(?<![\\s\\S])# x']) {
+    expect({ pattern, ok: parsedOne({ kind: 'file', path: 'a.md', matches: pattern }).ok }).toEqual({ pattern, ok: true })
+  }
+})
+
 test('a file check accepts absolute paths outside .claude/dag for read-only checks', () => {
   for (const path of ['/etc/hosts', '/Users/x/.claude/settings.json', '/Users/x/.claude/dagger.json', '/Users/x/dag/.claude', 'C:\\Users\\x\\notes.txt', 'D:/data/x.txt', '/']) {
     expect({ path, ok: parsedOne({ kind: 'file', path, contains: 'x' }).ok }).toEqual({ path, ok: true })

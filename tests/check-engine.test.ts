@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { exitProblem, textProblem } from '../hooks/engine/check-eval.ts'
+import { exitProblem, isCheckDefect, missingProgram, textProblem } from '../hooks/engine/check-eval.ts'
+import type { VerificationCheck, VerificationEvidence } from '../hooks/engine/types.ts'
 import { parseChecks } from '../hooks/engine/verification.ts'
 
 const report = 'building\nok 1 parse\nok 2 lint\n\nPASS 2 of 2\n'
@@ -132,4 +133,20 @@ test('an invalid matches source is refused at parse with invalid_verification', 
     }
   }
   expect(parseChecks([{ kind: 'file', path: 'a.md', matches: '^ok \\d+$' }]).ok).toBe(true)
+})
+
+test('missingProgram names a bare program the host could not start or a shell could not find, and nothing else', () => {
+  const evidence = (check: VerificationCheck, detail: string, exitCode?: number): VerificationEvidence => ({ check, passed: false, checkedAt: 0, detail, ...(exitCode !== undefined ? { exitCode } : {}) })
+  const sh: VerificationCheck = { kind: 'command', argv: ['bash', '-c', 'rg x'] }
+  expect(missingProgram(evidence({ kind: 'command', argv: ['rg', 'x'] }, 'Verification could not run: spawn rg ENOENT'))).toBe('rg')
+  expect(missingProgram(evidence(sh, 'exit code 127 is not accepted\n["bash"] exited 127\n\nbash: rg: command not found', 127))).toBe('rg')
+  expect(missingProgram(evidence(sh, 'sh: 1: jq: not found', 127))).toBe('jq')
+  expect(missingProgram(evidence(sh, 'zsh:1: command not found: fd', 127))).toBe('fd')
+  // A path the node may have been meant to build, a timeout, an accepted 127 and another exit code are no check defect.
+  expect(missingProgram(evidence({ kind: 'command', argv: ['./dist/cli'] }, 'Verification could not run: spawn ./dist/cli ENOENT'))).toBeUndefined()
+  expect(missingProgram(evidence({ kind: 'command', argv: ['bun', 'test'] }, 'Verification could not run: timed out after 30000 ms'))).toBeUndefined()
+  expect(missingProgram(evidence({ ...sh, expect: { exit: [1, 127] } }, 'bash: rg: command not found', 127))).toBeUndefined()
+  expect(missingProgram(evidence(sh, 'bash: rg: command not found', 1))).toBeUndefined()
+  expect(missingProgram({ ...evidence(sh, 'bash: rg: command not found', 127), passed: true })).toBeUndefined()
+  expect([isCheckDefect('check-defect: rg'), isCheckDefect('  Check-Defect - x'), isCheckDefect('implementation'), isCheckDefect(undefined)]).toEqual([true, true, false, false])
 })

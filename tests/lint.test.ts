@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { isVerificationNode, lintDefinition } from '../hooks/engine/lint.ts'
+import { isBlockedReportPath, isVerificationNode, lintDefinition, notesNameFor } from '../hooks/engine/lint.ts'
 import { verificationProblem } from '../hooks/engine/verification.ts'
 
 // Every definition carries a goal unless a test passes undefined, so the goal warning stays out of the other tests.
@@ -68,6 +68,24 @@ test('the report-name rule warns on absolute verify paths too, such as review no
     expect(warnings[0]).toContain(`node "x": "${path}" is named like a report`)
   }
   expect(lintVerify([{ kind: 'file', path: '/tmp/run/review-spec-notes.md', lastLine: 'Verdict: PASS' }])).toEqual([])
+})
+
+// Seen in eval 20261012050550: node report-draft wrote and checked report-draft-notes.md, got the warning three times, and
+// was told to use report-draft-notes.md, the very name it warned about.
+test('the report-name rule warns once per node and never suggests a name it would refuse', async () => {
+  const notes = '/tmp/stats/report-draft-notes.md'
+  const warnings = lintDefinition(def([{ id: 'report-draft', prompt: full, writes: ['report-draft-notes.md'], verify: [
+    { kind: 'file', path: notes, lastLine: 'Done' },
+    { kind: 'file', path: notes, contains: '| n |' },
+    { kind: 'file', path: 'report-draft-notes.md', contains: 'x' },
+  ] }]))
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain(`node "report-draft": "${notes}", "report-draft-notes.md" are named like a report`)
+  expect(warnings[0]).toContain('such as notes-report-draft.md')
+  for (const id of ['report-draft', 'summary', 'Findings-1', 'analysis_x', 'build', 'review-spec']) {
+    expect({ id, refused: isBlockedReportPath(notesNameFor(id)) }).toEqual({ id, refused: false })
+  }
+  expect([notesNameFor('build'), notesNameFor('summary')]).toEqual(['build-notes.md', 'notes-summary.md'])
 })
 
 test('vacuous verify V2 warns about every program that always passes', async () => {
