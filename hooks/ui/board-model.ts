@@ -2,7 +2,7 @@ import type { Block, Board } from '../engine/board-types.ts'
 import { calloutLines, codePeekLines, sectionLines, tableLines, type CalloutLabels } from './board-blocks.ts'
 import { flowLines, type FlowLabels } from './flow-layout.ts'
 import type { Language } from './i18n.ts'
-import type { InspectorAction, InspectorModel } from './inspector-model.ts'
+import type { InspectorAction, InspectorLineAction, InspectorModel } from './inspector-model.ts'
 import { sequenceLines } from './sequence-layout.ts'
 import { clean, fit, width, type Line } from './text.ts'
 
@@ -30,6 +30,7 @@ type BoardStrings = {
   nextPage: string
   pageOf: (index: number, count: number) => string
   moreLines: (count: number) => string
+  chipHint: string
   tones: CalloutLabels
   flow: FlowLabels
 }
@@ -44,6 +45,7 @@ const EN: BoardStrings = {
   nextPage: 'next page',
   pageOf: (index, count) => `page ${index}/${count}`,
   moreLines: count => `… ${count} more lines`,
+  chipHint: 'Press a block header to cite that block in your prompt',
   tones: { info: 'info', decision: 'decision', risk: 'risk', warning: 'warning' },
   flow: { sameFrontier: 'Same frontier', more: '+{n} more' },
 }
@@ -58,6 +60,7 @@ const KO: BoardStrings = {
   nextPage: '다음 페이지',
   pageOf: (index, count) => `페이지 ${index}/${count}`,
   moreLines: count => `… ${count}줄 더`,
+  chipHint: '블록 머리글을 누르면 프롬프트에 그 블록을 인용합니다',
   tones: { info: '정보', decision: '결정', risk: '위험', warning: '주의' },
   flow: { sameFrontier: '같은 층', more: '+{n}개 더' },
 }
@@ -114,30 +117,41 @@ function renderBlock(block: Block, columns: number, t: BoardStrings): Line[] {
   }
 }
 
-function blockLines(block: Block, columns: number, t: BoardStrings): Line[] {
+// The header is the first line of a block's lines.
+type BlockLines = { id: string; lines: Line[] }
+// `headers` holds one button per block header on the page, indexed into `lines`.
+type Page = { lines: Line[]; headers: InspectorLineAction[] }
+
+function blockLines(block: Block, columns: number, t: BoardStrings): BlockLines {
   const header = `[${block.id}] ${block.type}${block.title ? `${HEADER_SEPARATOR}${block.title}` : ''}`
-  return [dim(header), ...renderBlock(block, columns, t)]
+  return { id: block.id, lines: [dim(header), ...renderBlock(block, columns, t)] }
 }
 
+const chip = (blockId: string, line: number): InspectorLineAction => ({ line, action: `chip:${blockId}` })
+
 // Whole blocks fill a page in order, a blank line between them. A block taller than a page stands alone, cut short.
-function pack(blocks: readonly Line[][], t: BoardStrings): Line[][] {
-  const pages: Line[][] = []
-  let current: Line[] = []
-  for (const lines of blocks) {
+function pack(blocks: readonly BlockLines[], t: BoardStrings): Page[] {
+  const pages: Page[] = []
+  let current: Page = { lines: [], headers: [] }
+  for (const { id, lines } of blocks) {
     if (lines.length > PAGE_LINES) {
-      if (current.length > 0) pages.push(current)
-      pages.push([...lines.slice(0, PAGE_LINES - 1), dim(t.moreLines(lines.length - (PAGE_LINES - 1)))])
-      current = []
-    } else if (current.length === 0) {
-      current = [...lines]
-    } else if (current.length + 1 + lines.length <= PAGE_LINES) {
-      current.push([], ...lines)
-    } else {
-      pages.push(current)
-      current = [...lines]
+      if (current.lines.length > 0) pages.push(current)
+      pages.push({
+        lines: [...lines.slice(0, PAGE_LINES - 1), dim(t.moreLines(lines.length - (PAGE_LINES - 1)))],
+        headers: [chip(id, 0)],
+      })
+      current = { lines: [], headers: [] }
+      continue
     }
+    if (current.lines.length > 0 && current.lines.length + 1 + lines.length > PAGE_LINES) {
+      pages.push(current)
+      current = { lines: [], headers: [] }
+    }
+    if (current.lines.length > 0) current.lines.push([])
+    current.headers.push(chip(id, current.lines.length))
+    current.lines.push(...lines)
   }
-  if (current.length > 0) pages.push(current)
+  if (current.lines.length > 0) pages.push(current)
   return pages
 }
 
@@ -152,10 +166,12 @@ export function buildBoardView(input: BoardViewInput): InspectorModel {
   const shown = shownIndex(boards, input.selectedBoardId)
   const board = boards[shown]
   const model = board ? boardView(board, shown, boards.length, input, t) : emptyView(t)
+  const { lineActions } = model
   return {
     title: fit(model.title, columns),
     lines: model.lines.map(line => clip(line, columns)),
     actions: model.actions.map(action => ({ id: action.id, label: fit(action.label, columns) })),
+    ...(lineActions ? { lineActions } : {}),
   }
 }
 
@@ -163,13 +179,17 @@ function boardView(board: Board, index: number, count: number, input: BoardViewI
   const pages = pack(board.blocks.map(block => blockLines(block, input.columns, t)), t)
   const pageCount = Math.max(1, pages.length)
   const page = Math.min(Math.max(Number.isFinite(input.page) ? Math.trunc(input.page) : 0, 0), pageCount - 1)
+  const shownPage = pages[page]
   const footer = pageCount > 1 ? [dim(t.pageOf(page + 1, pageCount))] : []
-  const lines = [...(pages[page] ?? [dim(t.emptyBoard)]), ...footer]
+  // The hint comes last, after the page footer, and only where there is a header to press.
+  const hint = shownPage ? [dim(t.chipHint)] : []
+  const lines = [...(shownPage?.lines ?? [dim(t.emptyBoard)]), ...footer, ...hint]
   const actions: InspectorAction[] = []
   if (count > 1) actions.push({ id: 'board:prev', label: t.prevBoard }, { id: 'board:next', label: t.nextBoard })
   if (page > 0) actions.push({ id: 'page:prev', label: t.prevPage })
   if (page < pageCount - 1) actions.push({ id: 'page:next', label: t.nextPage })
   // The count stays visible when a long board title is cut.
   const suffix = ` (${index + 1}/${count})`
-  return { title: fit(board.title, Math.max(0, input.columns - width(suffix))) + suffix, lines, actions }
+  const title = fit(board.title, Math.max(0, input.columns - width(suffix))) + suffix
+  return { title, lines, actions, ...(shownPage ? { lineActions: shownPage.headers } : {}) }
 }

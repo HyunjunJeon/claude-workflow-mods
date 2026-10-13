@@ -65,6 +65,8 @@ export type Strings = {
   toastPaneWaiting: (reason: string) => string
   toastApproval: (run: string) => string
   toastBoardUpdated: (title: string) => string
+  // `reason` is the prompt box's refusal (no_composer, dialog) or unknown.
+  toastChipFailed: (reason: string) => string
   approvalWaiting: string
   awaitingApproval: string
   previewSummary: (nodes: number, waves: number, widest: number, maxConcurrent: number) => string
@@ -161,6 +163,7 @@ const EN: Strings = {
   runDeferred: 'The run starts when the current turn ends.',
   toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
   toastBoardUpdated: title => `Board updated: ${title} · press b in the /dag pane`,
+  toastChipFailed: reason => `Could not put the block into the prompt (${reason})`,
   approvalWaiting: 'Waiting for your approval: no node starts until you approve this run.',
   awaitingApproval: EN_AWAITING,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `${nodes} node${nodes === 1 ? '' : 's'}, ${waves} wave${waves === 1 ? '' : 's'}, widest wave ${widest} (max concurrent ${maxConcurrent})`,
@@ -254,6 +257,7 @@ const KO: Strings = {
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
   toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
   toastBoardUpdated: title => `보드 갱신: ${title} · /dag 패널에서 b`,
+  toastChipFailed: reason => `블록을 프롬프트에 넣지 못했습니다 (${reason})`,
   approvalWaiting: '승인 대기 중: 이 실행을 승인하기 전에는 어떤 노드도 시작하지 않습니다.',
   awaitingApproval: KO_AWAITING,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `노드 ${nodes}개, 웨이브 ${waves}개, 가장 넓은 웨이브 ${widest} (동시 실행 한도 ${maxConcurrent})`,

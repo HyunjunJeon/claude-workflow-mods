@@ -29,7 +29,9 @@ export type InspectorInput = {
 }
 
 export type InspectorAction = { id: string; label: string }
-export type InspectorModel = { title: string; lines: Line[]; actions: InspectorAction[] }
+export type InspectorLineAction = { line: number; action: string }
+// lineActions turns the row lines[line] into one button that posts `action`; only the board view sets it.
+export type InspectorModel = { title: string; lines: Line[]; actions: InspectorAction[]; lineActions?: InspectorLineAction[] }
 
 export const INSPECTOR_VIEWS: readonly InspectorView[] = ['decisions', 'context', 'sessions']
 export const PAGE_SIZE = 8

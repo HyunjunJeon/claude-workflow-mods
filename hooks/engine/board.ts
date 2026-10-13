@@ -3,7 +3,7 @@ import { fail, type Result } from './types.ts'
 import { projectPath } from './verification.ts'
 import type {
   Block, BlockInput, BlockType, Board, BoardEdit, BoardFile, CalloutBlock, CalloutTone, CodePeekBlock, CodePeekInput,
-  FlowBlock, FlowEdge, FlowNode, FlowNodeKind, SectionBlock, SequenceBlock, SequenceParticipant, SequenceStep,
+  FlowBlock, FlowEdge, FlowNode, FlowNodeKind, RunLink, SectionBlock, SequenceBlock, SequenceParticipant, SequenceStep,
   SequenceStepKind, TableBlock,
 } from './board-types.ts'
 
@@ -31,6 +31,11 @@ const PARTICIPANT_LABEL_MAX = 24
 const MAX_STEPS = 40
 const STEP_LABEL_MAX = 60
 const BOARD_ID_MAX = 64
+// A result board names its run and at most one block per fact slot; the host fills four slots today, and 8 leaves room without
+// letting a stored file grow the link without bound.
+const RUN_ID_MAX = 64
+const MAX_FACTS = 8
+const FACT_KEY = /^[a-z]{1,16}$/
 const REF_ID = /^[A-Za-z0-9_.-]{1,32}$/
 const BLOCK_ID = /^b([1-9][0-9]*)$/
 
@@ -529,8 +534,27 @@ function stamp(raw: unknown, field: string): Parsed<number> {
   return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? good(raw) : bad(field, 'must be a time in ms')
 }
 
+// A fact's block id may name a block the board no longer holds: the model can remove it, and the next settle draws it again.
+function parseRunLink(raw: unknown, at: string): Parsed<RunLink> {
+  const fields = fieldsOf(raw, at, ['runId', 'facts'])
+  if (!fields.ok) return fields
+  const { runId, facts } = fields.value
+  if (typeof runId !== 'string' || runId.length < 1 || runId.length > RUN_ID_MAX) return bad(child(at, 'runId'), `must be 1-${RUN_ID_MAX} characters`)
+  const factsAt = child(at, 'facts')
+  if (!isRecord(facts)) return bad(factsAt, 'must be an object')
+  const entries = Object.entries(facts)
+  if (entries.length > MAX_FACTS) return bad(factsAt, `must hold at most ${MAX_FACTS} entries, got ${entries.length}`)
+  const slots: Record<string, string> = {}
+  for (const [key, id] of entries) {
+    if (!FACT_KEY.test(key)) return bad(factsAt, `key ${JSON.stringify(key.slice(0, 20))} must be 1-16 lowercase letters`)
+    if (typeof id !== 'string' || !BLOCK_ID.test(id)) return bad(child(factsAt, key), 'must be a block id like b1')
+    slots[key] = id
+  }
+  return good({ runId, facts: slots })
+}
+
 function parseStoredBoard(raw: unknown, at: string, sessionId: string): Parsed<Board> {
-  const fields = fieldsOf(raw, at, ['boardId', 'sessionId', 'title', 'createdAt', 'updatedAt', 'nextId', 'blocks'])
+  const fields = fieldsOf(raw, at, ['boardId', 'sessionId', 'title', 'createdAt', 'updatedAt', 'nextId', 'blocks', 'run'])
   if (!fields.ok) return fields
   const boardId = requiredText(fields.value.boardId, child(at, 'boardId'), 1, BOARD_ID_MAX)
   if (!boardId.ok) return boardId
@@ -550,7 +574,12 @@ function parseStoredBoard(raw: unknown, at: string, sessionId: string): Parsed<B
   // A block id at or above nextId would be handed out again by the next insert.
   const reused = blocks.value.find(block => Number(block.id.slice(1)) >= nextId)
   if (reused) return bad(child(at, 'nextId'), `${nextId} must be above every block id, but the board holds ${reused.id}`)
-  return good({ boardId: boardId.value, sessionId, title: title.value, createdAt: createdAt.value, updatedAt: updatedAt.value, nextId, blocks: blocks.value })
+  const run = fields.value.run === undefined ? good(undefined) : parseRunLink(fields.value.run, child(at, 'run'))
+  if (!run.ok) return run
+  return good({
+    boardId: boardId.value, sessionId, title: title.value, createdAt: createdAt.value, updatedAt: updatedAt.value, nextId, blocks: blocks.value,
+    ...(run.value === undefined ? {} : { run: run.value }),
+  })
 }
 
 // Reads .claude/dag/boards/<sessionId>.json back. Every board and block goes through the same validation as an edit, so a

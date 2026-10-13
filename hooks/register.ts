@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type SettleBoard, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
@@ -50,6 +50,7 @@ import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, type PeekRequest } from './engine/board.ts'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from './engine/board-spec.ts'
+import { chipContext, chipLabel, citedChips } from './engine/board-chips.ts'
 import type { Board, BoardEdit, BoardFile } from './engine/board-types.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence, type VerificationOutcome } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
@@ -60,6 +61,7 @@ import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
 import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
 import { adjacentBoardId, buildBoardView } from './ui/board-model.ts'
+import { drawsResult, factEdits, resultFacts, resultTitle, type ResultSlot } from './ui/result-board.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
 import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
 
@@ -569,6 +571,14 @@ let selectedDecisionId: string | undefined
 // board updated last.
 let boards: Board[] = []
 let selectedBoardId: string | undefined
+// Per run, the result board its settle drew and a hash of the facts drawn. announce runs again for a settle whose message the
+// host dropped; that settle neither redraws the board nor tells the model it was refreshed.
+const resultDraws = new Map<string, { facts: string; board: SettleBoard }>()
+// The chips the person put into the prompt box from the Board section, by label, oldest first. The next user prompt gets the
+// content of the ones it carries, and all are forgotten. A label holds no board id, so a later chip with the same label wins.
+const chips = new Map<string, { boardId: string; blockId: string }>()
+// More chips than a person cites in one prompt; the oldest beyond it are dropped.
+const MAX_CHIPS = 20
 let language: 'en' | 'ko' = 'en'
 let pinnedStatus: string | undefined
 const settleToasts = new Set<string>()
@@ -1324,14 +1334,15 @@ function afterHook($: EngineInterface, send: () => void): void {
 }
 
 // `text` replaces the settle summary when the settle has its own news (a rejected run, where nothing ran to summarize);
-// `deferred` sends it through afterHook.
+// `deferred` sends it through afterHook. The settle summary names the result board drawn for it, when there is one.
 async function announce($: EngineInterface, run: Run, text?: string, deferred = false): Promise<void> {
   $.ui.invalidate('ui.render')
   if (!isSettled(run) || run.settledNotified || settleSubmits.has(run.runId)) return
   settleSubmits.add(run.runId)
+  const board = text === undefined ? await drawResultBoard($, run) : undefined
   const send = () => {
     // Plugin submissions run once idle; never await them in the queue.
-    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run))).then(result => {
+    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), board)).then(result => {
       if ('drop' in result) throw new Error(result.drop)
       return serialized(async () => {
         const current = runs.get(run.runId)
@@ -2219,9 +2230,106 @@ async function openBoard($: EngineInterface, board: Board): Promise<ToolReply> {
   return ok({ board_id: board.boardId, shown: true, section: 'dag', hint: 'A run is active, so the /dag pane stays on the DAG; tell the user to press b to see the board.' })
 }
 
-// The title the approval block points at: the board this session changed last. A tie goes to the later one in the list.
+// The board changed last; a tie goes to the later one in the list.
+function latestBoard(candidates: readonly Board[]): Board | undefined {
+  return candidates.reduce<Board | undefined>((latest, board) => (latest === undefined || board.updatedAt >= latest.updatedAt ? board : latest), undefined)
+}
+
+// The board the Board section shows: the selected one, else the one changed last. The same choice as shownIndex in
+// ui/board-model.ts, which that module does not export.
+function shownBoard(): Board | undefined {
+  return boards.find(board => board.boardId === selectedBoardId) ?? latestBoard(boards)
+}
+
+// The title the approval block points at: the board this session changed last, leaving out result boards, which report a run
+// that already settled and are never the plan.
 function latestBoardTitle(): string | undefined {
-  return boards.reduce<Board | undefined>((latest, board) => (latest === undefined || board.updatedAt >= latest.updatedAt ? board : latest), undefined)?.title
+  return latestBoard(boards.filter(board => board.run === undefined))?.title
+}
+
+function newBoardId(now: number): string {
+  return `board_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+// Slots whose block was replaced keep their ids, each inserted block's id goes to its slot in order, and a removed slot is dropped.
+function factLink(previous: Record<string, string>, edits: readonly BoardEdit[], insertedSlots: readonly ResultSlot[], inserted: readonly string[]): Record<string, string> {
+  const replaced = new Set(edits.flatMap(edit => (edit.op === 'replace' ? [edit.id] : [])))
+  const link: Record<string, string> = {}
+  for (const [slot, id] of Object.entries(previous)) if (replaced.has(id)) link[slot] = id
+  insertedSlots.forEach((slot, index) => {
+    const id = inserted[index]
+    if (id !== undefined) link[slot] = id
+  })
+  return link
+}
+
+// The facts of a settle of this interactive session's run (ui/result-board.ts) go on the board linked to the run: created at the
+// first settle, its fact blocks replaced in place at a later one, so the sections the model added stay. Nothing selects or opens
+// it; the model opens it once it has verified the result. Runs inside the queue (announce). A failure is logged and the settle
+// message goes out without a board.
+async function drawResultBoard($: EngineInterface, run: Run): Promise<SettleBoard | undefined> {
+  if (!interactive || !drawsResult(run)) return undefined
+  try {
+    const facts = resultFacts(run, language)
+    const factsHash = hash(stableStringify(facts))
+    const linked = boards.find(board => board.run?.runId === run.runId)
+    const drawn = resultDraws.get(run.runId)
+    if (drawn?.facts === factsHash && drawn.board.boardId === linked?.boardId) return drawn.board
+    const now = await $.clock.now()
+    let board: Board
+    if (linked) board = linked
+    else {
+      const created = newBoard({ boardId: newBoardId(now), sessionId, title: resultTitle(run, language), now })
+      if (!created.ok) throw new Error(created.error.message)
+      board = created.value
+    }
+    const previous = linked?.run?.facts ?? {}
+    const { edits, insertedSlots } = factEdits(facts, previous, board.blocks.map(block => block.id))
+    const applied = applyEdits(board, edits, { now, peeks: new Map() })
+    if (!applied.ok) throw new Error(applied.error.message)
+    const drawnBoard: Board = { ...applied.value.board, run: { runId: run.runId, facts: factLink(previous, edits, insertedSlots, applied.value.inserted) } }
+    await saveBoards($, linked ? boards.map(candidate => (candidate.boardId === drawnBoard.boardId ? drawnBoard : candidate)) : [...boards, drawnBoard])
+    $.ui.invalidate('ui.render')
+    const settled = { boardId: drawnBoard.boardId, title: drawnBoard.title, refreshed: linked !== undefined }
+    resultDraws.set(run.runId, { facts: factsHash, board: settled })
+    return settled
+  } catch (error) {
+    $.ui.log(`could not draw the result board of ${run.runId}: ${message(error)}`)
+    return undefined
+  }
+}
+
+// A block header pressed in the Board section puts the block's chip into the prompt box at the cursor, and the label is kept so
+// the user prompt that carries it gets the block's content (prompt.submit).
+async function citeBlock($: EngineInterface, blockId: string): Promise<void> {
+  const board = shownBoard()
+  const block = board?.blocks.find(candidate => candidate.id === blockId)
+  // The press raced a change of the shown board, which redraws the pane without that header.
+  if (!board || !block) return
+  const label = chipLabel(block)
+  const filled = await $.prompt.fill({ text: `${label} `, mode: 'insert', decorations: [{ start: 0, end: label.length, bold: true, color: ACCENT }] })
+  if (!filled.isFilled) {
+    $.ui.toast(t.toastChipFailed(filled.refusal ?? 'unknown'), { timeoutMs: ATTENTION_TOAST_MS })
+    return
+  }
+  // Deleted first so a chip pressed again counts as the newest.
+  chips.delete(label)
+  chips.set(label, { boardId: board.boardId, blockId })
+  for (const oldest of chips.keys()) {
+    if (chips.size <= MAX_CHIPS) break
+    chips.delete(oldest)
+  }
+}
+
+// The context a user prompt gets for the chips it carries, from the boards as they are now; a chip whose board or block is gone
+// adds nothing.
+function chipContexts(text: string): string[] {
+  return citedChips(text, chips.keys()).flatMap(label => {
+    const chip = chips.get(label)
+    const board = boards.find(candidate => candidate.boardId === chip?.boardId)
+    const block = board?.blocks.find(candidate => candidate.id === chip?.blockId)
+    return board && block ? [chipContext(board, block)] : []
+  })
 }
 
 // The board tool (engine/board-spec.ts): the main conversation draws boards that the pane's Board section shows.
@@ -2231,7 +2339,7 @@ async function handleBoardTool($: EngineInterface, input: ToolInput): Promise<To
   }
   if (input.action === 'create') {
     const now = await $.clock.now()
-    const boardId = `board_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    const boardId = newBoardId(now)
     const created = newBoard({ boardId, sessionId, title: typeof input.title === 'string' ? input.title : '', now })
     if (!created.ok) return err(created.error)
     await saveBoards($, [...boards, created.value])
@@ -2737,6 +2845,7 @@ async function inspectorAction($: EngineInterface, action: string): Promise<void
     inspectorPage = 0
   } else if (action === 'decision:back') selectedDecisionId = undefined
   else if (action.startsWith('decision:')) selectedDecisionId = action.slice('decision:'.length)
+  else if (action.startsWith('chip:')) await citeBlock($, action.slice('chip:'.length))
   else {
     let reply: { text: string } | undefined
     if (action.startsWith('handoff-cancel:')) {
@@ -3276,6 +3385,10 @@ export function register(on: On, options: PluginOptions) {
       } catch (error) {
         $.ui.log(`could not load learned skills: ${message(error)}`)
       }
+    }
+    if (userOrigin) {
+      context.push(...chipContexts(e.text))
+      chips.clear()
     }
     const block = userOrigin && contextUnseen(delivered, contextSlices(workflowContext, [...runs.values()])) ? restoration() : undefined
     if (block) context.push(block.text)

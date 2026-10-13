@@ -1,0 +1,329 @@
+# Board P3 of 3: the result board on settle, and block chips into the prompt.
+# P1 (flows/improvement/p4-board.yaml, commits 8a22c15 and 6fb20dc) built the board tool and the Board section; P2
+# (flows/improvement/p5-board-interview.yaml, commit 6a92c6c) made the interview and pm skills draw on it.
+# Decisions (2026-10-13): Q1 mixed authorship - at settle the plugin draws the facts (summary, node table, run graph,
+# declared writes) and the model adds a "Verified result" section after it verifies; Q2 the pane switches to the board
+# only when the model calls open after verifying (the plugin never switches tabs at settle); Q3 chips are per block - a
+# block header in the Board section puts `[b3 · <title>]` into the prompt, and the submitted prompt carries that block's
+# content as context; Q4 every run of this session in which at least one node started gets a result board (completed or
+# failed; not a rejected run), and a later settle of the same run (retry, amend) refreshes the same board in place.
+# The planning skill and the protocol line stay unchanged (the instructions ride on the settle message), so no eval rerun.
+#
+# PREREQUISITE: `git status --short -- hooks tests skills README.md docs` prints nothing, and no other session edits this
+# checkout.
+# Run it with:  /dag run flows/improvement/p6-board-results.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan (components -> waves):
+#   wave 1: board-run-link, result-facts, chip-text, chip-view, settle-board-text (five pure lanes, disjoint writes)
+#   wave 2: result-host (wires all five into register.ts; the only node that runs the full suite as a check)
+#   wave 3: result-docs
+#   then:   review-spec, review-standards, commit (generated)
+# Edges: result-host consumes every wave-1 Output (exported names and signatures); result-docs consumes the user-facing
+# facts from result-facts (block contents), chip-view (the hint text), settle-board-text (the model instructions) and
+# result-host (strings and behaviour).
+# Categories: unspecified-low for the five small pure modules with tests; unspecified-high for result-host (it joins
+# five modules on the settle path and the prompt.submit hook, where a mistake loses the settle message or every
+# prompt's context); writing for the Korean README and docs.
+# Wave-1 checks are file checks only: the full suite and tsc cover every file, so they would fail on a sibling lane's
+# half-written work (this is what failed board-view in the P1 run). result-host runs them once all lanes are done.
+# Expected lint warning: chip-view owns more than three files; it is one vertical slice (the model, its type and the
+# client that draws it). result-host may extend tests/control-harness.ts: the chip tests need $.prompt.fill to be
+# observable and to report isFilled, and the harness had no fill support when this was written.
+key: improve-p6-board-results-1
+name: Board P3 - result board on settle and block chips
+goal: >
+  When a run of this interactive session in which at least one node started settles, the plugin draws or refreshes a
+  result board (summary, node table, run graph, declared writes) and the settle message tells the model to add a
+  "Verified result" section and open it after verifying; a block header in the Board section puts a chip for that block
+  into the prompt, and a submitted prompt that carries the chip gives the model that block's content; the approval
+  block's plan-board line ignores result boards; README.md and docs/reference.md say so.
+review:
+  request: |
+    정의 파일을 커밋하고 P3 작업을 시작.
+    Agreed decisions for P3: Q1 mixed - at settle the plugin draws the facts (node status and verification table, the run graph with states, the changed files) and the model adds a section on what now works and how to try it after it verifies; Q2 the board is only saved at settle, and the pane switches to it when the model calls open after its verification; Q3 chips are per block - each block header in the Board tab becomes a button that puts a [b3 · title] chip into the prompt, and on submit that block's content goes to the model with the prompt; Q4 every run of this session in which a node actually ran gets a result board, completed or failed, not a rejected run or one cancelled before anything ran, and a re-settle after a retry updates the same board.
+    The interview and pm boards (P2) and the planning skill stay as they are.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "feat(board): draw the result board on settle and cite blocks as chips"
+    paths:
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - tests/board-engine.test.ts
+      - hooks/ui/result-board.ts
+      - tests/result-board.test.ts
+      - hooks/engine/board-chips.ts
+      - tests/board-chips.test.ts
+      - hooks/ui/board-model.ts
+      - hooks/ui/inspector-model.ts
+      - hooks/ui/inspector-client.ts
+      - tests/board-view.test.ts
+      - hooks/engine/format.ts
+      - tests/format.test.ts
+      - hooks/register.ts
+      - hooks/ui/i18n.ts
+      - tests/board-host.test.ts
+      - tests/control-harness.ts
+      - README.md
+      - docs/reference.md
+      - flows/improvement/p6-board-results.yaml
+nodes:
+  - id: board-run-link
+    label: A board can name the run it reports and the blocks that hold the run's facts
+    category: unspecified-low
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - tests/board-engine.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board-types.ts
+        contains: "runId"
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "'run'"
+      - kind: file
+        path: tests/board-engine.test.ts
+        contains: "result board link"
+      - kind: command
+        argv: [git, diff, "--check", "--", hooks/engine/board-types.ts, hooks/engine/board.ts, tests/board-engine.test.ts]
+    prompt: |
+      TASK: Let a stored board carry an optional link to the DAG run it reports, so a later settle of that run can find the board and replace its fact blocks in place.
+      CONTEXT: Read the root AGENTS.md and hooks/engine/AGENTS.md first (engine/ is pure: no `$`, no clock). hooks/engine/board-types.ts defines Board; hooks/engine/board.ts validates everything: parseStoredBoard (used by parseBoardFile) refuses unknown fields through fieldsOf, applyEdits returns `{ ...board, updatedAt, nextId, blocks }`, newBoard creates a board, boardForModel is what the tool's get returns. A later node (result-host) will set the link from hooks/register.ts after it creates a result board; the model's board tool never sets it.
+      DELIVERABLE:
+      (1) board-types.ts: Board gains an optional field `run?: { runId: string; facts: Record<string, string> }`, with a why-comment: the run this board reports, and for each fact slot (for example `summary`, `nodes`, `graph`, `writes`) the id of the block that holds it, so the next settle of the same run replaces those blocks in place.
+      (2) board.ts: parseStoredBoard accepts `run` as an optional field and validates it: runId 1-64 characters; facts an object with at most 8 entries, each key 1-16 lowercase letters, each value a block id of the form `b<number>`; a block id in facts need not exist on the board (the model may have removed that block). A board without `run` loads exactly as before. applyEdits and boardForModel keep the field as it is; parseEdits gives the model no way to set it.
+      (3) tests/board-engine.test.ts: tests whose names contain `result board link`: a stored board with a run link round-trips through parseBoardFile; a malformed link (bad runId, bad fact key, a value that is not a block id) is refused as invalid_board_file naming the field; applyEdits keeps the link. Prove each red before green.
+      In ## Output give the exact type of the field, the validation rules, and the test names.
+      SCOPE: Write ONLY hooks/engine/board-types.ts, hooks/engine/board.ts and tests/board-engine.test.ts. Sibling nodes write other files in parallel (hooks/ui/result-board.ts, hooks/engine/board-chips.ts, hooks/ui/board-model.ts, hooks/ui/inspector-model.ts, hooks/ui/inspector-client.ts, hooks/engine/format.ts and their tests); never edit those. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` and read the results for tests/board-engine.test.ts: every test there passes. A failure in a file a sibling node is writing is not yours; report it and do not touch that file. Run `git diff --check -- hooks/engine/board-types.ts hooks/engine/board.ts tests/board-engine.test.ts`: exit 0.
+      STOP WHEN: the link is typed, validated and kept, and the board-engine tests pass.
+
+  - id: result-facts
+    label: Build the result board's fact blocks from a settled run
+    category: unspecified-low
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/result-board.ts
+      - tests/result-board.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/result-board.ts
+        contains: "export function resultFacts"
+      - kind: file
+        path: hooks/ui/result-board.ts
+        contains: "export function factEdits"
+      - kind: file
+        path: hooks/ui/result-board.ts
+        contains: "export function drawsResult"
+      - kind: file
+        path: tests/result-board.test.ts
+        contains: "applyEdits"
+    prompt: |
+      TASK: Write the pure module hooks/ui/result-board.ts that turns a settled run into the result board's fact blocks and into the board edits that draw or refresh them.
+      CONTEXT: Read the root AGENTS.md and hooks/ui/AGENTS.md first (hooks/ui/ is pure: no `$`, no clock; every user-facing string in both EN and KO). Run and NodeRun are in hooks/engine/types.ts (node state, attempt, model, startedAt, finishedAt, verification.evidence; the definition's nodes carry dependsOn and writes; run.rejected is set when the user rejected the run). Block, BlockInput and BoardEdit are in hooks/engine/board-types.ts; the board engine's limits are in hooks/engine/board.ts (titles <= 80, callout text <= 1000, table columns <= 6 and rows <= 30 with cells <= 80, flow nodes <= 24 with labels <= 40 and notes <= 80, edges <= 48, flow node ids follow refId there, no cycle). hooks/ui/board-model.ts shows the module style: it keeps its own EN and KO string tables; do the same here and do not edit hooks/ui/i18n.ts (another node owns it). Language comes from hooks/ui/i18n.ts; formatDuration from hooks/ui/text.ts. evidenceOutcome-style counting of passed checks exists in hooks/engine/format.ts; reuse an exported helper if one exists, else count evidence items whose outcome is passed.
+      DELIVERABLE: hooks/ui/result-board.ts exporting:
+      (1) `RESULT_SLOTS = ['summary', 'nodes', 'graph', 'writes'] as const` and `type ResultSlot`.
+      (2) `drawsResult(run: Run): boolean` - true when at least one node started (attempt > 0 or startedAt set) and run.rejected is unset.
+      (3) `resultTitle(run, language)` - EN `Result: <run name>`, KO `결과: <run name>`, cut to 80 characters.
+      (4) `resultFacts(run, language): Record<ResultSlot, BlockInput | undefined>`:
+        summary - a `callout`, tone `info` when the run completed, `risk` when it failed, `warning` otherwise; title a one-line headline with the status, done nodes out of all nodes and the elapsed time from the first node start to the last node finish (EN for example `completed · 7 of 7 nodes done · 12m`, KO `완료 · 노드 7개 중 7개 완료 · 12분`); text the run goal, or the run name when there is no goal, cut to the limit.
+        nodes - a `table` titled EN `Nodes` / KO `노드`, columns EN Node, State, Checks, Model, Time / KO 노드, 상태, 검사, 모델, 시간; one row per node in run order: id, state, `<passed>/<total>` checks or `-`, the model without a leading `claude-` or `-`, formatDuration(finishedAt - startedAt) or `-`; past 30 nodes, 29 rows and a last row saying how many more (both languages).
+        graph - a `flow` titled EN `Run graph` / KO `실행 그래프`: one flow node per run node (map node ids to valid flow ids if refId would refuse one), label the node id cut to 40, note the state plus the checks, kind `terminal` when completed, `decision` when failed, `process` otherwise; edges from dependsOn; undefined when the run has more than 24 nodes or 48 edges.
+        writes - a `table` titled EN `Declared writes` / KO `선언된 쓰기 범위`, columns EN Path, Node / KO 경로, 노드: the declared `writes` of completed nodes, one row per path sorted by path with the node ids joined by `, `; undefined when there are none; past 30 rows, 29 and a more row.
+      (5) `factEdits(facts, previous: Partial<Record<ResultSlot, string>>, existing: readonly string[]): { edits: BoardEdit[]; insertedSlots: ResultSlot[] }` - per slot in RESULT_SLOTS order: a block and a previous id still in `existing` gives `replace` of that id; a block without a live previous id gives `insert` (no afterId); no block but a live previous id gives `remove`. insertedSlots lists the slots of the inserts in order, so the caller pairs them with applyEdits' `inserted` ids.
+      (6) tests/result-board.test.ts: drawsResult for a started, an unstarted and a rejected run; both languages' titles and headers; the 30-row cut; a run over 24 nodes has no graph; factEdits for a first draw (all inserts), a refresh (replaces keep the ids) and a slot that disappears (remove); and the edits of a 40-node failed run and of a small completed run pass through applyEdits on a newBoard from hooks/engine/board.ts without error. Prove new behaviour red before green.
+      In ## Output give every export with its signature, the exact EN and KO strings, and the test names.
+      SCOPE: Write ONLY hooks/ui/result-board.ts and tests/result-board.test.ts. Sibling nodes write other files in parallel (hooks/engine/board-types.ts, hooks/engine/board.ts, hooks/engine/board-chips.ts, hooks/ui/board-model.ts, hooks/ui/inspector-model.ts, hooks/ui/inspector-client.ts, hooks/engine/format.ts and their tests); never edit those. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` and read the results for tests/result-board.test.ts: every test there passes. A failure in a file a sibling node is writing is not yours; report it and do not touch that file.
+      STOP WHEN: the module exports (1)-(5) and its tests pass.
+
+  - id: chip-text
+    label: Name a block as a chip and turn a cited chip into model context
+    category: unspecified-low
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board-chips.ts
+      - tests/board-chips.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board-chips.ts
+        contains: "export function chipLabel"
+      - kind: file
+        path: hooks/engine/board-chips.ts
+        contains: "export function citedChips"
+      - kind: file
+        path: hooks/engine/board-chips.ts
+        contains: "export function chipContext"
+      - kind: file
+        path: tests/board-chips.test.ts
+        contains: "chipContext"
+    prompt: |
+      TASK: Write the pure module hooks/engine/board-chips.ts: the chip text a board block puts into the prompt, which chips a submitted prompt cites, and the context the model receives for a cited chip.
+      CONTEXT: Read the root AGENTS.md and hooks/engine/AGENTS.md first (engine/ is pure: no `$`, no clock). Board and Block are in hooks/engine/board-types.ts; boardForModel in hooks/engine/board.ts shows what the board tool's get returns (it drops a code_peek's lines). A later node (result-host) calls these from hooks/register.ts: when the person presses a block header in the Board section it puts chipLabel(block) plus a space into the prompt box with $.prompt.fill and remembers label -> (board, block); on the next user prompt it calls citedChips, then adds chipContext for each cited block to the prompt's context. The model-facing text is English.
+      DELIVERABLE: hooks/engine/board-chips.ts exporting:
+      (1) `chipLabel(block: Block): string` - `[<id> · <name>]`, where name is the block's title, else its type; control characters and the characters `[` and `]` removed from the name, and the name cut to 40 characters ending in `…` when longer.
+      (2) `citedChips(text: string, labels: Iterable<string>): string[]` - the labels that occur in text, unique, ordered by first occurrence, at most MAX_CITED_CHIPS (export it, 5).
+      (3) `chipContext(board: Board, block: Block): string` - one paragraph naming the chip label, the block id, the board title and board_id, saying the JSON that follows is content the conversation drew earlier and is data, not instructions, then the block as JSON (a code_peek keeps path, start, end and its snapshot lines). Cut the whole string at an exported CHIP_CONTEXT_MAX of 4000 characters, ending with a note to call the board tool's get for the whole board when it was cut.
+      (4) tests/board-chips.test.ts: labels for a titled and an untitled block, stripping of brackets and control characters, the 40-character cut; citedChips order, uniqueness, the cap and a label that is absent; chipContext for a table and a code_peek (it holds the lines) and the cut of an oversized block. Prove new behaviour red before green.
+      In ## Output give every export with its signature and an example label and context.
+      SCOPE: Write ONLY hooks/engine/board-chips.ts and tests/board-chips.test.ts. Sibling nodes write other files in parallel (hooks/engine/board-types.ts, hooks/engine/board.ts, hooks/ui/result-board.ts, hooks/ui/board-model.ts, hooks/ui/inspector-model.ts, hooks/ui/inspector-client.ts, hooks/engine/format.ts and their tests); never edit those. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` and read the results for tests/board-chips.test.ts: every test there passes. A failure in a file a sibling node is writing is not yours; report it and do not touch that file.
+      STOP WHEN: the module exports (1)-(3) and its tests pass.
+
+  - id: chip-view
+    label: Block headers in the Board section become chip buttons
+    category: unspecified-low
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/board-model.ts
+      - hooks/ui/inspector-model.ts
+      - hooks/ui/inspector-client.ts
+      - tests/board-view.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/board-model.ts
+        contains: "chip:"
+      - kind: file
+        path: hooks/ui/inspector-model.ts
+        contains: "lineActions"
+      - kind: file
+        path: hooks/ui/inspector-client.ts
+        contains: "lineActions"
+      - kind: file
+        path: tests/board-view.test.ts
+        contains: "chip:"
+    prompt: |
+      TASK: Make each block header line in the /dag pane's Board section a button that posts the action `chip:<blockId>`, and tell the person they can press it.
+      CONTEXT: Read the root AGENTS.md and hooks/ui/AGENTS.md first (hooks/ui/ is pure; every user-facing string in both EN and KO; board-model.ts keeps its own EN/KO tables). hooks/ui/board-model.ts buildBoardView packs each block's lines (a dim header `[<id>] <type> · <title>` first) into pages of at most 60 lines and returns an InspectorModel {title, lines, actions} (type in hooks/ui/inspector-model.ts). hooks/ui/inspector-client.ts renders lines as Text rows and actions as Buttons that `surface.post({ action })`; hooks/register.ts receives those posts in its ui.message hook and calls inspectorAction (another node, result-host, will handle `chip:` there). Read the Button and Text props in .claude-plugin/types/claude-code/index.d.ts. drawPane sizes the client as lines + actions + 3 rows, so a line turned into a button must still take exactly one row.
+      DELIVERABLE:
+      (1) inspector-model.ts: InspectorModel gains optional `lineActions?: { line: number; action: string }[]` (line is an index into lines), with a one-line comment. The other inspector views do not set it.
+      (2) board-model.ts: every block header on the shown page gets `{ line, action: 'chip:<blockId>' }`, with indices that match the returned lines after paging and clipping (a block cut short at the end of a page still has its header). A page that shows at least one block ends with one dim hint line, EN `Press a block header to cite that block in your prompt` / KO `블록 머리글을 누르면 프롬프트에 그 블록을 인용합니다`. A board with no blocks and the no-board view have no lineActions.
+      (3) inspector-client.ts: a line named in lineActions renders as one row that, when pressed, posts `{ action }` (a plain Button labelled with the line's text, keyed by the action, or the closest one-row pressable the typings offer); every other line renders as today.
+      (4) tests/board-view.test.ts: the header indices map to `chip:b<n>` for each block on page 1 and on page 2 of a long board; the hint line in both languages; no lineActions for an empty board. Prove new behaviour red before green.
+      In ## Output give the lineActions type, the exact EN and KO hint strings, and the test names.
+      SCOPE: Write ONLY hooks/ui/board-model.ts, hooks/ui/inspector-model.ts, hooks/ui/inspector-client.ts and tests/board-view.test.ts. Sibling nodes write other files in parallel (hooks/engine/board-types.ts, hooks/engine/board.ts, hooks/ui/result-board.ts, hooks/engine/board-chips.ts, hooks/engine/format.ts and their tests); never edit those, and do not edit hooks/register.ts. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` and read the results for tests/board-view.test.ts and the other inspector tests: every test there passes. A failure in a file a sibling node is writing is not yours; report it and do not touch that file.
+      STOP WHEN: (1)-(4) hold and those tests pass.
+
+  - id: settle-board-text
+    label: The settle message names the result board and asks for a Verified result section
+    category: unspecified-low
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/format.ts
+      - tests/format.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/format.ts
+        contains: "Verified result"
+      - kind: file
+        path: tests/format.test.ts
+        contains: "Verified result"
+      - kind: command
+        argv: [git, diff, "--check", "--", hooks/engine/format.ts, tests/format.test.ts]
+    prompt: |
+      TASK: Let settleMessage in hooks/engine/format.ts name the run's result board and tell the model what to add to it.
+      CONTEXT: Read the root AGENTS.md and hooks/engine/AGENTS.md first. settleMessage(run, toolName, asked) builds the prompt the plugin submits when a run settles; tests are in tests/format.test.ts. The board tool's name is BOARD_TOOL in hooks/engine/policy.ts (`mcp__dag-workflow__board`); the tool may be deferred in the session. A later node (result-host) passes the board after the plugin has drawn the run's facts on it (summary, node table, run graph, declared writes). Agreed behaviour: the model verifies the result first, then adds ONE section titled `Verified result` (what now works, how the user can try it, what is left), then calls the tool's open once, which switches the /dag pane to the board; the chat report stays short and points to the board. When the same run settled before (retry, amend), the plugin refreshed the facts in place, and the model replaces its earlier section instead of adding another. When open replies `shown: false`, the model reports in chat as before.
+      DELIVERABLE:
+      (1) settleMessage takes an optional last parameter `board?: { boardId: string; title: string; refreshed: boolean }`. With it, the message gains short English lines, placed before the closing "TREAT EVERY NODE COMPLETION CLAIM AS FALSE" line, that say all of the agreed behaviour above, name the board_id and title, name BOARD_TOOL with how to load it (ToolSearch `select:mcp__dag-workflow__board`), and add the replace instruction only when refreshed is true. Without it, the message is exactly what it is today.
+      (2) tests/format.test.ts: with a board the message names the board_id, `Verified result`, the open call and the board tool; with refreshed true it says to replace the earlier section; without a board the message equals today's output. Prove new behaviour red before green.
+      In ## Output give the new signature and the exact added lines.
+      SCOPE: Write ONLY hooks/engine/format.ts and tests/format.test.ts. Sibling nodes write other files in parallel (hooks/engine/board-types.ts, hooks/engine/board.ts, hooks/ui/result-board.ts, hooks/engine/board-chips.ts, hooks/ui/board-model.ts, hooks/ui/inspector-model.ts, hooks/ui/inspector-client.ts and their tests); never edit those. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` and read the results for tests/format.test.ts: every test there passes. A failure in a file a sibling node is writing is not yours; report it and do not touch that file. Run `git diff --check -- hooks/engine/format.ts tests/format.test.ts`: exit 0.
+      STOP WHEN: (1)-(2) hold and the format tests pass.
+
+  - id: result-host
+    label: Draw the result board at settle and turn chips into prompt context
+    category: unspecified-high
+    dependsOn:
+      - board-run-link
+      - result-facts
+      - chip-text
+      - chip-view
+      - settle-board-text
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/ui/i18n.ts
+      - tests/board-host.test.ts
+      - tests/control-harness.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        contains: "resultFacts"
+      - kind: file
+        path: hooks/register.ts
+        contains: "chipContext"
+      - kind: file
+        path: hooks/ui/i18n.ts
+        contains: "toastChipFailed"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: command
+        argv: [bunx, "-p", "typescript@5", tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Wire the result board and the block chips into hooks/register.ts, using the five modules the upstream nodes wrote.
+      CONTEXT: Read the root AGENTS.md and hooks/ui/AGENTS.md first: every `$` call lives in hooks/register.ts, state changes go through serialized() (a single promise queue - never call serialized() from code that already runs inside it, or the queue waits on itself), every UI string exists in EN and KO in hooks/ui/i18n.ts. The upstream Outputs give the exact exports: Board.run link (board-run-link), drawsResult/resultTitle/resultFacts/factEdits/RESULT_SLOTS (result-facts, hooks/ui/result-board.ts), chipLabel/citedChips/chipContext/MAX_CITED_CHIPS (chip-text, hooks/engine/board-chips.ts), `chip:<blockId>` line actions (chip-view), settleMessage's `board` parameter (settle-board-text). In register.ts: announce($, run, text?, deferred?) submits settleMessage for a settled run of this session (`text` replaces it for a rejected run); boards, selectedBoardId, saveBoards, applyEdits/newBoard usage are in the board section (handleBoardTool, editBoard, openBoard, latestBoardTitle); inspectorAction handles the Board section's posted actions; the prompt.submit hook builds `context` and knows `userOrigin`; `interactive`, `language` and `t` are module state.
+      DELIVERABLE:
+      (1) Result board at settle: in the path that submits settleMessage (not when `text` replaces it), when the session is interactive and drawsResult(run) holds, find this session's board whose `run.runId` is the run's id, or create one titled resultTitle(run, language); apply factEdits(resultFacts(run, language), board.run?.facts ?? {}, the board's block ids) with applyEdits; store `run: { runId, facts }` with each inserted id paired to its slot from insertedSlots, replaced slots keeping their ids and removed slots dropped; save with saveBoards. Do not change selectedBoardId or inspectorView (the model opens the board after it verifies). Pass `{ boardId, title, refreshed }` to settleMessage, refreshed true when the board existed before this settle. One settle applies the facts once, also when announce runs again for the same settle. Any failure is logged with $.ui.log and the settle message goes out without the board.
+      (2) latestBoardTitle (the approval block's plan-board line) skips boards that carry a run link.
+      (3) inspectorAction `chip:<blockId>`: take the block from the board the Board section shows (the same choice buildBoardView makes), call `$.prompt.fill({ text: label + ' ', mode: 'insert', decorations: [{ start: 0, end: label.length, bold: true, color: ACCENT }] })` with label = chipLabel(block); when isFilled, remember label -> { boardId, blockId } (at most 20, the oldest dropped); otherwise show the toast t.toastChipFailed(reason) with the refusal or `unknown`.
+      (4) prompt.submit: for a user-origin prompt, citedChips(e.text, the remembered labels) adds one context entry per cited chip with chipContext(board, block) from the board's current content (skip a chip whose board or block is gone); then forget every remembered chip. Plugin prompts are untouched.
+      (5) hooks/ui/i18n.ts: toastChipFailed in the Strings type, EN `Could not put the block into the prompt (${reason})`, KO `블록을 프롬프트에 넣지 못했습니다 (${reason})`.
+      (6) tests/board-host.test.ts: a settled run of the session creates a `Result: <name>` board with the summary and nodes blocks, and the settle prompt names its board_id and `Verified result`; a retry that settles again replaces the fact blocks with the same ids, keeps a section inserted through the board tool, and the settle prompt says to replace; a rejected run gets no result board; the plan-board line of the approval block ignores a result board; a `chip:` action fills the prompt with the label (observe it through a prompt.fill hook or what the testing engine offers), a later user prompt carrying the label gets the block's context, and one without it gets none. Extend tests/control-harness.ts only if $.prompt.fill cannot otherwise be observed or made to report isFilled (keep every existing harness behaviour; the whole suite uses it). Prove new behaviour red before green.
+      In ## Output give: where the settle hook sits, the stored link shape, the exact EN and KO strings, the test names and the plugin test pass count; result-docs documents exactly this.
+      SCOPE: Write ONLY hooks/register.ts, hooks/ui/i18n.ts, tests/board-host.test.ts and, only as (6) allows, tests/control-harness.ts. If an upstream module has a defect that blocks you, report it in Output instead of editing that file. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `command claude plugin validate .` exits 0 (its existing ".catch" warnings are known); `bunx -p typescript@5 tsc -p . --noEmit` exits 0.
+      STOP WHEN: the three commands exit 0 and the tests above exist.
+
+  - id: result-docs
+    label: Document the result board and block chips
+    category: writing
+    dependsOn:
+      - result-facts
+      - chip-view
+      - settle-board-text
+      - result-host
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: README.md
+        absent: "결과 보드를 보여 주는 것은 이후 작업에서"
+      - kind: file
+        path: docs/reference.md
+        contains: "Verified result"
+      - kind: file
+        path: docs/reference.md
+        contains: "칩"
+      - kind: command
+        argv: [git, diff, "--check", "--", README.md, docs/reference.md]
+    prompt: |
+      TASK: Update README.md (Korean) and docs/reference.md for the result board and the block chips.
+      CONTEXT: The upstream Outputs say exactly what changed: result-facts (the fact blocks and their EN/KO titles and columns, which runs get a board), chip-view (block headers are buttons, the hint text), settle-board-text (what the settle message asks the model to do: verify, add `Verified result`, open the board), result-host (when the board is drawn or refreshed, that the pane does not switch at settle, the chip fill and the context a cited chip adds, the toast strings, that the approval block's plan-board line ignores result boards). Read hooks/ui/result-board.ts, hooks/engine/board-chips.ts, hooks/ui/board-model.ts, hooks/engine/format.ts, hooks/ui/i18n.ts and hooks/register.ts to confirm each statement. README.md stays in Korean (AGENTS.md); read both files first and match their structure and tone; README.md is short, and detail lives in docs/reference.md.
+      DELIVERABLE: (1) README.md: in the board section, replace the sentence saying the result board after a run is later work with one or two sentences: when a run ends the plugin draws a result board, the model adds a verified summary and opens it, and pressing a block header puts that block into the prompt as a chip. (2) docs/reference.md: in the board section, document the result board (which runs, the four fact blocks, refresh in place on a later settle, the model's `Verified result` section and open, no tab switch at settle) and the chips (block header buttons, the chip text `[b3 · <title>]`, the context the model receives on submit, at most 5 chips per prompt, chips forgotten after the next prompt, the failure toast); note that the approval block's 계획 보드 line ignores result boards.
+      In ## Output list the sections you changed in each file.
+      SCOPE: Write ONLY README.md and docs/reference.md. Never commit, push, install or reload plugins.
+      VERIFY: Compare every statement you wrote with the files named above; run `git diff --check -- README.md docs/reference.md`: exit 0.
+      STOP WHEN: both files describe the change and every statement matches the code.

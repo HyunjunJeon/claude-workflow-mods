@@ -78,3 +78,37 @@ test('settle reports check outcome counts including unclassified legacy failures
   expect(counts?.slice(1).map(Number)).toEqual([1, 1, 1, 2])
   expect(settleMessage(run, 'dag').includes(VERIFICATION_GUIDANCE)).toBe(true)
 })
+
+const CLOSING = WITHOUT_HINT.split('\n').slice(-3)
+
+test('a settle message with a result board names it, the Verified result section, open and the board tool before the closing lines', () => {
+  const lines = settleMessage(settled(), 'dag', new Map(), { boardId: 'board_ab12', title: 'Settle result', refreshed: false }).split('\n')
+  const added = lines.slice(WITHOUT_HINT.split('\n').length - 3, -3)
+  const text = added.join('\n')
+  expect(lines.slice(-3)).toEqual(CLOSING)
+  expect(lines.slice(0, 8)).toEqual(WITHOUT_HINT.split('\n').slice(0, 8))
+  expect(text).toContain('board_ab12')
+  expect(text).toContain('"Settle result"')
+  expect(text).toContain('ONE section titled "Verified result"')
+  expect(text).toContain('{"action":"open","board_id":"board_ab12"}')
+  expect(text).toContain('mcp__dag-workflow__board')
+  expect(text).toContain('ToolSearch query "select:mcp__dag-workflow__board"')
+  expect(text).toContain('shown: false')
+  expect(text).toContain('chat')
+  expect(text.includes('replace your earlier')).toBe(false)
+})
+
+test('a refreshed result board tells the model to replace its earlier Verified result section', () => {
+  const message = settleMessage(settled(), 'dag', new Map(), { boardId: 'board_ab12', title: 'Settle result', refreshed: true })
+  expect(message).toContain('replace your earlier "Verified result" section')
+  expect(message.indexOf('replace your earlier')).toBeLessThan(message.indexOf('TREAT EVERY NODE COMPLETION CLAIM AS FALSE'))
+})
+
+test('a result board title with a quote or a line break stays on one line', () => {
+  const message = settleMessage(settled(), 'dag', new Map(), { boardId: 'board_ab12', title: 'Say "hi"\nnow', refreshed: false })
+  expect(message).toContain('"Say \\"hi\\"\\nnow"')
+})
+
+test('a settle message with no board is unchanged, even when the board is passed as undefined', () => {
+  expect(settleMessage(settled(), 'dag', new Map(), undefined)).toBe(WITHOUT_HINT)
+})

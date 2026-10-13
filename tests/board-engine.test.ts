@@ -450,6 +450,86 @@ test('parseBoardFile checks every block again: a stored cycle, a short lines arr
   expect(refused(parseBoardFile(reused, 'sess')).message).toContain('nextId')
 })
 
+const RUN_LINK = { runId: 'dag_mv6bifi0_ggt9of', facts: { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b9' } }
+
+// The saved file with the first board linked to a run, as JSON text so a test can break one field of it.
+function linkedFileText(run: unknown): string {
+  const file = savedFile()
+  return JSON.stringify({ ...file, boards: [{ ...file.boards[0], run }, file.boards[1]] })
+}
+
+test('result board link: a stored board with a run link reads back, whether or not the fact blocks still exist', () => {
+  // b9 is not on the board: the model may have removed the block, and the next settle then draws it again.
+  const file = savedFile()
+  const linked: BoardFile = { ...file, boards: [{ ...file.boards[0]!, run: RUN_LINK }, file.boards[1]!] }
+  const read = accepted(parseBoardFile(JSON.stringify(linked), 'sess'))
+  expect(read).toEqual(linked)
+  expect(read.boards[0]?.run).toEqual(RUN_LINK)
+})
+
+test('result board link: a board without the link reads back without a run field', () => {
+  const read = accepted(parseBoardFile(JSON.stringify(savedFile()), 'sess'))
+  expect('run' in read.boards[0]!).toBe(false)
+})
+
+test('result board link: a run id of 64 characters and 8 fact slots are accepted', () => {
+  const facts = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((key, index) => [key, `b${index + 1}`]))
+  const run = { runId: 'r'.repeat(64), facts }
+  expect(accepted(parseBoardFile(linkedFileText(run), 'sess')).boards[0]?.run).toEqual(run)
+  expect(accepted(parseBoardFile(linkedFileText({ runId: 'r', facts: {} }), 'sess')).boards[0]?.run).toEqual({ runId: 'r', facts: {} })
+})
+
+test('result board link: a bad run id is refused as invalid_board_file naming runId', () => {
+  for (const runId of ['', 'r'.repeat(65), 7, null]) {
+    const error = refused(parseBoardFile(linkedFileText({ ...RUN_LINK, runId }), 'sess'))
+    expect(error.code).toBe('invalid_board_file')
+    expect(error.message).toContain('boards[0].run.runId')
+  }
+  expect(refused(parseBoardFile(linkedFileText({ facts: RUN_LINK.facts }), 'sess')).message).toContain('boards[0].run.runId')
+})
+
+test('result board link: a bad fact key is refused as invalid_board_file naming facts', () => {
+  for (const key of ['', 'Summary', 'node1', 'with space', 'k'.repeat(17)]) {
+    const error = refused(parseBoardFile(linkedFileText({ ...RUN_LINK, facts: { [key]: 'b1' } }), 'sess'))
+    expect(error.code).toBe('invalid_board_file')
+    expect(error.message).toContain('boards[0].run.facts')
+  }
+})
+
+test('result board link: a fact value that is not a block id is refused, naming the slot', () => {
+  for (const value of ['summary', 'b0', 'b01', 'B1', 'b1 ', 4, null]) {
+    const error = refused(parseBoardFile(linkedFileText({ ...RUN_LINK, facts: { summary: value } }), 'sess'))
+    expect(error.code).toBe('invalid_board_file')
+    expect(error.message).toContain('boards[0].run.facts.summary')
+  }
+})
+
+test('result board link: more than 8 fact slots, a non-object facts, a missing facts and an unknown run field are refused', () => {
+  const nine = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((key, index) => [key, `b${index + 1}`]))
+  expect(refused(parseBoardFile(linkedFileText({ ...RUN_LINK, facts: nine }), 'sess')).message).toContain('boards[0].run.facts')
+  expect(refused(parseBoardFile(linkedFileText({ ...RUN_LINK, facts: ['b1'] }), 'sess')).message).toContain('boards[0].run.facts')
+  expect(refused(parseBoardFile(linkedFileText({ runId: RUN_LINK.runId }), 'sess')).message).toContain('boards[0].run.facts')
+  expect(refused(parseBoardFile(linkedFileText({ ...RUN_LINK, status: 'done' }), 'sess')).message).toContain('boards[0].run.status')
+  expect(refused(parseBoardFile(linkedFileText('dag_1'), 'sess')).message).toContain('boards[0].run')
+  expect(refused(parseBoardFile(linkedFileText(null), 'sess')).message).toContain('boards[0].run')
+})
+
+test('result board link: applyEdits and boardForModel keep the link as it is', () => {
+  const linked: Board = { ...boardOf(), run: RUN_LINK }
+  const { board } = accepted(apply(linked, [insert(section)]))
+  expect(board.run).toEqual(RUN_LINK)
+  expect(boardForModel(board).run).toEqual(RUN_LINK)
+})
+
+test('result board link: an edit cannot set it, on the edit or on a block', () => {
+  const run = { runId: 'dag_1', facts: { summary: 'b1' } }
+  expect(refused(parseEdits([{ op: 'insert', block: section, run }])).code).toBe('invalid_board_edit')
+  const drawn = accepted(apply(boardOf(), [insert(section)])).board
+  const update = refused(apply(drawn, [{ op: 'update', id: 'b1', changes: { run } }]))
+  expect(update.code).toBe('invalid_board_edit')
+  expect(update.message).toContain('run')
+})
+
 test('the board tool description fits within what Claude Code passes to the model', () => {
   expect(BOARD_TOOL_DESCRIPTION.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_LIMIT)
 })
