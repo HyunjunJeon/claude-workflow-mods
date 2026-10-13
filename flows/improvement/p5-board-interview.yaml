@@ -1,0 +1,187 @@
+# Board P2 of 3: the interview and pm skills draw on the board, and the pane keeps the DAG in front during a run.
+# P1 (flows/improvement/p4-board.yaml, commits 8a22c15 and 6fb20dc) built the board tool and the Board section.
+# Decisions (2026-10-13): keep the board as a tab of the /dag pane (no separate pane); Q1 only the interview and pm
+# skills draw on the board (planning skill and protocol untouched, so no eval rerun); Q2 while a run of this session is
+# unsettled, `open` keeps the DAG section in front and toasts instead; Q3 the approval block gets one line pointing at
+# the session's latest board, with no definition change.
+# P3 (later): the result board on settle and chips into the prompt.
+#
+# PREREQUISITE: `git status --short -- hooks tests skills README.md docs` prints nothing, and no other session edits this
+# checkout (on 2026-10-13 one did, and its half-written tests broke the P1 run's gates).
+# Run it with:  /dag run flows/improvement/p5-board-interview.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan (components -> waves):
+#   wave 1: skill-interview, skill-pm, board-host-p2 (three lanes, disjoint writes)
+#   wave 2: board-docs-p2 (documents what the three lanes report)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: writing for the two skill files and the docs (model-facing and user-facing prose); unspecified-low for
+# board-host-p2 (two small host behaviours in register.ts plus one pure UI change, with tests).
+# Expected lint warning: board-host-p2 owns more than three files; it is one slice (both behaviours meet in register.ts
+# and i18n.ts) and stays one node.
+key: improve-p5-board-interview-1
+name: Board P2 - interview and pm draw on the board
+goal: >
+  /dag-workflow:interview keeps its ambiguity ledger, design tree and goal with acceptance criteria on a board instead of
+  printing the ledger in chat, /dag-workflow:pm keeps its three lists and product goal on a board, both fall back to chat
+  when the board cannot be shown, a board `open` during an unsettled run of the session keeps the /dag pane on the DAG
+  and toasts instead, the approval block names the session's latest board, and README.md and docs/reference.md say so.
+review:
+  request: |
+    현재 탭 유지.
+    P2 정의 시작.
+    Agreed decisions for P2: Q1 only the interview and pm skills draw on the board (the planning skill and the protocol line stay unchanged); Q2 while a run is in progress, a board `open` keeps the DAG tab and shows a toast instead of switching; Q3 the approval screen gets one line naming the plan board and telling the user to press b, with no change to the definition format.
+    Earlier decision carried into P2: the interview ledger moves from the chat to the board.
+    P3 (the result board on settle and chips into the prompt) is a later run and out of scope here.
+  rules:
+    - AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "feat(board): draw the interview and pm on the board"
+    paths:
+      - skills/interview/SKILL.md
+      - skills/pm/SKILL.md
+      - hooks/register.ts
+      - hooks/ui/approval.ts
+      - hooks/ui/i18n.ts
+      - tests/board-host.test.ts
+      - tests/approval.test.ts
+      - README.md
+      - docs/reference.md
+nodes:
+  - id: skill-interview
+    label: The interview skill draws its ledger and design tree on the board
+    category: writing
+    writes:
+      - skills/interview/SKILL.md
+    verify:
+      - kind: file
+        path: skills/interview/SKILL.md
+        contains: "## The board"
+      - kind: file
+        path: skills/interview/SKILL.md
+        contains: "mcp__dag-workflow__board"
+      - kind: file
+        path: skills/interview/SKILL.md
+        contains: "shown: false"
+      - kind: file
+        path: skills/interview/SKILL.md
+        contains: "| Track | Settled | Still open |"
+      - kind: command
+        argv: [git, diff, "--check", "--", skills/interview/SKILL.md]
+    prompt: |
+      TASK: Rewrite skills/interview/SKILL.md so the interview keeps its ledger, design tree and restated goal on the board instead of printing the ledger in chat.
+      CONTEXT: The plugin's tool mcp__dag-workflow__board (read hooks/engine/board-spec.ts for its exact description and limits) draws a board of blocks into the /dag pane's Board section (key b). Actions: create {title} returns board_id; edit {board_id, edits} applies 1-20 edits atomically ({op: insert, block, afterId?}, {op: update, id, changes}, {op: replace, id, block}, {op: remove, id}); get {board_id}; list; open {board_id}. Blocks used here: `table` {title?, columns 1-6, rows <= 30, each row as long as columns, cells <= 80 chars}, `flow` {title?, nodes 1-24 [{id, label <= 40, kind? process|decision|terminal, note? <= 80}], edges <= 48 [{from, to, label?}], no cycle}, `section` {title, text <= 4000}. Block ids b<n> are shown to the user. `open` replies `shown: false` when the surface draws no /dag pane. The tool may be deferred: load it with ToolSearch `select:mcp__dag-workflow__board` before the first call. Under strict enforcement the main conversation may call it (it is in MAIN_LOOP_TOOLS).
+      DELIVERABLE: the edited skills/interview/SKILL.md, in the file's existing style (English, one sentence per line, imperative, no emojis), at most 170 lines:
+      (1) Add `The mcp__dag-workflow__board tool, to draw the interview on the board.` to the list of tools the main conversation may use under strict enforcement.
+      (2) A new section `## The board`, placed right after `## Ambiguity tracks`, that says: before the first round, load the tool if it is deferred, `create` a board titled `Interview: <topic>` (in the user's language, at most 80 characters), and in ONE edit insert a `table` titled `Ambiguity tracks` with columns Track, Settled, Still open and the four rows Scope, Constraints, Deliverables, Verification, then a `flow` titled `Design tree` with one node per decision (label: the decision in a few words; note: `settled: <answer>`, `frontier` or `later`; kind `terminal` once settled, `decision` otherwise) and an edge from each decision to each decision that hangs off it; then call `open` once. At the start of every later round, ONE edit `replace`s the table and the tree by their ids with the current state. In chat, never print the ledger table; say in one line which blocks changed and what moved (for example `Board b1, b2 updated: Scope settled, Verification has 2 open items`). Keep within the limits: shorten labels and cells, and put longer wording in a `section`. The user may point at blocks by id (`b2`, a tree node's label); treat that as an answer to clarify with Refine. FALLBACK: if the tool is unavailable, an edit is refused twice, or `open` replies `shown: false`, print the ledger in chat at the start of every round as before.
+      (3) In `## Ambiguity tracks`, keep the four tracks and the rule against collapsing onto one track, but change "Print this ledger at the start of every round" so the ledger lives on the board, and keep the markdown ledger template `| Track | Settled | Still open |` for the fallback only.
+      (4) In `## Restate gate`, before asking for confirmation, insert a `section` titled `Goal and acceptance criteria` holding the goal sentence and the numbered criteria, `get` the board and check it matches the conversation; confirmation still goes through AskUserQuestion with the same three options. Say that the board stays in the session, so the approval block of the run can point the user to it.
+      Keep every other rule of the file (design-tree rounds, the 4-questions-per-call limit, facts versus decisions, Refine, the hand-off to dag-workflow:planning, never start before "Yes") unchanged in meaning.
+      In ## Output give the new or changed section headings with one line each on what changed, and the final line count.
+      SCOPE: Write ONLY skills/interview/SKILL.md. Read hooks/engine/board-spec.ts, hooks/engine/board.ts and skills/pm/SKILL.md for reference. skills/pm/SKILL.md belongs to the skill-pm node. Never commit, push, install or reload plugins.
+      VERIFY: Re-read the file: the frontmatter is unchanged, `## The board` sits right after `## Ambiguity tracks`, the fallback names `shown: false`, and `git diff --check -- skills/interview/SKILL.md` exits 0.
+      STOP WHEN: the file holds (1)-(4) and the check exits 0.
+
+  - id: skill-pm
+    label: The pm skill keeps its three lists on the board
+    category: writing
+    writes:
+      - skills/pm/SKILL.md
+    verify:
+      - kind: file
+        path: skills/pm/SKILL.md
+        contains: "## The board"
+      - kind: file
+        path: skills/pm/SKILL.md
+        contains: "mcp__dag-workflow__board"
+      - kind: file
+        path: skills/pm/SKILL.md
+        contains: "shown: false"
+      - kind: file
+        path: skills/pm/SKILL.md
+        contains: "write-prd"
+      - kind: command
+        argv: [git, diff, "--check", "--", skills/pm/SKILL.md]
+    prompt: |
+      TASK: Rewrite skills/pm/SKILL.md so the PRD interview keeps its three running lists and the product goal on the board.
+      CONTEXT: The plugin's tool mcp__dag-workflow__board (read hooks/engine/board-spec.ts for its exact description and limits) draws a board of blocks into the /dag pane's Board section (key b). Actions: create {title} returns board_id; edit {board_id, edits} applies 1-20 edits atomically ({op: insert, block, afterId?}, {op: update, id, changes}, {op: replace, id, block}, {op: remove, id}); get {board_id}; list; open {board_id}. Blocks used here: `table` {title?, columns 1-6, rows <= 30, each row as long as columns, cells <= 80 chars}, `section` {title, text <= 4000}. Block ids b<n> are shown to the user. `open` replies `shown: false` when the surface draws no /dag pane. The tool may be deferred: load it with ToolSearch `select:mcp__dag-workflow__board` before the first call. Under strict enforcement the main conversation may call it.
+      DELIVERABLE: the edited skills/pm/SKILL.md, in the file's existing style (English, one sentence per line, imperative), at most 130 lines:
+      (1) Add the mcp__dag-workflow__board tool to the tools the main conversation may use, as the means to draw the interview.
+      (2) A new section `## The board`, placed right before `## Confirm before writing`, that says: before the first round, load the tool if it is deferred, `create` a board titled `PRD: <idea>` (in the user's language, at most 80 characters), insert one `table` per list - `Product decisions`, `Deferred to development`, `Open items` - each with columns Item and Source (Source is `user` or the question number), and call `open` once. After every round, ONE edit `replace`s the tables that changed. In chat, say in one line which blocks changed instead of reprinting the lists. Keep within the limits (cells <= 80 characters, at most 30 rows per table; split a longer list into a second table). FALLBACK: if the tool is unavailable, an edit is refused twice, or `open` replies `shown: false`, keep the lists in chat as before.
+      (3) In `## Confirm before writing`, insert a `section` titled `Product goal` with the one-sentence goal, `get` the board and check it matches the conversation, then confirm with one AskUserQuestion as today; the board shows the lists, AskUserQuestion confirms them.
+      Keep the question classes, the "Decide later" rule, the one-node write-prd DAG (id write-prd, category writing, its two verify checks and its eight sections) and the rule that the main conversation never writes the PRD unchanged in meaning.
+      In ## Output give the new or changed section headings with one line each on what changed, and the final line count.
+      SCOPE: Write ONLY skills/pm/SKILL.md. Read hooks/engine/board-spec.ts and skills/interview/SKILL.md for reference. skills/interview/SKILL.md belongs to the skill-interview node. Never commit, push, install or reload plugins.
+      VERIFY: Re-read the file: the frontmatter is unchanged, `## The board` sits right before `## Confirm before writing`, the write-prd node is described as before, and `git diff --check -- skills/pm/SKILL.md` exits 0.
+      STOP WHEN: the file holds (1)-(3) and the check exits 0.
+
+  - id: board-host-p2
+    label: Keep the DAG in front during a run and point the approval block at the board
+    category: unspecified-low
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/ui/approval.ts
+      - hooks/ui/i18n.ts
+      - tests/board-host.test.ts
+      - tests/approval.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/i18n.ts
+        contains: "계획 보드"
+      - kind: file
+        path: hooks/ui/i18n.ts
+        contains: "toastBoardUpdated"
+      - kind: file
+        path: hooks/register.ts
+        contains: "toastBoardUpdated"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: command
+        argv: [bunx, "-p", "typescript@5", tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Make a board `open` keep the /dag pane on the DAG while a run of this session is unsettled, and add one line to the approval block that names the session's latest board.
+      CONTEXT: Read the root AGENTS.md and hooks/ui/AGENTS.md first: every `$` call lives in hooks/register.ts, hooks/ui/ is pure, every UI string exists in both EN and KO in hooks/ui/i18n.ts, state changes go through serialized(). In hooks/register.ts, `openBoard($, board)` (the board tool's open action) today always sets `inspectorView = 'board'`, resets the page, opens the pane with openPane($, false) and replies `{ board_id, shown }`. The approval block in drawPane renders `approvalPreview(previewDefinition(...), e.props.bodyColumns, t)` from hooks/ui/approval.ts for a run of this session held for approval. `isSettled` is exported by hooks/engine/run.ts. The session's boards and selectedBoardId are module state in register.ts.
+      DELIVERABLE:
+      (1) openBoard: when any run of this session is not settled (isSettled false; a run held for approval counts as unsettled), do NOT change inspectorView; still set selectedBoardId to the board and inspectorPage to 0, open the pane as now, show one toast `t.toastBoardUpdated(board.title)` (EN `Board updated: <title> · press b in the /dag pane`, KO `보드 갱신: <title> · /dag 패널에서 b`), and reply `{ board_id, shown: true, section: 'dag', hint: 'A run is active, so the /dag pane stays on the DAG; tell the user to press b to see the board.' }` (keep the existing `shown: false` reply when the surface draws no pane). With no unsettled run, behaviour is unchanged.
+      (2) hooks/ui/approval.ts: give approvalPreview an optional last parameter `boardTitle?: string`; when it is given, append one line `t.previewBoard(boardTitle)` (EN `Plan board: <title> · press b to view`, KO `계획 보드: <title> · b로 보기`), fitted to columns like the other lines. drawPane passes the title of this session's most recently updated board (largest updatedAt), or nothing when the session has no board.
+      (3) Add both strings to the Strings type and to the EN and KO tables in hooks/ui/i18n.ts.
+      (4) Tests: in tests/board-host.test.ts, an open while a run of the session is running keeps the pane on the DAG section (assert through the rendered pane or the reply's `section: 'dag'`, whichever the harness supports, and that the toast was shown), and an open with no run still switches to the Board section; in tests/approval.test.ts, the approval block shows the plan board line with the latest board's title when the session has a board, and no such line when it has none. Prove each new behaviour red before green.
+      In ## Output give: the exact EN and KO strings, the reply shape of open during a run, the new approvalPreview signature, the test names and the plugin test pass count; board-docs-p2 documents exactly this.
+      SCOPE: Write ONLY hooks/register.ts, hooks/ui/approval.ts, hooks/ui/i18n.ts, tests/board-host.test.ts and tests/approval.test.ts. Do not edit skills/, README.md or docs/ (other nodes own them), and do not edit tests/control-harness.ts. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `command claude plugin validate .` exits 0 (its existing ".catch" warnings are known); `bunx -p typescript@5 tsc -p . --noEmit` exits 0.
+      STOP WHEN: the three commands exit 0 and the tests above exist.
+
+  - id: board-docs-p2
+    label: Document the board in the interview, pm and pane docs
+    category: writing
+    dependsOn:
+      - skill-interview
+      - skill-pm
+      - board-host-p2
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "계획 보드"
+      - kind: file
+        path: docs/reference.md
+        contains: "Interview:"
+      - kind: command
+        argv: [git, diff, "--check", "--", README.md, docs/reference.md]
+    prompt: |
+      TASK: Update README.md (Korean) and docs/reference.md for what this run changed about the board.
+      CONTEXT: The upstream Outputs say exactly what changed: skill-interview (the interview creates a board `Interview: <topic>` with the ambiguity table and the design tree, updates it every round, adds `Goal and acceptance criteria` at the restate gate, and falls back to chat when the board cannot be shown), skill-pm (a board `PRD: <idea>` with three list tables and a `Product goal` section, same fallback), board-host-p2 (the exact EN/KO strings; a board `open` during an unsettled run keeps the /dag pane on the DAG and toasts; the approval block's plan board line). Read skills/interview/SKILL.md, skills/pm/SKILL.md, hooks/ui/i18n.ts and hooks/register.ts to confirm each statement. README.md stays in Korean (AGENTS.md). Read both files first and match their structure and tone; README.md is short, and detail lives in docs/reference.md.
+      DELIVERABLE: (1) README.md: in the board section, replace the sentence saying interview drawing comes in later work with one or two sentences: the interview and PM skills now keep their tables and design tree on the board, and the result board after a run is still later work. (2) docs/reference.md: in `### 정렬 스킬: 인터뷰와 PM`, say what each skill draws (board titles `Interview: <topic>` and `PRD: <idea>`, the blocks, the per-round update, the fallback to chat); in the board section, document the `open` behaviour during an unsettled run (the pane stays on the DAG, the toast text, the reply's `section: 'dag'`) and the approval block's `계획 보드` line.
+      In ## Output list the sections you changed in each file.
+      SCOPE: Write ONLY README.md and docs/reference.md. Never commit, push, install or reload plugins.
+      VERIFY: Compare every statement you wrote with the files named above; run `git diff --check -- README.md docs/reference.md`: exit 0.
+      STOP WHEN: both files describe the change and every statement matches the code and skill files.
