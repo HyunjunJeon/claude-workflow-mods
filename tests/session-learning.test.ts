@@ -1,4 +1,4 @@
-import { expect, test, type Engine } from 'claude-code/testing'
+import { expect, test, type Engine, type Plugin } from 'claude-code/testing'
 import { hash } from '../hooks/engine/hash.ts'
 import { applyLearningProposals, emptyLibrary, parseLearningLibrary, parseLearningSession, renderLearnedSkill, type LearningLibrary, type LearningSession } from '../hooks/engine/learning.ts'
 import { boot, checkpoint, command, harness, start } from './control-harness.ts'
@@ -57,6 +57,20 @@ function signal() {
   const promise = new Promise<void>(resolve => { callbacks.resolve = resolve })
   if (!callbacks.resolve) throw new Error('Signal resolver was not created')
   return { promise, resolve: callbacks.resolve }
+}
+
+// While GATE exists, releasing the learning library lock waits a second of mock clock, so a second writer arrives
+// mid-update. The plugin runs in its own realm without this module's bindings, hence the literal paths.
+const GATE = `${HOME}/lock-gate`
+const LOCK_GATE: Plugin = {
+  name: 'learning-lock-gate',
+  register(on) {
+    on('process.run', async ($, e, next) => {
+      const releasing = e.argv[0] === 'rmdir' && e.argv[1] === '/home/learner/.claude/dag-workflow/learning/.lock'
+      if (releasing && await $.fs.exists('/home/learner/lock-gate')) await $.clock.sleep(1_000)
+      return next(e)
+    })
+  },
 }
 
 test('a non-DAG main turn learns and persists a reusable skill without recursive learning', async ($, on) => {
@@ -548,4 +562,45 @@ test('retention keeps manually changed archive files and active skills', async (
   expect(h.files.get(archived)).toBe('Manual archive revision')
   expect(h.files.has(PATH)).toBe(true)
   expect(library(h).skills.length).toBe(2)
+})
+
+test('a prompt that arrives while this session holds the library lock waits instead of dropping its exposure', { plugins: [LOCK_GATE] }, async ($, on) => {
+  const h = harness(on, { home: HOME })
+  seed(h)
+  await boot($, 'off')
+  await ask($)
+  h.files.set(GATE, '')
+  const learning = command($, 'learn')
+  await h.clock.settle()
+  expect(h.locks.has(`${ROOT}/.lock`)).toBe(true)
+  h.files.delete(GATE)
+  const asking = ask($)
+  await h.clock.settle()
+  await h.clock.advance(1_000)
+  await Promise.all([learning, asking])
+  expect(h.logs.filter(line => line.includes('busy'))).toEqual([])
+  expect(library(h).skills[0]?.opportunities).toBe(2)
+})
+
+test('archiving and retention leave no empty skill folders behind', { options: { learning_min_opportunities: 1 } }, async ($, on) => {
+  const h = harness(on, { home: HOME, now: 31 * 86_400_000 })
+  const folder = PATH.slice(0, -'/SKILL.md'.length)
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  await complete($, JSON.stringify({ skills: [proposal(h)] }), batch.agentId)
+  expect(h.locks.has(folder)).toBe(true)
+  await ask($)
+  await ask($)
+  expect(library(h).skills[0]?.archived).toBe(true)
+  expect(h.locks.has(folder)).toBe(false)
+  expect(h.locks.has(`${ROOT}/archive/${SKILL}`)).toBe(true)
+  const archived = library(h)
+  for (const skill of archived.skills) Object.assign(skill, { createdAt: 1, updatedAt: 1 })
+  h.files.set(`${ROOT}/library.json`, JSON.stringify(archived))
+  await command($, 'learning prune')
+  expect(library(h).skills.length).toBe(0)
+  expect(h.locks.has(`${ROOT}/archive/${SKILL}`)).toBe(false)
 })

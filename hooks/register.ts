@@ -209,6 +209,7 @@ let learningTurnRequested = false
 let learningSpawning = false
 let learningSpawnName: string | undefined
 let learningWriteSequence = 0
+let learningQueue: Promise<unknown> = Promise.resolve()
 
 function learningSessionPath(id = sessionId): string {
   return `${learningRoot}/sessions/${hash(id)}.json`
@@ -241,9 +242,18 @@ async function readLearningLibrary($: EngineInterface): Promise<LearningLibrary>
   return parsed.value
 }
 
+// Callers in this session queue here, so the directory lock only ever meets another session's holder. This is not
+// serialized(): that queue also holds agent spawns and Jev calls, which a prompt or a worker's Read must not wait
+// behind. Nothing on this queue awaits serialized() or another library update, so the two queues cannot deadlock.
+function updateLearningLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary | Promise<LearningLibrary>): Promise<void> {
+  const result = learningQueue.then(() => updateLockedLibrary($, update))
+  learningQueue = result.catch(() => undefined)
+  return result
+}
+
 // A directory lock protects read/modify/write across independent sessions, not just this module's queue.
 // Contention leaves the session's unlearned evidence intact for its next turn; no hook waits for another session.
-async function updateLearningLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary | Promise<LearningLibrary>): Promise<void> {
+async function updateLockedLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary | Promise<LearningLibrary>): Promise<void> {
   const lock = `${learningRoot}/.lock`
   let acquired = await $.process.run(['mkdir', lock])
   if (acquired.exitCode !== 0 && await $.fs.exists(lock)) {
@@ -319,6 +329,8 @@ async function publishLearningTransaction($: EngineInterface, transaction: Learn
         await learningDirectory($, folder)
         const moved = await $.process.run(['mv', '-f', path, `${folder}/SKILL.md`])
         if (moved.exitCode !== 0) throw new Error(`could not archive ${skill.id}`)
+        // rmdir removes only an empty folder, so files a person added beside SKILL.md keep it in place.
+        await $.process.run(['rmdir', `${learnedSkillsDir}/${skill.id}`])
       }
     } else {
       await learningDirectory($, `${learnedSkillsDir}/${skill.id}`)
@@ -356,6 +368,7 @@ async function pruneLearningData($: EngineInterface): Promise<void> {
           $.ui.log(`Could not remove expired archived skill: ${path}`)
           continue
         }
+        await $.process.run(['rmdir', `${learningRoot}/archive/${skill.id}`])
       }
       // An active file created at this name since archival is not ours to remove.
       if (await $.fs.exists(`${learnedSkillsDir}/${skill.id}/SKILL.md`)) skills.push(skill)
