@@ -50,7 +50,7 @@ import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, type PeekRequest } from './engine/board.ts'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from './engine/board-spec.ts'
-import { chipContext, chipLabel, citedChips } from './engine/board-chips.ts'
+import { chipContext, chipLabel, chipSpans, citedChips } from './engine/board-chips.ts'
 import type { Board, BoardEdit, BoardFile } from './engine/board-types.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence, type VerificationOutcome } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
@@ -579,6 +579,7 @@ const resultDraws = new Map<string, { facts: string; board: SettleBoard }>()
 const chips = new Map<string, { boardId: string; blockId: string }>()
 // More chips than a person cites in one prompt; the oldest beyond it are dropped.
 const MAX_CHIPS = 20
+const CHIP_PAINT = { bold: true, color: ACCENT }
 let language: 'en' | 'ko' = 'en'
 let pinnedStatus: string | undefined
 const settleToasts = new Set<string>()
@@ -2307,7 +2308,7 @@ async function citeBlock($: EngineInterface, blockId: string): Promise<void> {
   // The press raced a change of the shown board, which redraws the pane without that header.
   if (!board || !block) return
   const label = chipLabel(block)
-  const filled = await $.prompt.fill({ text: `${label} `, mode: 'insert', decorations: [{ start: 0, end: label.length, bold: true, color: ACCENT }] })
+  const filled = await $.prompt.fill({ text: `${label} `, mode: 'insert', decorations: [{ start: 0, end: label.length, ...CHIP_PAINT }] })
   if (!filled.isFilled) {
     $.ui.toast(t.toastChipFailed(filled.refusal ?? 'unknown'), { timeoutMs: ATTENTION_TOAST_MS })
     return
@@ -3355,6 +3356,15 @@ export function register(on: On, options: PluginOptions) {
     // Skipped while a node's own planning-skill call is in flight: that load is the node's, not the conversation's.
     if (isPlanningSkill(e.skill) && nodePlanningCalls === 0) await setPlanningLoaded($, true)
     return next(e)
+  })
+
+  // A fill's decorations last only until the draft's next change, so every edit paints the remembered chips again. A chip
+  // the person typed inside no longer matches and stays plain, which is also how prompt.submit will read it.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    if (chips.size === 0) return box
+    const painted = chipSpans(box.text, chips.keys()).map(span => ({ ...span, ...CHIP_PAINT }))
+    return painted.length === 0 ? box : { ...box, decorations: [...(box.decorations ?? []), ...painted] }
   })
 
   on('prompt.submit', async ($, e, next) => {

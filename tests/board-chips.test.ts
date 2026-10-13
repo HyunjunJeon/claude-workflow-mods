@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { CHIP_CONTEXT_MAX, chipContext, chipLabel, citedChips, MAX_CITED_CHIPS } from '../hooks/engine/board-chips.ts'
+import { CHIP_CONTEXT_MAX, chipContext, chipLabel, chipSpans, citedChips, MAX_CITED_CHIPS } from '../hooks/engine/board-chips.ts'
 import type { Block, Board } from '../hooks/engine/board-types.ts'
 
 function boardOf(blocks: Block[], title = 'Release plan'): Board {
@@ -68,6 +68,20 @@ test('citedChips keeps the first five of a prompt that cites more', () => {
 test('citedChips reads labels from any iterable, such as the keys of a map', () => {
   const known = new Map([['[b1 · Plan]', 'board_1'], ['[b2 · Results]', 'board_1']])
   expect(citedChips('look at [b2 · Results]', known.keys())).toEqual(['[b2 · Results]'])
+})
+
+test('chipSpans finds every occurrence of every label, in text order', () => {
+  const text = '[b2 · Results] vs [b1 · Plan], then [b2 · Results]'
+  expect(chipSpans(text, ['[b1 · Plan]', '[b2 · Results]', '[b2 · Results]'])).toEqual([
+    { start: 0, end: 14 },
+    { start: 18, end: 29 },
+    { start: 36, end: 50 },
+  ])
+})
+
+test('chipSpans keeps a label the person typed after, and drops one they typed inside', () => {
+  expect(chipSpans('[b1 · Plan] why?', ['[b1 · Plan]'])).toEqual([{ start: 0, end: 11 }])
+  expect(chipSpans('[b1 · Plxan] why?', ['[b1 · Plan]'])).toEqual([])
 })
 
 // chipContext puts the intro paragraph on the first line and the block's JSON on the second.

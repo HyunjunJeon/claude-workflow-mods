@@ -29,6 +29,16 @@ export function citedChips(text: string, labels: Iterable<string>): string[] {
   return [...firstAt].sort((a, b) => a[1] - b[1]).slice(0, MAX_CITED_CHIPS).map(([label]) => label)
 }
 
+// Where the labels stand in the prompt box, every occurrence, so each edit can paint them again. A label the person edited
+// inside no longer matches: it loses its colour as it would lose its block on submit.
+export function chipSpans(text: string, labels: Iterable<string>): { start: number; end: number }[] {
+  const spans: { start: number; end: number }[] = []
+  for (const label of new Set(labels)) {
+    for (let at = text.indexOf(label); at >= 0; at = text.indexOf(label, at + label.length)) spans.push({ start: at, end: at + label.length })
+  }
+  return spans.sort((a, b) => a.start - b.start)
+}
+
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff
 }
