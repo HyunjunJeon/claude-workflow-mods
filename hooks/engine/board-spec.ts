@@ -1,17 +1,19 @@
 // Claude Code passes the model only the first 2048 characters of a tool description (see TOOL_DESCRIPTION_LIMIT in
 // tool-spec.ts), so the rules come first and tests/board-engine.test.ts keeps the whole text under that limit.
 export const BOARD_TOOL_DESCRIPTION = [
-  'The board is shown to the user in the /dag pane\'s Board section (key b). Use it when the user wants to see how something works (a flow, a call order, a data shape), and for the interview ledger, the plan and the result.',
-  'Write in this order: a section saying what and why, then ONE diagram (flow for branches and steps, sequence for who calls whom), then code_peek for the few lines that carry the mechanism.',
+  'The board is shown to the user in the /dag pane\'s Board section (key b). Use it to show how something works (a flow, a call order, a data shape) and for the interview ledger, plan and result.',
+  'Write in this order: a section saying what and why, then ONE diagram (flow for branches and steps, sequence for who calls whom), then code_peek for the few lines that carry the mechanism (code: a snippet you propose; trace: a quote of a run).',
   'Draw incrementally: a few blocks per edit, and call open once after the first edit. Block ids b<n> are shown to the user, who may refer to them. Read the board back with get before you finish.',
   'Flow edges may not form a cycle: draw a loop as a note. code_peek takes a project-relative path and at most 40 lines. Edits are atomic: one bad edit changes nothing.',
-  'Actions: create {title} returns board_id; edit {board_id, edits} (1-20); get {board_id}; list; open {board_id} shows the board in the pane without taking the keyboard.',
+  'Actions: create {title} returns board_id; edit {board_id, edits} (1-20); get {board_id}; list; open {board_id} shows it in the pane without taking the keyboard; export {board_id} returns markdown.',
   'Edits: {op:"insert", block, afterId?} (appends, or goes after afterId); {op:"update", id, changes} (merges fields; "" clears an optional one; never id, type or lines); {op:"replace", id, block}; {op:"remove", id}.',
   'Blocks (limits in characters; optional fields marked ?):',
   'section {title 1-80, text? 4000};',
   'callout {tone info|decision|risk|warning, text 1-1000, title? 80};',
   'table {columns 1-6, rows <=30 (each as long as columns, cells <=80), title?};',
   'code_peek {path, start, end (1-based, end-start < 40), note? 200, title?};',
+  'code {code 1-4000 as sent, <=40 lines of <=240, language? 20, note? 200, title?} (not read from a file);',
+  'trace {run, node, part output|answer|error|verification, note? 200, title?} (the host fills its lines from the run);',
   'flow {nodes 1-24 [{id, label 1-40, kind? process|decision|terminal, note? 80}], edges <=48 [{from, to, label?}], title?}, node ids [A-Za-z0-9_.-]{1,32};',
   'sequence {participants 2-8 [{id, label 1-24}], steps 1-40 [{from, to, label 1-60, kind? call|return|async|note}], title?}.',
   'A board holds at most 60 blocks.',
@@ -21,7 +23,7 @@ const BLOCK_SCHEMA = {
   type: 'object',
   description: 'A block: type plus the fields of that type, no id (the board assigns b<n>)',
   properties: {
-    type: { type: 'string', enum: ['section', 'callout', 'table', 'code_peek', 'flow', 'sequence'] },
+    type: { type: 'string', enum: ['section', 'callout', 'table', 'code_peek', 'code', 'trace', 'flow', 'sequence'] },
     title: { type: 'string', description: 'section (required), every other type (optional): 1-80 characters' },
     text: { type: 'string', description: 'section: at most 4000 characters; callout: 1-1000' },
     tone: { type: 'string', enum: ['info', 'decision', 'risk', 'warning'], description: 'callout' },
@@ -30,7 +32,12 @@ const BLOCK_SCHEMA = {
     path: { type: 'string', description: 'code_peek: project-relative file, no ".." and not under .claude' },
     start: { type: 'integer', minimum: 1, description: 'code_peek: first line' },
     end: { type: 'integer', minimum: 1, description: 'code_peek: last line, at most 40 lines from start' },
-    note: { type: 'string', description: 'code_peek: at most 200 characters' },
+    note: { type: 'string', description: 'code_peek, code, trace: at most 200 characters' },
+    language: { type: 'string', description: 'code: at most 20 characters, such as ts' },
+    code: { type: 'string', description: 'code: the snippet, 1-4000 characters kept as sent, at most 40 lines of 240' },
+    run: { type: 'string', description: 'trace: the run id, such as dag_mv6fveyq_y06sr2' },
+    node: { type: 'string', description: 'trace: the node id in that run' },
+    part: { type: 'string', enum: ['output', 'answer', 'error', 'verification'], description: 'trace: which artifact of the node to quote' },
     nodes: {
       type: 'array',
       minItems: 1,
@@ -103,9 +110,9 @@ const EDIT_SCHEMA = {
 export const BOARD_INPUT_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['create', 'edit', 'get', 'list', 'open'] },
+    action: { type: 'string', enum: ['create', 'edit', 'get', 'list', 'open', 'export'] },
     title: { type: 'string', description: 'create only: the board title, 1-80 characters' },
-    board_id: { type: 'string', description: 'edit, get, open: the board_id that create returned' },
+    board_id: { type: 'string', description: 'edit, get, open, export: the board_id that create returned' },
     edits: { type: 'array', minItems: 1, maxItems: 20, items: EDIT_SCHEMA, description: 'edit only: applied in order, all or nothing' },
   },
   required: ['action'],

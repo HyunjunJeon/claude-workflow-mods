@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { applyEdits, newBoard } from '../hooks/engine/board.ts'
 import type { BlockInput, Board } from '../hooks/engine/board-types.ts'
+import type { DecisionRecord } from '../hooks/engine/decisions.ts'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { createRun, markFinished, markRunning } from '../hooks/engine/run.ts'
 import type { NodeRun, Run, VerificationOutcome } from '../hooks/engine/types.ts'
@@ -280,49 +281,137 @@ test('a table cell over 80 characters is cut, so a long node list does not make 
   expect(cell.endsWith('…')).toBe(true)
 })
 
-const FOUR_IDS = { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b4' }
+// A decision record of the run 'dag_result' that runOf builds; a test overrides only what it is about.
+function decision(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
+  return {
+    id: 'd1',
+    at: 1_000,
+    sessionId: 's1',
+    kind: 'routing',
+    subject: 'Ship it',
+    proposed: 'dag',
+    selected: 'dag',
+    source: 'jev',
+    outcome: 'applied',
+    ruleset: 'test-ruleset',
+    threshold: 0.8,
+    latencyMs: 12,
+    stateHash: 'h1',
+    runId: 'dag_result',
+    ...overrides,
+  }
+}
 
-test('the first draw inserts the four blocks in slot order, each at the end of the board', () => {
-  const facts = resultFacts(allDone(SMALL), 'en')
+test('the decisions table lists the run records oldest first and leaves out the records of another run', () => {
+  const records = [
+    decision({ id: 'd2', at: 3_000, kind: 'recovery', subject: 'node b failed', selected: 'retry', outcome: 'low-confidence' }),
+    decision({ id: 'd3', at: 2_000, kind: 'routing', subject: 'other run prompt', selected: 'direct', runId: 'dag_other' }),
+    decision({ id: 'd1', at: 1_000, kind: 'routing', subject: 'Ship it', selected: 'dag', outcome: 'applied' }),
+  ]
+  expect(tableOf(resultFacts(allDone(SMALL), 'en', records).decisions)).toEqual({
+    type: 'table',
+    title: 'Decisions',
+    columns: ['Kind', 'Subject', 'Picked', 'Outcome'],
+    rows: [
+      ['routing', 'Ship it', 'dag', 'applied'],
+      ['recovery', 'node b failed', 'retry', 'low-confidence'],
+    ],
+  })
+})
+
+test('the decisions table speaks Korean in its title and columns and keeps the same cells', () => {
+  const records = [decision({ kind: 'recovery', subject: 'node b failed', selected: 'retry', outcome: 'ask' })]
+  expect(tableOf(resultFacts(allDone(SMALL), 'ko', records).decisions)).toEqual({
+    type: 'table',
+    title: '결정',
+    columns: ['종류', '대상', '선택', '결과'],
+    rows: [['recovery', 'node b failed', 'retry', 'ask']],
+  })
+})
+
+test('a run with no decision records of its own has no decisions table', () => {
+  const run = allDone(SMALL)
+  expect(resultFacts(run, 'en').decisions).toBeUndefined()
+  expect(resultFacts(run, 'en', []).decisions).toBeUndefined()
+  expect(resultFacts(run, 'en', [decision({ runId: 'dag_other' })]).decisions).toBeUndefined()
+  expect(resultFacts(run, 'en', [decision({ runId: undefined })]).decisions).toBeUndefined()
+})
+
+const manyDecisions = (count: number): DecisionRecord[] => Array.from({ length: count }, (_, index) => decision({ id: `d${index + 1}`, at: index, subject: `subject ${index + 1}` }))
+
+test('a decisions table of exactly 30 records keeps every row', () => {
+  const rows = tableOf(resultFacts(allDone(SMALL), 'en', manyDecisions(30)).decisions).rows
+  expect(rows).toHaveLength(30)
+  expect(rows[29]?.[1]).toBe('subject 30')
+})
+
+test('past 30 records the decisions table keeps 29 rows and a last row that counts the rest, in both languages', () => {
+  const run = allDone(SMALL)
+  const en = tableOf(resultFacts(run, 'en', manyDecisions(40)).decisions).rows
+  expect(en).toHaveLength(30)
+  expect(en[28]?.[1]).toBe('subject 29')
+  expect(en[29]).toEqual(['… 11 more decisions', '', '', ''])
+  expect(tableOf(resultFacts(run, 'ko', manyDecisions(40)).decisions).rows[29]).toEqual(['… 결정 11개 더', '', '', ''])
+})
+
+test('a decision subject or choice over 80 characters is cut so the board accepts the table', () => {
+  const records = [decision({ subject: 's'.repeat(120), selected: 'c'.repeat(120) })]
+  const row = tableOf(resultFacts(allDone(SMALL), 'en', records).decisions).rows[0] ?? []
+  expect(row[1]).toBe(`${'s'.repeat(79)}…`)
+  expect(row[2]).toBe(`${'c'.repeat(79)}…`)
+})
+
+const FIVE_IDS = { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b4', decisions: 'b5' }
+const FIVE_BLOCKS = ['b1', 'b2', 'b3', 'b4', 'b5']
+
+test('the first draw inserts the five blocks in slot order, each at the end of the board', () => {
+  const facts = resultFacts(allDone(SMALL), 'en', [decision()])
   const { edits, insertedSlots } = factEdits(facts, {}, [])
-  expect(RESULT_SLOTS).toEqual(['summary', 'nodes', 'graph', 'writes'])
-  expect(insertedSlots).toEqual(['summary', 'nodes', 'graph', 'writes'])
+  expect(RESULT_SLOTS).toEqual(['summary', 'nodes', 'graph', 'writes', 'decisions'])
+  expect(insertedSlots).toEqual(['summary', 'nodes', 'graph', 'writes', 'decisions'])
   expect(edits).toEqual([
     { op: 'insert', block: facts.summary },
     { op: 'insert', block: facts.nodes },
     { op: 'insert', block: facts.graph },
     { op: 'insert', block: facts.writes },
+    { op: 'insert', block: facts.decisions },
   ])
 })
 
+test('the first draw of a run with no decision records inserts only the four other blocks', () => {
+  const { insertedSlots } = factEdits(resultFacts(allDone(SMALL), 'en'), {}, [])
+  expect(insertedSlots).toEqual(['summary', 'nodes', 'graph', 'writes'])
+})
+
 test('a refresh replaces each block under the id it already has and inserts nothing', () => {
-  const facts = resultFacts(allDone(SMALL), 'en')
-  const { edits, insertedSlots } = factEdits(facts, FOUR_IDS, ['b1', 'b2', 'b3', 'b4'])
+  const facts = resultFacts(allDone(SMALL), 'en', [decision()])
+  const { edits, insertedSlots } = factEdits(facts, FIVE_IDS, FIVE_BLOCKS)
   expect(insertedSlots).toEqual([])
   expect(edits).toEqual([
     { op: 'replace', id: 'b1', block: facts.summary },
     { op: 'replace', id: 'b2', block: facts.nodes },
     { op: 'replace', id: 'b3', block: facts.graph },
     { op: 'replace', id: 'b4', block: facts.writes },
+    { op: 'replace', id: 'b5', block: facts.decisions },
   ])
 })
 
 test('a slot that has no block any more removes the block it held', () => {
-  const facts: ResultFacts = { ...resultFacts(allDone(SMALL), 'en'), graph: undefined, writes: undefined }
-  const { edits, insertedSlots } = factEdits(facts, FOUR_IDS, ['b1', 'b2', 'b3', 'b4'])
+  const facts: ResultFacts = { ...resultFacts(allDone(SMALL), 'en'), graph: undefined, writes: undefined, decisions: undefined }
+  const { edits, insertedSlots } = factEdits(facts, FIVE_IDS, FIVE_BLOCKS)
   expect(insertedSlots).toEqual([])
-  expect(edits.map(edit => [edit.op, 'id' in edit ? edit.id : undefined])).toEqual([['replace', 'b1'], ['replace', 'b2'], ['remove', 'b3'], ['remove', 'b4']])
+  expect(edits.map(edit => [edit.op, 'id' in edit ? edit.id : undefined])).toEqual([['replace', 'b1'], ['replace', 'b2'], ['remove', 'b3'], ['remove', 'b4'], ['remove', 'b5']])
 })
 
 test('a block whose remembered id is gone from the board is inserted again, and a missing block with a gone id needs no edit', () => {
-  const facts: ResultFacts = { ...resultFacts(allDone(SMALL), 'en'), writes: undefined }
-  const { edits, insertedSlots } = factEdits(facts, FOUR_IDS, ['b1', 'b2'])
-  expect(insertedSlots).toEqual(['graph'])
-  expect(edits.map(edit => edit.op)).toEqual(['replace', 'replace', 'insert'])
+  const facts: ResultFacts = { ...resultFacts(allDone(SMALL), 'en', [decision()]), writes: undefined }
+  const { edits, insertedSlots } = factEdits(facts, FIVE_IDS, ['b1', 'b2'])
+  expect(insertedSlots).toEqual(['graph', 'decisions'])
+  expect(edits.map(edit => edit.op)).toEqual(['replace', 'replace', 'insert', 'insert'])
 })
 
 test('a slot with neither a block nor a remembered id is left alone', () => {
-  const facts: ResultFacts = { summary: undefined, nodes: undefined, graph: undefined, writes: undefined }
+  const facts: ResultFacts = { summary: undefined, nodes: undefined, graph: undefined, writes: undefined, decisions: undefined }
   expect(factEdits(facts, {}, ['b1'])).toEqual({ edits: [], insertedSlots: [] })
 })
 
@@ -336,9 +425,9 @@ function remembered(slots: ResultSlot[], inserted: string[]): Partial<Record<Res
   return ids
 }
 
-function drawn(board: Board, run: Run, previous: Partial<Record<ResultSlot, string>>) {
-  const { edits, insertedSlots } = factEdits(resultFacts(run, 'en'), previous, board.blocks.map(block => block.id))
-  const applied = applyEdits(board, edits, { now: 2_000, peeks: new Map() })
+function drawn(board: Board, run: Run, previous: Partial<Record<ResultSlot, string>>, records: readonly DecisionRecord[] = []) {
+  const { edits, insertedSlots } = factEdits(resultFacts(run, 'en', records), previous, board.blocks.map(block => block.id))
+  const applied = applyEdits(board, edits, { now: 2_000, peeks: new Map(), traces: new Map() })
   if (!applied.ok) throw new Error(`${applied.error.code}: ${applied.error.message}`)
   return { board: applied.value.board, ids: { ...previous, ...remembered(insertedSlots, applied.value.inserted) } }
 }
@@ -352,7 +441,7 @@ const empty = (): Board => {
 test('the facts of a small completed run draw on a new board, refresh under the same ids and drop a block that is no longer true', () => {
   const first = drawn(empty(), allDone(SMALL), {})
   expect(first.board.blocks.map(block => block.type)).toEqual(['callout', 'table', 'flow', 'table'])
-  expect(first.ids).toEqual(FOUR_IDS)
+  expect(first.ids).toEqual({ summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b4' })
 
   const again = drawn(first.board, allDone(SMALL), first.ids)
   expect(again.board.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3', 'b4'])
@@ -360,6 +449,22 @@ test('the facts of a small completed run draw on a new board, refresh under the 
 
   const withoutWrites = drawn(again.board, allDone([{ id: 'a' }, { id: 'b', dependsOn: ['a'] }]), again.ids)
   expect(withoutWrites.board.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3'])
+})
+
+test('a decisions table draws at settle on the board, is replaced under its id when the run settles again, and is dropped when its records are gone', () => {
+  const run = allDone(SMALL)
+  const first = drawn(empty(), run, {}, [decision()])
+  expect(first.board.blocks.map(block => block.type)).toEqual(['callout', 'table', 'flow', 'table', 'table'])
+  expect(first.ids).toEqual(FIVE_IDS)
+
+  const again = drawn(first.board, run, first.ids, [decision(), decision({ id: 'd2', at: 2_000, kind: 'recovery', subject: 'node b failed', selected: 'retry' })])
+  expect(again.board.blocks.map(block => block.id)).toEqual(FIVE_BLOCKS)
+  expect(again.board.nextId).toBe(first.board.nextId)
+  const decisions = again.board.blocks[4]
+  expect(decisions?.type === 'table' ? decisions.rows.map(row => row[0]) : []).toEqual(['routing', 'recovery'])
+
+  const withoutRecords = drawn(again.board, run, again.ids)
+  expect(withoutRecords.board.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3', 'b4'])
 })
 
 // 40 nodes in a chain: ids up to 64 characters, write paths past the 80-character cell limit, and the last node fails.
@@ -379,4 +484,11 @@ test('the facts of a 40-node failed run pass the board engine: tables cut to 30 
 
   const again = drawn(first.board, run, first.ids)
   expect(again.board.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3'])
+})
+
+test('a decisions table of 40 records with 120-character cells passes the board engine cut to 30 rows', () => {
+  const records = manyDecisions(40).map(record => ({ ...record, subject: 's'.repeat(120), selected: 'c'.repeat(120) }))
+  const first = drawn(empty(), allDone(SMALL), {}, records)
+  const decisions = first.board.blocks[4]
+  expect(decisions?.type === 'table' ? decisions.rows : []).toHaveLength(30)
 })

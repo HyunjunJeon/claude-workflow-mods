@@ -1,19 +1,20 @@
 import { expect, test } from 'claude-code/testing'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from '../hooks/engine/board-spec.ts'
-import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded } from '../hooks/engine/board.ts'
-import type { Block, BlockInput, Board, BoardEdit, BoardFile } from '../hooks/engine/board-types.ts'
+import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded } from '../hooks/engine/board.ts'
+import type { Block, BlockInput, Board, BoardEdit, BoardFile, TracePart } from '../hooks/engine/board-types.ts'
 import { TOOL_DESCRIPTION_LIMIT } from '../hooks/engine/tool-spec.ts'
 import type { Result } from '../hooks/engine/types.ts'
 
 const NOW = 1_000
 const NO_PEEKS: ReadonlyMap<string, string[]> = new Map()
+const NO_TRACES: ReadonlyMap<string, string[]> = new Map()
 
 function boardOf(blocks: Block[] = [], nextId = blocks.length + 1): Board {
   return { boardId: 'board_1', sessionId: 'sess', title: 'Plan', createdAt: 1, updatedAt: 1, nextId, blocks }
 }
 
-function apply(board: Board, edits: BoardEdit[], peeks: ReadonlyMap<string, string[]> = NO_PEEKS) {
-  return applyEdits(board, edits, { now: NOW, peeks })
+function apply(board: Board, edits: BoardEdit[], peeks: ReadonlyMap<string, string[]> = NO_PEEKS, traces: ReadonlyMap<string, string[]> = NO_TRACES) {
+  return applyEdits(board, edits, { now: NOW, peeks, traces })
 }
 
 function insert(block: BlockInput, afterId?: string): BoardEdit {
@@ -23,6 +24,11 @@ function insert(block: BlockInput, afterId?: string): BoardEdit {
 // The text a host read for src/a.ts lines start..end: "line <n>" for line n.
 function fileText(path: string, start: number, end: number): ReadonlyMap<string, string[]> {
   return new Map([[peekKey({ path, start, end }), Array.from({ length: end - start + 1 }, (_, i) => `line ${start + i}`)]])
+}
+
+// The text a host read from a run checkpoint for one part of one node.
+function runText(run: string, node: string, part: TracePart, lines: string[]): ReadonlyMap<string, string[]> {
+  return new Map([[traceKey({ run, node, part }), lines]])
 }
 
 function accepted<T>(result: Result<T>): T {
@@ -43,6 +49,11 @@ const flowOf = (edges: { from: string; to: string }[]): BlockInput => ({
   edges,
 })
 const peekOf = (path: string, start: number, end: number): BlockInput => ({ type: 'code_peek', path, start, end })
+const snippetOf = (code: string): BlockInput => ({ type: 'code', code })
+const traceOf = (run: string, node: string, part: TracePart): BlockInput => ({ type: 'trace', run, node, part })
+// Raw input, as the model sends it: parseEdits is where a bad block is refused before any file or run is read.
+const traceEdit = (fields: Record<string, unknown>) => parseEdits([{ op: 'insert', block: { type: 'trace', run: 'dag_1', node: 'build', part: 'output', ...fields } }])
+const textLines = (count: number, width: number) => Array.from({ length: count }, () => 'x'.repeat(width)).join('\n')
 
 test('insert adds a section with the next id and stamps updatedAt', () => {
   const { board, inserted } = accepted(apply(boardOf(), [insert(section)]))
@@ -283,6 +294,153 @@ test('a code_peek keeps each line to 240 characters', () => {
   expect(block?.type === 'code_peek' && block.lines[0]?.length).toBe(240)
 })
 
+test('insert adds a code block that keeps its text as sent, indentation and trailing newline included', () => {
+  const code = '  if (ok) {\n    go()\n  }\n'
+  const { board } = accepted(apply(boardOf(), [insert({ type: 'code', title: ' Fix ', language: ' ts ', code, note: ' why ' })]))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'code', title: 'Fix', language: 'ts', code, note: 'why' }])
+})
+
+test('a code block drops empty optional fields and needs no file or run text', () => {
+  const { board } = accepted(apply(boardOf(), [insert({ type: 'code', code: 'x = 1', language: '', note: '', title: '' })]))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'code', code: 'x = 1' }])
+})
+
+test('a code block of 40 lines is accepted, and of 41 lines is refused with the count', () => {
+  expect(accepted(apply(boardOf(), [insert(snippetOf(textLines(40, 10)))])).board.blocks).toHaveLength(1)
+  // A trailing newline ends the 40th line; it does not start a 41st.
+  expect(accepted(apply(boardOf(), [insert(snippetOf(`${textLines(40, 10)}\n`))])).board.blocks).toHaveLength(1)
+  const error = refused(apply(boardOf(), [insert(snippetOf(textLines(41, 10)))]))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toBe('edits[0]: code: at most 40 lines, got 41')
+})
+
+test('a code line of 240 characters is accepted, and of 241 is refused naming the line index', () => {
+  expect(accepted(apply(boardOf(), [insert(snippetOf(`a\n${'x'.repeat(240)}`))])).board.blocks).toHaveLength(1)
+  const error = refused(apply(boardOf(), [insert(snippetOf(`a\nb\n${'x'.repeat(241)}\nd`))]))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('edits[0]: code: line 3 (index 2) has 241 characters')
+  expect(error.message).toContain('at most 240')
+})
+
+test('a code block holds 4000 characters at most, counted as sent', () => {
+  // 20 lines: one of 200 characters, nineteen of 199, nineteen newlines.
+  const full = Array.from({ length: 20 }, (_, i) => 'x'.repeat(i === 0 ? 200 : 199)).join('\n')
+  expect(full).toHaveLength(4000)
+  expect(accepted(apply(boardOf(), [insert(snippetOf(full))])).board.blocks).toHaveLength(1)
+  expect(refused(apply(boardOf(), [insert(snippetOf(`${full}x`))])).message).toBe('edits[0]: code: must be 1-4000 characters, got 4001')
+})
+
+test('a code block refuses empty code, whitespace-only code, a missing code and one that is not text', () => {
+  expect(refused(apply(boardOf(), [insert(snippetOf(''))])).message).toBe('edits[0]: code: must be 1-4000 characters, got 0')
+  expect(refused(apply(boardOf(), [insert(snippetOf('  \n\t '))])).message).toBe('edits[0]: code: must hold more than whitespace')
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'code' } }])).message).toBe('edits[0]: code: must be a string')
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'code', code: 5 } }])).message).toBe('edits[0]: code: must be a string')
+})
+
+test('a code block refuses an unknown field and a title, language or note over its limit', () => {
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'code', code: 'x', path: 'a.ts' } }])).message).toContain('edits[0]: path: unknown field')
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'code', code: 'x', lines: ['x'] } }])).message).toContain('edits[0]: lines: unknown field')
+  const block = (extra: { language?: string; note?: string; title?: string }): BoardEdit => insert({ type: 'code', code: 'x', ...extra })
+  expect(accepted(apply(boardOf(), [block({ language: 'l'.repeat(20) })])).board.blocks).toHaveLength(1)
+  expect(refused(apply(boardOf(), [block({ language: 'l'.repeat(21) })])).message).toBe('edits[0]: language: must be at most 20 characters, got 21')
+  expect(refused(apply(boardOf(), [block({ note: 'n'.repeat(201) })])).message).toContain('edits[0]: note')
+  expect(refused(apply(boardOf(), [block({ title: 't'.repeat(81) })])).message).toContain('edits[0]: title')
+})
+
+test('update of a code block merges and checks the whole block, and keeps the snippet untrimmed', () => {
+  const start = boardOf([{ id: 'b1', type: 'code', language: 'ts', code: 'old' }])
+  const indented = accepted(apply(start, [{ op: 'update', id: 'b1', changes: { code: '    deeper\n', language: '' } }])).board
+  expect(indented.blocks).toEqual([{ id: 'b1', type: 'code', code: '    deeper\n' }])
+  expect(refused(apply(start, [{ op: 'update', id: 'b1', changes: { code: ' \n ' } }])).message).toContain('edits[0]: code')
+  expect(refused(apply(start, [{ op: 'update', id: 'b1', changes: { lines: ['x'] } }])).message).toContain('edits[0]: lines: cannot be changed')
+})
+
+test('insert adds a trace with the lines the host read from the run checkpoint', () => {
+  const read = new Map([['dag_1#build#output', ['ok 1', 'ok 2']]])
+  const { board } = accepted(apply(boardOf(), [insert({ type: 'trace', title: ' Build ', run: ' dag_1 ', node: 'build', part: 'output', note: ' tail ' })], NO_PEEKS, read))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'trace', title: 'Build', run: 'dag_1', node: 'build', part: 'output', lines: ['ok 1', 'ok 2'], note: 'tail' }])
+})
+
+test('a trace keeps the first 40 lines of an artifact and cuts each to 240 characters', () => {
+  const long = Array.from({ length: 55 }, (_, i) => `${i}:${'y'.repeat(500)}`)
+  const { board } = accepted(apply(boardOf(), [insert(traceOf('dag_1', 'build', 'answer'))], NO_PEEKS, runText('dag_1', 'build', 'answer', long)))
+  const block = board.blocks[0]
+  expect(block?.type === 'trace' && block.lines).toHaveLength(40)
+  expect(block?.type === 'trace' && block.lines[0]?.length).toBe(240)
+  expect(block?.type === 'trace' && block.lines[39]?.startsWith('39:')).toBe(true)
+})
+
+test('a trace whose artifact was not read is refused, naming run, node and part, and nothing is applied', () => {
+  const start = boardOf([{ id: 'b1', ...section }])
+  const before = structuredClone(start)
+  const error = refused(apply(start, [insert(callout), insert(traceOf('dag_1', 'build', 'verification'))], NO_PEEKS, runText('dag_1', 'build', 'output', ['x'])))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message.startsWith('edits[1]: run: ')).toBe(true)
+  for (const name of ['dag_1', 'build', 'verification', 'dag_1#build#verification']) expect(error.message).toContain(name)
+  expect(start).toEqual(before)
+})
+
+test('a trace whose artifact is empty is refused rather than drawn as an empty quote', () => {
+  const error = refused(apply(boardOf(), [insert(traceOf('dag_1', 'build', 'error'))], NO_PEEKS, runText('dag_1', 'build', 'error', [])))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('edits[0]: part')
+  expect(error.message).toContain('is empty')
+})
+
+test('a trace names its run, node and part: run and node are 1-64 characters and part is one of four', () => {
+  expect(accepted(traceEdit({ run: 'r'.repeat(64), node: 'n'.repeat(64) }))).toHaveLength(1)
+  expect(refused(traceEdit({ run: 'r'.repeat(65) })).message).toBe('edits[0]: run: must be 1-64 characters, got 65')
+  expect(refused(traceEdit({ run: '  ' })).message).toContain('edits[0]: run')
+  expect(refused(traceEdit({ node: 'n'.repeat(65) })).message).toBe('edits[0]: node: must be 1-64 characters, got 65')
+  expect(refused(traceEdit({ node: undefined })).message).toContain('edits[0]: node')
+  const schemaParts = BOARD_INPUT_SCHEMA.properties.edits.items.properties.block.properties.part.enum
+  expect(refused(traceEdit({ part: 'log' })).message).toBe(`edits[0]: part: must be one of ${schemaParts.join(', ')}`)
+  expect(refused(traceEdit({ note: 'n'.repeat(201) })).message).toContain('edits[0]: note')
+  expect(refused(traceEdit({ title: 't'.repeat(81) })).message).toContain('edits[0]: title')
+})
+
+test('a trace takes no line range and no lines from the model', () => {
+  for (const field of ['start', 'end', 'path', 'lines', 'code']) {
+    expect(refused(traceEdit({ [field]: 1 })).message).toContain(`edits[0]: ${field}: unknown field`)
+  }
+})
+
+test('update of a trace title or note keeps its lines, and of run, node or part reads them again', () => {
+  const start = boardOf([{ id: 'b1', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['old 1', 'old 2'] }])
+  // No run text is supplied here: a title or note update must not need any.
+  const noted = accepted(apply(start, [{ op: 'update', id: 'b1', changes: { title: 'Build tail', note: 'why' } }])).board
+  expect(noted.blocks).toEqual([{ id: 'b1', type: 'trace', title: 'Build tail', run: 'dag_1', node: 'build', part: 'output', lines: ['old 1', 'old 2'], note: 'why' }])
+  const parted = accepted(apply(noted, [{ op: 'update', id: 'b1', changes: { part: 'error' } }], NO_PEEKS, runText('dag_1', 'build', 'error', ['boom']))).board
+  expect(parted.blocks).toEqual([{ id: 'b1', type: 'trace', title: 'Build tail', run: 'dag_1', node: 'build', part: 'error', lines: ['boom'], note: 'why' }])
+  const moved = accepted(apply(parted, [{ op: 'update', id: 'b1', changes: { run: 'dag_2', node: 'test' } }], NO_PEEKS, runText('dag_2', 'test', 'error', ['fail 1']))).board
+  expect(moved.blocks[0]).toEqual({ id: 'b1', type: 'trace', title: 'Build tail', run: 'dag_2', node: 'test', part: 'error', lines: ['fail 1'], note: 'why' })
+})
+
+test('update of a trace part without the new run text is refused and the board is not changed', () => {
+  const start = boardOf([{ id: 'b1', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['old'] }])
+  const before = structuredClone(start)
+  const error = refused(apply(start, [{ op: 'update', id: 'b1', changes: { part: 'answer' } }]))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('dag_1#build#answer')
+  expect(start).toEqual(before)
+})
+
+test('update refuses a trace change of lines or type', () => {
+  const start = boardOf([{ id: 'b1', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['old'] }])
+  for (const field of ['lines', 'type']) {
+    const error = refused(apply(start, [{ op: 'update', id: 'b1', changes: { [field]: field === 'lines' ? ['new'] : 'code' } }]))
+    expect(error.message).toContain(`edits[0]: ${field}: cannot be changed`)
+  }
+})
+
+test('replace turns a block into a trace with the host lines, and a trace into a code block without any', () => {
+  const start = boardOf([{ id: 'b1', ...section }])
+  const traced = accepted(apply(start, [{ op: 'replace', id: 'b1', block: traceOf('dag_1', 'build', 'output') }], NO_PEEKS, runText('dag_1', 'build', 'output', ['a']))).board
+  expect(traced.blocks).toEqual([{ id: 'b1', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['a'] }])
+  const coded = accepted(apply(traced, [{ op: 'replace', id: 'b1', block: snippetOf('x') }])).board
+  expect(coded.blocks).toEqual([{ id: 'b1', type: 'code', code: 'x' }])
+})
+
 test('a sequence needs 2 to 8 participants and steps between them, and allows a step to itself', () => {
   const people = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `p${i}`, label: `P${i}` }))
   const steps = [{ from: 'p0', to: 'p0', label: 'think' }]
@@ -345,6 +503,56 @@ test('peeksNeeded never asks for a file the engine would refuse to show', () => 
 
 test('peekKey joins path and range', () => {
   expect(peekKey({ path: 'hooks/register.ts', start: 12, end: 30 })).toBe('hooks/register.ts#L12-L30')
+})
+
+test('traceKey joins run, node and part', () => {
+  expect(traceKey({ run: 'dag_1', node: 'build', part: 'output' })).toBe('dag_1#build#output')
+})
+
+test('tracesNeeded asks for the artifacts an insert or a replace brings in, once each, with run and node trimmed', () => {
+  const board = boardOf([{ id: 'b1', ...section }])
+  const edits: BoardEdit[] = [
+    insert(traceOf('dag_1', 'build', 'output')),
+    insert(section),
+    { op: 'replace', id: 'b1', block: traceOf('dag_1', 'test', 'error') },
+    insert(traceOf(' dag_1 ', ' build ', 'output')),
+    insert(traceOf('dag_1', 'build', 'answer')),
+  ]
+  expect(tracesNeeded(board, edits)).toEqual([
+    { run: 'dag_1', node: 'build', part: 'output' },
+    { run: 'dag_1', node: 'test', part: 'error' },
+    { run: 'dag_1', node: 'build', part: 'answer' },
+  ])
+})
+
+test('tracesNeeded asks for an updated trace with the unchanged fields filled in, once, and only for run, node or part', () => {
+  const board = boardOf([
+    { id: 'b1', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['x'] },
+    { id: 'b2', type: 'code_peek', path: 'src/a.ts', start: 1, end: 1, lines: ['x'] },
+  ])
+  expect(tracesNeeded(board, [{ op: 'update', id: 'b1', changes: { part: 'verification' } }])).toEqual([{ run: 'dag_1', node: 'build', part: 'verification' }])
+  expect(tracesNeeded(board, [{ op: 'update', id: 'b1', changes: { run: 'dag_2', node: 'test' } }])).toEqual([{ run: 'dag_2', node: 'test', part: 'output' }])
+  const twice: BoardEdit[] = [{ op: 'update', id: 'b1', changes: { part: 'error' } }, { op: 'update', id: 'b1', changes: { part: 'error', note: 'again' } }]
+  expect(tracesNeeded(board, twice)).toEqual([{ run: 'dag_1', node: 'build', part: 'error' }])
+  expect(tracesNeeded(board, [{ op: 'update', id: 'b1', changes: { title: 'T', note: 'why' } }])).toEqual([])
+  expect(tracesNeeded(board, [{ op: 'update', id: 'b2', changes: { part: 'error' } }])).toEqual([])
+  expect(tracesNeeded(board, [{ op: 'update', id: 'b9', changes: { part: 'error' } }])).toEqual([])
+})
+
+test('tracesNeeded leaves the blocks of other types to peeksNeeded and never asks for an artifact the engine would refuse', () => {
+  const board = boardOf([{ id: 'b1', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['x'] }])
+  const edits: BoardEdit[] = [
+    insert(peekOf('src/a.ts', 1, 2)),
+    insert(snippetOf('x')),
+    insert(traceOf('', 'build', 'output')),
+    insert(traceOf('r'.repeat(65), 'build', 'output')),
+    insert(traceOf('dag_1', 'n'.repeat(65), 'output')),
+    { op: 'update', id: 'b1', changes: { part: 'log' } },
+    { op: 'update', id: 'b1', changes: { run: 7 } },
+    { op: 'update', id: 'b1', changes: { node: '  ' } },
+  ]
+  expect(tracesNeeded(board, edits)).toEqual([])
+  expect(peeksNeeded(board, [insert(traceOf('dag_1', 'build', 'output'))])).toEqual([])
 })
 
 test('parseEdits returns typed edits and an optional afterId', () => {
@@ -413,6 +621,20 @@ test('boardForModel replaces the lines of a code_peek with their count', () => {
   expect(JSON.stringify(shown)).not.toContain('"lines"')
 })
 
+test('boardForModel replaces the lines of a trace with their count and returns a code block whole', () => {
+  const code = '  indented()\n'
+  const board = boardOf([
+    { id: 'b1', type: 'code', language: 'ts', code },
+    { id: 'b2', type: 'trace', run: 'dag_1', node: 'build', part: 'error', lines: ['x', 'y', 'z'], note: 'n' },
+  ])
+  const shown = boardForModel(board)
+  expect(shown.blocks).toEqual([
+    { id: 'b1', type: 'code', language: 'ts', code },
+    { id: 'b2', type: 'trace', run: 'dag_1', node: 'build', part: 'error', lineCount: 3, note: 'n' },
+  ])
+  expect(JSON.stringify(shown)).not.toContain('"lines"')
+})
+
 function savedFile(): BoardFile {
   const first = accepted(apply(boardOf(), [insert(section), insert(peekOf('src/a.ts', 1, 2)), insert(flowOf([{ from: 'a', to: 'b' }]))], fileText('src/a.ts', 1, 2))).board
   return { schemaVersion: 1, sessionId: 'sess', boards: [first, { ...boardOf([], 1), boardId: 'board_2', title: 'Empty' }] }
@@ -448,6 +670,50 @@ test('parseBoardFile checks every block again: a stored cycle, a short lines arr
   expect(refused(parseBoardFile(shortLines, 'sess')).message).toContain('boards[0].blocks[1].lines')
   const reused = JSON.stringify(file).replace('"nextId":4', '"nextId":3')
   expect(refused(parseBoardFile(reused, 'sess')).message).toContain('nextId')
+})
+
+const SNIPPET = 'const a = 1\n  indented()\n'
+
+// A board of one code block and one trace, as the engine saves them.
+function richFile(): BoardFile {
+  const edits = [insert({ type: 'code', language: 'ts', code: SNIPPET }), insert(traceOf('dag_1', 'build', 'output'))]
+  const board = accepted(apply(boardOf(), edits, NO_PEEKS, runText('dag_1', 'build', 'output', ['ok 1', 'ok 2']))).board
+  return { schemaVersion: 1, sessionId: 'sess', boards: [board] }
+}
+
+// The rich file as JSON text with one stored block's fields overridden; an undefined value drops the field.
+function richFileText(index: number, patch: Record<string, unknown>): string {
+  const file = richFile()
+  const board = file.boards[0]!
+  return JSON.stringify({ ...file, boards: [{ ...board, blocks: board.blocks.map((block, at) => (at === index ? { ...block, ...patch } : block)) }] })
+}
+
+test('parseBoardFile reads back a code block and a trace with its lines', () => {
+  const file = richFile()
+  expect(file.boards[0]?.blocks).toEqual([
+    { id: 'b1', type: 'code', language: 'ts', code: SNIPPET },
+    { id: 'b2', type: 'trace', run: 'dag_1', node: 'build', part: 'output', lines: ['ok 1', 'ok 2'] },
+  ])
+  expect(accepted(parseBoardFile(JSON.stringify(file), 'sess'))).toEqual(file)
+})
+
+test('parseBoardFile refuses stored trace lines that are missing, empty, not text, over 40 or over 240 characters', () => {
+  const tooMany = Array.from({ length: 41 }, () => 'x')
+  for (const lines of [undefined, [], 'ok', [1], tooMany, ['x'.repeat(241)]]) {
+    const error = refused(parseBoardFile(richFileText(1, { lines }), 'sess'))
+    expect(error.code).toBe('invalid_board_file')
+    expect(error.message).toContain('boards[0].blocks[1].lines')
+  }
+  expect(accepted(parseBoardFile(richFileText(1, { lines: Array.from({ length: 40 }, () => 'x'.repeat(240)) }), 'sess')).boards).toHaveLength(1)
+})
+
+test('parseBoardFile checks a stored code block and trace again: size, unknown part, stray lines', () => {
+  const tooLong = refused(parseBoardFile(richFileText(0, { code: textLines(41, 5) }), 'sess'))
+  expect(tooLong.code).toBe('invalid_board_file')
+  expect(tooLong.message).toContain('boards[0].blocks[0].code: at most 40 lines')
+  expect(refused(parseBoardFile(richFileText(0, { lines: ['x'] }), 'sess')).message).toContain('boards[0].blocks[0].lines: unknown field')
+  expect(refused(parseBoardFile(richFileText(1, { part: 'log' }), 'sess')).message).toContain('boards[0].blocks[1].part')
+  expect(refused(parseBoardFile(richFileText(1, { run: '' }), 'sess')).message).toContain('boards[0].blocks[1].run')
 })
 
 const RUN_LINK = { runId: 'dag_mv6bifi0_ggt9of', facts: { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b9' } }
@@ -543,8 +809,22 @@ test('the board tool description names every action and the drawing rules', () =
   expect(BOARD_TOOL_DESCRIPTION).toContain('at most 40 lines')
 })
 
-test('the board input schema declares the five actions, and only action is required', () => {
-  expect(BOARD_INPUT_SCHEMA.properties.action.enum).toEqual(['create', 'edit', 'get', 'list', 'open'])
+test('the board tool description names the code and trace blocks and the export action', () => {
+  expect(BOARD_TOOL_DESCRIPTION).toContain('export {board_id} returns markdown')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('code {code 1-4000')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('trace {run, node, part output|answer|error|verification')
+})
+
+test('the block schema and the description name exactly the block types and trace parts the engine accepts', () => {
+  const { type, part } = BOARD_INPUT_SCHEMA.properties.edits.items.properties.block.properties
+  const unknownType = refused(parseEdits([{ op: 'insert', block: { type: 'chart' } }]))
+  expect(unknownType.message).toBe(`edits[0]: type: must be one of ${type.enum.join(', ')}`)
+  for (const name of type.enum) expect(BOARD_TOOL_DESCRIPTION).toContain(`${name} {`)
+  for (const name of part.enum) expect(BOARD_TOOL_DESCRIPTION).toContain(name)
+})
+
+test('the board input schema declares the six actions, and only action is required', () => {
+  expect(BOARD_INPUT_SCHEMA.properties.action.enum).toEqual(['create', 'edit', 'get', 'list', 'open', 'export'])
   expect(BOARD_INPUT_SCHEMA.required).toEqual(['action'])
   expect(BOARD_INPUT_SCHEMA.properties.edits.maxItems).toBe(20)
 })

@@ -1,13 +1,14 @@
 import type { BlockInput, BoardEdit, CalloutTone, FlowEdge, FlowNode, FlowNodeKind } from '../engine/board-types.ts'
 import { evidenceOutcome } from '../engine/check-eval.ts'
+import type { DecisionRecord } from '../engine/decisions.ts'
 import type { NodeRun, Run } from '../engine/types.ts'
 import { stringsFor, type Language } from './i18n.ts'
 import { formatDuration } from './text.ts'
 
-// The result board of a settled run: four fact blocks, drawn at settle and refreshed when the same run settles again. Pure: the
+// The result board of a settled run: five fact blocks, drawn at settle and refreshed when the same run settles again. Pure: the
 // host (register.ts) applies the edits and remembers which block id holds which slot.
 
-export const RESULT_SLOTS = ['summary', 'nodes', 'graph', 'writes'] as const
+export const RESULT_SLOTS = ['summary', 'nodes', 'graph', 'writes', 'decisions'] as const
 export type ResultSlot = (typeof RESULT_SLOTS)[number]
 export type ResultFacts = Record<ResultSlot, BlockInput | undefined>
 
@@ -36,6 +37,9 @@ type ResultStrings = {
   writesTitle: string
   writeColumns: string[]
   morePaths: (count: number) => string
+  decisionsTitle: string
+  decisionColumns: string[]
+  moreDecisions: (count: number) => string
   // Appended to the number: 45s, 12m, 1h 05m.
   units: { seconds: string; minutes: string; hours: string }
 }
@@ -51,6 +55,9 @@ const EN: ResultStrings = {
   writesTitle: 'Declared writes',
   writeColumns: ['Path', 'Node'],
   morePaths: count => `… ${count} more paths`,
+  decisionsTitle: 'Decisions',
+  decisionColumns: ['Kind', 'Subject', 'Picked', 'Outcome'],
+  moreDecisions: count => `… ${count} more decisions`,
   units: { seconds: 's', minutes: 'm', hours: 'h' },
 }
 
@@ -65,6 +72,9 @@ const KO: ResultStrings = {
   writesTitle: '선언된 쓰기 범위',
   writeColumns: ['경로', '노드'],
   morePaths: count => `… 경로 ${count}개 더`,
+  decisionsTitle: '결정',
+  decisionColumns: ['종류', '대상', '선택', '결과'],
+  moreDecisions: count => `… 결정 ${count}개 더`,
   units: { seconds: '초', minutes: '분', hours: '시간' },
 }
 
@@ -184,9 +194,24 @@ function writesBlock(run: Run, t: ResultStrings): BlockInput | undefined {
   return { type: 'table', title: t.writesTitle, columns: t.writeColumns, rows: capRows(rows, t.writeColumns.length, t.morePaths) }
 }
 
-export function resultFacts(run: Run, language: Language): ResultFacts {
+// The run's own decision records, oldest first. The host hands in the session's records; this keeps the ones the run raised.
+function decisionsBlock(run: Run, records: readonly DecisionRecord[], t: ResultStrings): BlockInput | undefined {
+  const own = records.filter(record => record.runId === run.runId).sort((a, b) => a.at - b.at)
+  if (own.length === 0) return undefined
+  const rows = own.map(record => [record.kind, cut(record.subject, CELL_MAX), cut(record.selected, CELL_MAX), record.outcome])
+  return { type: 'table', title: t.decisionsTitle, columns: t.decisionColumns, rows: capRows(rows, t.decisionColumns.length, t.moreDecisions) }
+}
+
+// records defaults to none so a caller that only draws the run's own facts needs no decision log.
+export function resultFacts(run: Run, language: Language, records: readonly DecisionRecord[] = []): ResultFacts {
   const t = stringsOf(language)
-  return { summary: summaryBlock(run, language, t), nodes: nodesBlock(run, language, t), graph: graphBlock(run, language, t), writes: writesBlock(run, t) }
+  return {
+    summary: summaryBlock(run, language, t),
+    nodes: nodesBlock(run, language, t),
+    graph: graphBlock(run, language, t),
+    writes: writesBlock(run, t),
+    decisions: decisionsBlock(run, records, t),
+  }
 }
 
 // One edit per slot, in slot order. A block replaces the block its slot held (same id, so a chip or a selection on it survives);

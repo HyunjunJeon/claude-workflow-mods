@@ -1,7 +1,7 @@
-import type { CalloutBlock, CalloutTone, CodePeekBlock, SectionBlock, TableBlock } from '../engine/board-types.ts'
+import type { CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../engine/board-types.ts'
 import { ACCENT, clean, fit, fitTail, width, type Line, type Segment } from './text.ts'
 
-// The text blocks of a board (section, callout, table, code_peek) as terminal lines. Every returned line is at most
+// The text blocks of a board (section, callout, table, code_peek, code, trace) as terminal lines. Every returned line is at most
 // `columns` cells wide and holds no control characters, because block text comes from the model and the files it read.
 
 export type CalloutLabels = Record<CalloutTone, string>
@@ -185,18 +185,44 @@ export function tableLines(block: TableBlock, columns: number): Line[] {
   return clipAll([...title, rowLine(block.columns, sizes, { bold: true }), [rule], ...rows.map(row => rowLine(row, sizes, {}))], columns)
 }
 
-export function codePeekLines(block: CodePeekBlock, columns: number): Line[] {
-  // The tail of a long path stays, so the line range after it is never the part that is cut.
-  const range = fitTail(`${block.path}:${block.start}-${block.end}`, columns)
-  const room = columns - width(range)
-  const title: Line = block.title && room > width(TITLE_SEPARATOR) ? [{ text: fit(`${TITLE_SEPARATOR}${block.title}`, room) }] : []
-  const gutter = width(String(block.start + block.lines.length - 1))
+// The strong first line of a source block: the label, then ` · title` when room is left. A long label loses its head, so
+// the end that tells the blocks apart (a line range, a part) stays.
+function sourceHeader(label: string, title: string | undefined, columns: number): Line {
+  const head = fitTail(label, columns)
+  const room = columns - width(head)
+  const rest: Line = title && room > width(TITLE_SEPARATOR) ? [{ text: fit(`${TITLE_SEPARATOR}${title}`, room) }] : []
+  return [strong(head), ...rest]
+}
+
+// `start` is the number of the first row; the gutter is as wide as the last number, so the separators line up.
+function numberedLines(rows: readonly string[], start: number, columns: number): Line[] {
+  const gutter = width(String(start + rows.length - 1))
   const textColumns = columns - gutter - width(CODE_SEPARATOR)
-  const body = block.lines.map((text, index): Line => [
-    faint(String(block.start + index).padStart(gutter)),
+  return rows.map((text, index): Line => [
+    faint(String(start + index).padStart(gutter)),
     faint(CODE_SEPARATOR),
     { text: fit(text.replace(/\t/g, TAB), textColumns) },
   ])
-  const note = wrapText(block.note ?? '', columns).map((part): Line => [faint(part)])
-  return clipAll([[strong(range), ...title], ...body, ...note], columns)
+}
+
+function noteLines(note: string | undefined, columns: number): Line[] {
+  return wrapText(note ?? '', columns).map((part): Line => [faint(part)])
+}
+
+export function codePeekLines(block: CodePeekBlock, columns: number): Line[] {
+  const header = sourceHeader(`${block.path}:${block.start}-${block.end}`, block.title, columns)
+  return clipAll([header, ...numberedLines(block.lines, block.start, columns), ...noteLines(block.note, columns)], columns)
+}
+
+// A snippet's own text. One trailing newline ends the last row instead of adding an empty numbered one.
+export function codeLines(block: CodeBlock, columns: number): Line[] {
+  const rows = block.code.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n')
+  const header = sourceHeader(block.language || 'code', block.title, columns)
+  return clipAll([header, ...numberedLines(rows, 1, columns), ...noteLines(block.note, columns)], columns)
+}
+
+// The run id stays out of the header: the block header above it is the place for ids, and a run id is long.
+export function traceLines(block: TraceBlock, columns: number, parts: Record<TracePart, string>): Line[] {
+  const header = sourceHeader(`${block.node}${TITLE_SEPARATOR}${parts[block.part]}`, block.title, columns)
+  return clipAll([header, ...numberedLines(block.lines, 1, columns), ...noteLines(block.note, columns)], columns)
 }

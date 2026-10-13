@@ -1,5 +1,5 @@
-import type { Block, Board } from '../engine/board-types.ts'
-import { calloutLines, codePeekLines, sectionLines, tableLines, type CalloutLabels } from './board-blocks.ts'
+import type { Block, Board, TracePart } from '../engine/board-types.ts'
+import { calloutLines, codeLines, codePeekLines, sectionLines, tableLines, traceLines, type CalloutLabels } from './board-blocks.ts'
 import { flowLines, type FlowLabels } from './flow-layout.ts'
 import type { Language } from './i18n.ts'
 import type { InspectorAction, InspectorLineAction, InspectorModel } from './inspector-model.ts'
@@ -32,6 +32,7 @@ type BoardStrings = {
   moreLines: (count: number) => string
   chipHint: string
   tones: CalloutLabels
+  parts: Record<TracePart, string>
   flow: FlowLabels
 }
 
@@ -47,6 +48,7 @@ const EN: BoardStrings = {
   moreLines: count => `… ${count} more lines`,
   chipHint: 'Press a block header to cite that block in your prompt',
   tones: { info: 'info', decision: 'decision', risk: 'risk', warning: 'warning' },
+  parts: { output: 'output', answer: 'answer', error: 'error', verification: 'verification' },
   flow: { sameFrontier: 'Same frontier', more: '+{n} more' },
 }
 
@@ -62,6 +64,7 @@ const KO: BoardStrings = {
   moreLines: count => `… ${count}줄 더`,
   chipHint: '블록 머리글을 누르면 프롬프트에 그 블록을 인용합니다',
   tones: { info: '정보', decision: '결정', risk: '위험', warning: '주의' },
+  parts: { output: '출력', answer: '답변', error: '오류', verification: '검증' },
   flow: { sameFrontier: '같은 층', more: '+{n}개 더' },
 }
 
@@ -112,6 +115,8 @@ function renderBlock(block: Block, columns: number, t: BoardStrings): Line[] {
     case 'callout': return calloutLines(block, columns, t.tones)
     case 'table': return tableLines(block, columns)
     case 'code_peek': return codePeekLines(block, columns)
+    case 'code': return codeLines(block, columns)
+    case 'trace': return traceLines(block, columns, t.parts)
     case 'flow': return flowLines(block, columns, t.flow)
     case 'sequence': return sequenceLines(block, columns)
   }

@@ -48,8 +48,9 @@ import { parseYaml } from './engine/yaml.ts'
 import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
 import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, type PeekRequest } from './engine/board.ts'
+import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded, type PeekRequest, type TraceRequest } from './engine/board.ts'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from './engine/board-spec.ts'
+import { boardToMarkdown } from './engine/board-export.ts'
 import { chipContext, chipLabel, chipSpans, citedChips } from './engine/board-chips.ts'
 import type { Board, BoardEdit, BoardFile } from './engine/board-types.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence, type VerificationOutcome } from './engine/types.ts'
@@ -2218,6 +2219,38 @@ async function readPeek($: EngineInterface, request: PeekRequest): Promise<Resul
   return { ok: true, value: lines.slice(request.start - 1, request.end) }
 }
 
+// One artifact of one node for a trace block: output, answer and error are NodeRun fields of the run checkpoint, and verification
+// is the evidence file verifyNode persisted. tracesNeeded merges a target several edits ask for, so a refusal names the trace, not
+// an edit index. The run id is model input, so it must match the checkpoint naming before it reaches a path.
+async function readTrace($: EngineInterface, request: TraceRequest): Promise<Result<string[]>> {
+  const at = `trace ${request.run} ${request.node} ${request.part}`
+  if (!SAFE_RUN_DIR.test(request.run)) return fail('invalid_board_edit', `${at}: no run checkpoint has that name`)
+  const runPath = `${runsDir}/${request.run}.json`
+  if (!(await $.fs.exists(runPath))) return fail('invalid_board_edit', `${at}: no checkpoint at ${runPath}`)
+  let run: Run
+  try {
+    run = JSON.parse(await $.fs.read(runPath)) as Run
+  } catch (error) {
+    return fail('invalid_board_edit', `${at}: cannot read the run checkpoint (${message(error)})`)
+  }
+  const node = run.nodes.find(candidate => candidate.id === request.node)
+  if (node === undefined) return fail('invalid_board_edit', `${at}: the run has no node ${request.node}`)
+  if (request.part === 'verification') {
+    const reportPath = node.verification?.reportPath
+    if (reportPath === undefined) return fail('invalid_board_edit', `${at}: the node ran no verification`)
+    let text: string
+    try {
+      text = await $.fs.read(reportPath)
+    } catch (error) {
+      return fail('invalid_board_edit', `${at}: cannot read the verification artifact (${message(error)})`)
+    }
+    return { ok: true, value: text.split(/\r?\n/) }
+  }
+  const text = request.part === 'output' ? node.output : request.part === 'answer' ? node.answer : node.error
+  if (text === undefined) return fail('invalid_board_edit', `${at}: the node recorded no ${request.part}`)
+  return { ok: true, value: text.split(/\r?\n/) }
+}
+
 async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): Promise<ToolReply> {
   const peeks = new Map<string, string[]>()
   for (const request of peeksNeeded(board, edits)) {
@@ -2225,7 +2258,13 @@ async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): 
     if (!lines.ok) return err(lines.error)
     peeks.set(peekKey(request), lines.value)
   }
-  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks })
+  const traces = new Map<string, string[]>()
+  for (const request of tracesNeeded(board, edits)) {
+    const lines = await readTrace($, request)
+    if (!lines.ok) return err(lines.error)
+    traces.set(traceKey(request), lines.value)
+  }
+  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks, traces })
   if (!applied.ok) return err(applied.error)
   const edited = applied.value.board
   await saveBoards($, boards.map(candidate => (candidate.boardId === edited.boardId ? edited : candidate)))
@@ -2308,7 +2347,7 @@ async function drawResultBoard($: EngineInterface, run: Run): Promise<SettleBoar
     }
     const previous = linked?.run?.facts ?? {}
     const { edits, insertedSlots } = factEdits(facts, previous, board.blocks.map(block => block.id))
-    const applied = applyEdits(board, edits, { now, peeks: new Map() })
+    const applied = applyEdits(board, edits, { now, peeks: new Map(), traces: new Map() })
     if (!applied.ok) throw new Error(applied.error.message)
     const drawnBoard: Board = { ...applied.value.board, run: { runId: run.runId, facts: factLink(previous, edits, insertedSlots, applied.value.inserted) } }
     await saveBoards($, linked ? boards.map(candidate => (candidate.boardId === drawnBoard.boardId ? drawnBoard : candidate)) : [...boards, drawnBoard])
@@ -2370,13 +2409,14 @@ async function handleBoardTool($: EngineInterface, input: ToolInput): Promise<To
     $.ui.invalidate('ui.render')
     return ok({ board_id: boardId })
   }
-  if (input.action !== 'edit' && input.action !== 'get' && input.action !== 'open') {
+  if (input.action !== 'edit' && input.action !== 'get' && input.action !== 'open' && input.action !== 'export') {
     return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
   }
   const board = boards.find(candidate => candidate.boardId === input.board_id)
   if (!board) return err({ code: 'unknown_board', message: `No board "${String(input.board_id)}" in this session; use the list action to see boards.` })
   if (input.action === 'get') return ok(boardForModel(board))
   if (input.action === 'open') return openBoard($, board)
+  if (input.action === 'export') return ok({ board_id: board.boardId, markdown: boardToMarkdown(board) })
   const edits = parseEdits(input.edits)
   return edits.ok ? editBoard($, board, edits.value) : err(edits.error)
 }

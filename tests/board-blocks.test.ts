@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
-import type { CalloutBlock, CalloutTone, CodePeekBlock, SectionBlock, TableBlock } from '../hooks/engine/board-types.ts'
-import { calloutLines, codePeekLines, sectionLines, tableLines, wrapText, type CalloutLabels } from '../hooks/ui/board-blocks.ts'
+import type { Block, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../hooks/engine/board-types.ts'
+import { calloutLines, codeLines, codePeekLines, sectionLines, tableLines, traceLines, wrapText, type CalloutLabels } from '../hooks/ui/board-blocks.ts'
+import { buildBoardView } from '../hooks/ui/board-model.ts'
 import { width, type Line } from '../hooks/ui/text.ts'
 
 const text = (line: Line) => line.map(segment => segment.text).join('')
@@ -11,6 +12,10 @@ const LABELS: CalloutLabels = { info: 'Info', decision: 'Decision', risk: 'Risk'
 const section = (body: string, title = 'Plan'): SectionBlock => ({ id: 'b1', type: 'section', title, text: body })
 const callout = (tone: CalloutTone, body: string, title?: string): CalloutBlock => ({ id: 'b2', type: 'callout', tone, text: body, ...(title ? { title } : {}) })
 const table = (columns: string[], rows: string[][], title?: string): TableBlock => ({ id: 'b3', type: 'table', columns, rows, ...(title ? { title } : {}) })
+const PARTS_EN: Record<TracePart, string> = { output: 'output', answer: 'answer', error: 'error', verification: 'verification' }
+const PARTS_KO: Record<TracePart, string> = { output: '출력', answer: '답변', error: '오류', verification: '검증' }
+const code = (body: string, extra: Partial<CodeBlock> = {}): CodeBlock => ({ id: 'b5', type: 'code', code: body, ...extra })
+const trace = (lines: string[], extra: Partial<TraceBlock> = {}): TraceBlock => ({ id: 'b6', type: 'trace', run: 'dag_mv6fveyq_y06sr2', node: 'board-render', part: 'output', lines, ...extra })
 const peek = (lines: string[], extra: Partial<CodePeekBlock> = {}): CodePeekBlock => ({ id: 'b4', type: 'code_peek', path: 'src/a.ts', start: 8, end: 7 + lines.length, lines, ...extra })
 
 test('section shows its title in bold accent', () => {
@@ -196,6 +201,8 @@ test('every block fits a narrow pane without throwing', () => {
     calloutLines(callout('warning', '가나다라 body text that wraps', 'Title'), columns, LABELS),
     tableLines(table(['이름', 'Role'], [['김철수', 'Lead role']], 'Table'), columns),
     codePeekLines(peek(['\tconst 값 = 1'], { title: 'Peek', note: 'note text' }), columns),
+    codeLines(code('\tconst 값 = 1\nreturn', { language: 'typescript', title: 'Snippet', note: 'note text' }), columns),
+    traceLines(trace(['\tFAIL 값이 다릅니다', 'second'], { node: 'board-render', title: 'Trace', note: 'note text', part: 'verification' }), columns, PARTS_KO),
   ]
   for (const columns of [1, 2, 3, 5, 8, 13, 21]) {
     for (const lines of blocks(columns)) {
@@ -213,6 +220,136 @@ test('control characters in block text never reach the output', () => {
     calloutLines(callout('info', dirty, dirty), 40, LABELS),
     tableLines(table([dirty], [[dirty]], dirty), 40),
     codePeekLines(peek([dirty], { path: dirty, title: dirty, note: dirty }), 40),
+    codeLines(code(dirty, { language: dirty, title: dirty, note: dirty }), 40),
+    traceLines(trace([dirty], { node: dirty, title: dirty, note: dirty }), 40, PARTS_EN),
   ]
   for (const lines of rendered) expect(/[\x00-\x08\x0b-\x1f\x7f]/.test(texts(lines).join('\n'))).toBe(false)
+})
+
+test('code shows its language in bold, numbered rows from 1 with a dim gutter, and the note dim', () => {
+  const lines = codeLines(code('const a = 1\nreturn a', { language: 'typescript', note: 'Returns early' }), 40)
+  expect(texts(lines)).toEqual(['typescript', '1 │ const a = 1', '2 │ return a', 'Returns early'])
+  expect(lines[0]).toEqual([{ text: 'typescript', bold: true }])
+  expect(lines[1]?.slice(0, 2)).toEqual([{ text: '1', dim: true }, { text: ' │ ', dim: true }])
+  expect(lines[3]).toEqual([{ text: 'Returns early', dim: true }])
+})
+
+test('code without a language or a title still renders, headed by code', () => {
+  const lines = codeLines(code('x = 1'), 40)
+  expect(texts(lines)).toEqual(['code', '1 │ x = 1'])
+  expect(lines[0]).toEqual([{ text: 'code', bold: true }])
+})
+
+test('code adds the title after the bold language', () => {
+  const lines = codeLines(code('x', { language: 'py', title: 'Entry point' }), 40)
+  expect(text(lines[0] ?? [])).toBe('py · Entry point')
+  expect(lines[0]?.[0]).toEqual({ text: 'py', bold: true })
+})
+
+test('code right-aligns its gutter once it passes nine rows', () => {
+  const lines = codeLines(code(Array.from({ length: 10 }, (_, i) => `row${i + 1}`).join('\n')), 40)
+  expect(texts(lines).slice(1, 3)).toEqual([' 1 │ row1', ' 2 │ row2'])
+  expect(text(lines[10] ?? [])).toBe('10 │ row10')
+})
+
+test('code expands tabs, and a trailing newline does not add an empty numbered row', () => {
+  expect(texts(codeLines(code('\tif (a) {\n\t\treturn\n'), 40))).toEqual(['code', '1 │   if (a) {', '2 │     return'])
+})
+
+test('code keeps a blank row inside the snippet and reads CRLF as one break', () => {
+  expect(texts(codeLines(code('a\r\n\r\nb'), 40)).slice(1)).toEqual(['1 │ a', '2 │ ', '3 │ b'])
+})
+
+test('code cuts a long first line with an ellipsis instead of overflowing', () => {
+  const lines = codeLines(code(`${'x'.repeat(50)}\nshort`), 20)
+  expect(text(lines[1] ?? [])).toBe(`1 │ ${'x'.repeat(15)}…`)
+  expect(lineWidth(lines[1] ?? [])).toBe(20)
+  expect(text(lines[2] ?? [])).toBe('2 │ short')
+})
+
+test('code keeps the end of a language label that is wider than the columns', () => {
+  const lines = codeLines(code('x', { language: 'a-very-long-language-label' }), 10)
+  expect(text(lines[0] ?? [])).toBe('…age-label')
+  expect(lineWidth(lines[0] ?? [])).toBe(10)
+})
+
+test('trace headers its rows with the node and the English part label', () => {
+  const lines = traceLines(trace(['built ok', 'tests pass'], { note: 'Final output of the node' }), 40, PARTS_EN)
+  expect(texts(lines)).toEqual(['board-render · output', '1 │ built ok', '2 │ tests pass', 'Final output of the node'])
+  expect(lines[0]).toEqual([{ text: 'board-render · output', bold: true }])
+  expect(lines[3]).toEqual([{ text: 'Final output of the node', dim: true }])
+})
+
+test('trace headers its rows with the Korean part label', () => {
+  const lines = traceLines(trace(['빌드 성공']), 40, PARTS_KO)
+  expect(texts(lines)).toEqual(['board-render · 출력', '1 │ 빌드 성공'])
+})
+
+test('trace labels each part from the table it is given', () => {
+  const parts: TracePart[] = ['output', 'answer', 'error', 'verification']
+  expect(parts.map(part => text(traceLines(trace(['x'], { part }), 40, PARTS_EN)[0] ?? []))).toEqual([
+    'board-render · output',
+    'board-render · answer',
+    'board-render · error',
+    'board-render · verification',
+  ])
+  expect(parts.map(part => text(traceLines(trace(['x'], { part }), 40, PARTS_KO)[0] ?? []))).toEqual([
+    'board-render · 출력',
+    'board-render · 답변',
+    'board-render · 오류',
+    'board-render · 검증',
+  ])
+})
+
+test('trace adds the title after the bold header and never shows the run id', () => {
+  const lines = traceLines(trace(['x'], { title: 'Why it failed', part: 'error' }), 60, PARTS_EN)
+  expect(text(lines[0] ?? [])).toBe('board-render · error · Why it failed')
+  expect(lines[0]?.[0]).toEqual({ text: 'board-render · error', bold: true })
+  expect(texts(lines).join('\n').includes('dag_mv6fveyq')).toBe(false)
+})
+
+test('trace cuts a long first line with an ellipsis instead of overflowing', () => {
+  const lines = traceLines(trace(['y'.repeat(60), 'next']), 20, PARTS_EN)
+  expect(text(lines[1] ?? [])).toBe(`1 │ ${'y'.repeat(15)}…`)
+  expect(lineWidth(lines[1] ?? [])).toBe(20)
+})
+
+test('trace keeps the part label when the node name is wider than the columns', () => {
+  const lines = traceLines(trace(['x'], { node: 'a-node-with-a-very-long-name' }), 16, PARTS_KO)
+  expect(text(lines[0] ?? []).endsWith(' · 출력')).toBe(true)
+  expect(lineWidth(lines[0] ?? [])).toBeLessThanOrEqual(16)
+})
+
+test('code and trace lines stay within 20 columns, Korean text included', () => {
+  const lines = [
+    ...codeLines(code('// 한글로 쓴 아주 긴 설명 주석입니다\n\tconst long = "' + 'z'.repeat(40) + '"', { language: 'typescript', title: '긴 제목이 붙은 스니펫', note: '한글 메모가 두 줄로 이어집니다 정말로' }), 20),
+    ...traceLines(trace(['오류: 한글로 쓴 아주 긴 실패 메시지입니다', 'z'.repeat(40)], { node: 'board-render', title: '긴 제목이 붙은 인용', part: 'error', note: '한글 메모가 두 줄로 이어집니다 정말로' }), 20, PARTS_KO),
+  ]
+  expect(lines.length > 6).toBe(true)
+  for (const line of lines) expect(lineWidth(line)).toBeLessThanOrEqual(20)
+})
+
+test('code and trace lines are empty when there is no room', () => {
+  expect(codeLines(code('x'), 0)).toEqual([])
+  expect(traceLines(trace(['x']), 0, PARTS_EN)).toEqual([])
+})
+
+// The pane draws these blocks through the board view, in the pane's language.
+const viewRows = (blocks: Block[], language: 'en' | 'ko') => {
+  const board = { boardId: 'bd1', sessionId: 's1', title: 'Trace board', createdAt: 1, updatedAt: 1, nextId: 3, blocks }
+  return buildBoardView({ boards: [board], columns: 60, language, page: 0 }).lines.map(text)
+}
+const CODE_AND_TRACE: Block[] = [
+  { id: 'b1', type: 'code', language: 'ts', code: 'const a = 1' },
+  { id: 'b2', type: 'trace', run: 'dag_x', node: 'build', part: 'verification', lines: ['exit 0'] },
+]
+
+test('the board view draws code and trace blocks with their header and rows', () => {
+  expect(viewRows(CODE_AND_TRACE, 'en').slice(0, 7)).toEqual([
+    '[b1] code', 'ts', '1 │ const a = 1', '', '[b2] trace', 'build · verification', '1 │ exit 0',
+  ])
+})
+
+test('the board view labels a trace part in Korean when the pane is Korean', () => {
+  expect(viewRows(CODE_AND_TRACE, 'ko')[5]).toBe('build · 검증')
 })

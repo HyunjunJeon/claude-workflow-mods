@@ -2,9 +2,9 @@ import { findCycle } from './graph.ts'
 import { fail, type Result } from './types.ts'
 import { projectPath } from './verification.ts'
 import type {
-  Block, BlockInput, BlockType, Board, BoardEdit, BoardFile, CalloutBlock, CalloutTone, CodePeekBlock, CodePeekInput,
+  Block, BlockInput, BlockType, Board, BoardEdit, BoardFile, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, CodePeekInput,
   FlowBlock, FlowEdge, FlowNode, FlowNodeKind, RunLink, SectionBlock, SequenceBlock, SequenceParticipant, SequenceStep,
-  SequenceStepKind, TableBlock,
+  SequenceStepKind, TableBlock, TraceBlock, TracePart,
 } from './board-types.ts'
 
 // The limits keep one block readable in a pane: the Board layouts wrap and clip at these sizes, and a board stays small enough to
@@ -13,6 +13,9 @@ const MAX_EDITS = 20
 const MAX_BLOCKS = 60
 const TITLE_MAX = 80
 const SECTION_TEXT_MAX = 4000
+// A snippet is measured as sent, so the limit is on characters; the line limits are the code_peek's (PEEK_MAX_LINES, PEEK_LINE_MAX).
+const CODE_MAX = 4000
+const LANGUAGE_MAX = 20
 const CALLOUT_TEXT_MAX = 1000
 const MAX_COLUMNS = 6
 const MAX_ROWS = 30
@@ -34,20 +37,24 @@ const BOARD_ID_MAX = 64
 // A result board names its run and at most one block per fact slot; the host fills four slots today, and 8 leaves room without
 // letting a stored file grow the link without bound.
 const RUN_ID_MAX = 64
+const NODE_ID_MAX = 64
 const MAX_FACTS = 8
 const FACT_KEY = /^[a-z]{1,16}$/
 const REF_ID = /^[A-Za-z0-9_.-]{1,32}$/
 const BLOCK_ID = /^b([1-9][0-9]*)$/
 
-const BLOCK_TYPES: readonly BlockType[] = ['section', 'callout', 'table', 'code_peek', 'flow', 'sequence']
+const BLOCK_TYPES: readonly BlockType[] = ['section', 'callout', 'table', 'code_peek', 'code', 'trace', 'flow', 'sequence']
 const BLOCK_FIELDS: Record<BlockType, readonly string[]> = {
   section: ['title', 'text'],
   callout: ['tone', 'title', 'text'],
   table: ['title', 'columns', 'rows'],
   code_peek: ['title', 'path', 'start', 'end', 'note'],
+  code: ['title', 'language', 'code', 'note'],
+  trace: ['title', 'run', 'node', 'part', 'note'],
   flow: ['title', 'nodes', 'edges'],
   sequence: ['title', 'participants', 'steps'],
 }
+const TRACE_PARTS: readonly TracePart[] = ['output', 'answer', 'error', 'verification']
 const CALLOUT_TONES: readonly CalloutTone[] = ['info', 'decision', 'risk', 'warning']
 const FLOW_KINDS: readonly FlowNodeKind[] = ['process', 'decision', 'terminal']
 const STEP_KINDS: readonly SequenceStepKind[] = ['call', 'return', 'async', 'note']
@@ -66,11 +73,17 @@ const EDIT_FIELDS: Record<BoardEdit['op'], readonly string[]> = {
 const FIXED_FIELDS = [
   ['id', 'ids never change'],
   ['type', 'a block keeps its type; use replace to draw another kind'],
-  ['lines', 'lines are read from the file; change path, start or end instead'],
+  ['lines', 'the host fills lines; change path, start or end of a code_peek, or run, node or part of a trace'],
 ] as const
+// What a host-filled block's lines are read from: changing one of these reads them again, changing anything else keeps them.
 const RANGE_FIELDS = ['path', 'start', 'end']
+const TRACE_FIELDS = ['run', 'node', 'part']
 
 type Fields = Record<string, unknown>
+type TraceInput = Omit<TraceBlock, 'id' | 'lines'>
+// The two kinds whose lines the host fills: a code_peek's from a file, a trace's from the run checkpoint.
+type Hosted = CodePeekInput | TraceInput
+type Sources = { peeks: ReadonlyMap<string, string[]>; traces: ReadonlyMap<string, string[]> }
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string }
 
 function good<T>(value: T): Parsed<T> {
@@ -213,6 +226,53 @@ function parseCodePeek(raw: Fields): Parsed<CodePeekInput> {
   })
 }
 
+// A snippet keeps its indentation, so unlike the other texts it is not trimmed. A trailing newline ends the last line and does not
+// start another, so 40 lines of a file pasted whole still fit.
+function snippet(raw: unknown): Parsed<string> {
+  if (typeof raw !== 'string') return bad('code', 'must be a string')
+  if (raw.length < 1 || raw.length > CODE_MAX) return bad('code', `must be 1-${CODE_MAX} characters, got ${raw.length}`)
+  if (raw.trim() === '') return bad('code', 'must hold more than whitespace')
+  const parts = raw.split(/\r?\n/)
+  const lines = parts.at(-1) === '' ? parts.slice(0, -1) : parts
+  if (lines.length > PEEK_MAX_LINES) return bad('code', `at most ${PEEK_MAX_LINES} lines, got ${lines.length}`)
+  for (const [index, line] of lines.entries()) {
+    if (line.length > PEEK_LINE_MAX) return bad('code', `line ${index + 1} (index ${index}) has ${line.length} characters; a line holds at most ${PEEK_LINE_MAX}`)
+  }
+  return good(raw)
+}
+
+function parseCode(raw: Fields): Parsed<Omit<CodeBlock, 'id'>> {
+  const title = optionalText(raw.title, 'title', TITLE_MAX)
+  if (!title.ok) return title
+  const language = optionalText(raw.language, 'language', LANGUAGE_MAX)
+  if (!language.ok) return language
+  const code = snippet(raw.code)
+  if (!code.ok) return code
+  const note = optionalText(raw.note, 'note', PEEK_NOTE_MAX)
+  if (!note.ok) return note
+  return good({
+    type: 'code', ...(title.value ? { title: title.value } : {}), ...(language.value ? { language: language.value } : {}), code: code.value,
+    ...(note.value ? { note: note.value } : {}),
+  })
+}
+
+function parseTrace(raw: Fields): Parsed<TraceInput> {
+  const title = optionalText(raw.title, 'title', TITLE_MAX)
+  if (!title.ok) return title
+  const run = requiredText(raw.run, 'run', 1, RUN_ID_MAX)
+  if (!run.ok) return run
+  const node = requiredText(raw.node, 'node', 1, NODE_ID_MAX)
+  if (!node.ok) return node
+  const part = oneOf(raw.part, 'part', TRACE_PARTS)
+  if (!part.ok) return part
+  const note = optionalText(raw.note, 'note', PEEK_NOTE_MAX)
+  if (!note.ok) return note
+  return good({
+    type: 'trace', ...(title.value ? { title: title.value } : {}), run: run.value, node: node.value, part: part.value,
+    ...(note.value ? { note: note.value } : {}),
+  })
+}
+
 function parseFlowNode(raw: unknown, at: string): Parsed<FlowNode> {
   const fields = fieldsOf(raw, at, FLOW_NODE_FIELDS)
   if (!fields.ok) return fields
@@ -302,8 +362,8 @@ function parseSequence(raw: Fields): Parsed<Omit<SequenceBlock, 'id'>> {
   return good({ type: 'sequence', ...(title.value ? { title: title.value } : {}), participants: participants.value, steps: steps.value })
 }
 
-// Validates and normalises what the model sends (strings trimmed, empty optional fields dropped). A block without id or lines:
-// the board assigns the id and the host supplies a code_peek's lines.
+// Validates and normalises what the model sends (strings trimmed except a code snippet, empty optional fields dropped). A block
+// without id or lines: the board assigns the id and the host supplies a code_peek's or a trace's lines.
 function parseBlockInput(raw: unknown): Parsed<BlockInput> {
   if (!isRecord(raw)) return bad('block', 'must be an object')
   const type = oneOf(raw.type, 'type', BLOCK_TYPES)
@@ -315,6 +375,8 @@ function parseBlockInput(raw: unknown): Parsed<BlockInput> {
     case 'callout': return parseCallout(fields.value)
     case 'table': return parseTable(fields.value)
     case 'code_peek': return parseCodePeek(fields.value)
+    case 'code': return parseCode(fields.value)
+    case 'trace': return parseTrace(fields.value)
     case 'flow': return parseFlow(fields.value)
     case 'sequence': return parseSequence(fields.value)
   }
@@ -324,6 +386,12 @@ export type PeekRequest = { path: string; start: number; end: number }
 
 export function peekKey(request: PeekRequest): string {
   return `${request.path}#L${request.start}-L${request.end}`
+}
+
+export type TraceRequest = { run: string; node: string; part: TracePart }
+
+export function traceKey(request: TraceRequest): string {
+  return `${request.run}#${request.node}#${request.part}`
 }
 
 // The host reads files for these, so a request exists only for a range the engine would accept; applyEdits reports the rest.
@@ -347,9 +415,23 @@ function peekedLines(peek: CodePeekInput, peeks: ReadonlyMap<string, string[]>):
   return good(lines.map(cutLine))
 }
 
-// A code_peek's lines come from outside the input (a file read, the old block, a persisted file), so the caller supplies them.
-function assemble(id: string, input: BlockInput, linesFor: (peek: CodePeekInput) => Parsed<string[]>): Parsed<Block> {
-  if (input.type !== 'code_peek') return good({ id, ...input })
+function tracedLines(trace: TraceInput, traces: ReadonlyMap<string, string[]>): Parsed<string[]> {
+  const key = traceKey(trace)
+  const lines = traces.get(key)
+  if (lines === undefined) return bad('run', `could not read the ${trace.part} of node ${trace.node} in run ${trace.run} (${key}); the run checkpoint does not hold it`)
+  if (lines.length === 0) return bad('part', `the ${trace.part} of node ${trace.node} in run ${trace.run} (${key}) is empty`)
+  // No range to ask for, so a long artifact keeps its first lines: a stored trace never holds more than a code_peek can.
+  return good(lines.slice(0, PEEK_MAX_LINES).map(cutLine))
+}
+
+function hostedLines(input: Hosted, sources: Sources): Parsed<string[]> {
+  return input.type === 'code_peek' ? peekedLines(input, sources.peeks) : tracedLines(input, sources.traces)
+}
+
+// A host-filled block's lines come from outside the input (a file read, a run checkpoint, the old block, a persisted file), so the
+// caller supplies them.
+function assemble(id: string, input: BlockInput, linesFor: (hosted: Hosted) => Parsed<string[]>): Parsed<Block> {
+  if (input.type !== 'code_peek' && input.type !== 'trace') return good({ id, ...input })
   const lines = linesFor(input)
   return lines.ok ? good({ id, ...input, lines: lines.value }) : lines
 }
@@ -418,9 +500,37 @@ export function peeksNeeded(board: Board, edits: BoardEdit[]): PeekRequest[] {
   return [...found.values()]
 }
 
+// Like peekRequest, a request exists only for a quote the engine would accept, with run and node trimmed the way parseTrace trims them.
+function traceRequest(run: unknown, node: unknown, part: unknown): TraceRequest | undefined {
+  const runId = requiredText(run, 'run', 1, RUN_ID_MAX)
+  const nodeId = requiredText(node, 'node', 1, NODE_ID_MAX)
+  const kind = oneOf(part, 'part', TRACE_PARTS)
+  return runId.ok && nodeId.ok && kind.ok ? { run: runId.value, node: nodeId.value, part: kind.value } : undefined
+}
+
+// The artifacts the host must read from run checkpoints before applyEdits: those an insert or replace brings in, and an update that
+// points a trace at another run, node or part.
+export function tracesNeeded(board: Board, edits: BoardEdit[]): TraceRequest[] {
+  const found = new Map<string, TraceRequest>()
+  const want = (run: unknown, node: unknown, part: unknown) => {
+    const request = traceRequest(run, node, part)
+    if (request) found.set(traceKey(request), request)
+  }
+  for (const edit of edits) {
+    if ((edit.op === 'insert' || edit.op === 'replace') && edit.block.type === 'trace') {
+      want(edit.block.run, edit.block.node, edit.block.part)
+    } else if (edit.op === 'update') {
+      const block = board.blocks.find(candidate => candidate.id === edit.id)
+      if (block?.type === 'trace' && TRACE_FIELDS.some(key => key in edit.changes)) {
+        want(edit.changes.run ?? block.run, edit.changes.node ?? block.node, edit.changes.part ?? block.part)
+      }
+    }
+  }
+  return [...found.values()]
+}
+
 type Draft = { blocks: Block[]; nextId: number; inserted: string[] }
 type Op<K extends BoardEdit['op']> = Extract<BoardEdit, { op: K }>
-type Peeks = ReadonlyMap<string, string[]>
 
 function refuse<T>(at: string, message: string): Result<T> {
   return fail('invalid_board_edit', `${at}: ${message}`)
@@ -430,7 +540,7 @@ function unknownBlock<T>(at: string, id: string, blocks: Block[]): Result<T> {
   return fail('unknown_block', `${at}: no block ${id}; this board holds ${blocks.length === 0 ? 'no blocks' : blocks.map(block => block.id).join(', ')}`)
 }
 
-function insertBlock(draft: Draft, edit: Op<'insert'>, at: string, peeks: Peeks): Result<Draft> {
+function insertBlock(draft: Draft, edit: Op<'insert'>, at: string, sources: Sources): Result<Draft> {
   const input = parseBlockInput(edit.block)
   if (!input.ok) return refuse(at, input.message)
   let position = draft.blocks.length
@@ -441,12 +551,19 @@ function insertBlock(draft: Draft, edit: Op<'insert'>, at: string, peeks: Peeks)
   }
   if (draft.blocks.length >= MAX_BLOCKS) return refuse(at, `a board holds at most ${MAX_BLOCKS} blocks`)
   const id = `b${draft.nextId}`
-  const block = assemble(id, input.value, peek => peekedLines(peek, peeks))
+  const block = assemble(id, input.value, hosted => hostedLines(hosted, sources))
   if (!block.ok) return refuse(at, block.message)
   return { ok: true, value: { blocks: draft.blocks.toSpliced(position, 0, block.value), nextId: draft.nextId + 1, inserted: [...draft.inserted, id] } }
 }
 
-function updateBlock(draft: Draft, edit: Op<'update'>, at: string, peeks: Peeks): Result<Draft> {
+// The lines a host-filled block keeps through an update, or undefined when the update changes what they are read from.
+function keptLines(existing: Block, changes: Fields): string[] | undefined {
+  if (existing.type === 'code_peek') return RANGE_FIELDS.some(key => key in changes) ? undefined : existing.lines
+  if (existing.type === 'trace') return TRACE_FIELDS.some(key => key in changes) ? undefined : existing.lines
+  return undefined
+}
+
+function updateBlock(draft: Draft, edit: Op<'update'>, at: string, sources: Sources): Result<Draft> {
   const index = draft.blocks.findIndex(block => block.id === edit.id)
   const existing = draft.blocks[index]
   if (existing === undefined) return unknownBlock(at, edit.id, draft.blocks)
@@ -455,18 +572,18 @@ function updateBlock(draft: Draft, edit: Op<'update'>, at: string, peeks: Peeks)
   }
   const input = parseBlockInput({ ...omit(existing, 'id', 'lines'), ...edit.changes })
   if (!input.ok) return refuse(at, input.message)
-  const moved = RANGE_FIELDS.some(key => key in edit.changes)
-  const block = assemble(existing.id, input.value, peek => (existing.type === 'code_peek' && !moved ? good(existing.lines) : peekedLines(peek, peeks)))
+  const kept = keptLines(existing, edit.changes)
+  const block = assemble(existing.id, input.value, hosted => (kept === undefined ? hostedLines(hosted, sources) : good(kept)))
   if (!block.ok) return refuse(at, block.message)
   return { ok: true, value: { ...draft, blocks: draft.blocks.with(index, block.value) } }
 }
 
-function replaceBlock(draft: Draft, edit: Op<'replace'>, at: string, peeks: Peeks): Result<Draft> {
+function replaceBlock(draft: Draft, edit: Op<'replace'>, at: string, sources: Sources): Result<Draft> {
   const index = draft.blocks.findIndex(block => block.id === edit.id)
   if (index === -1) return unknownBlock(at, edit.id, draft.blocks)
   const input = parseBlockInput(edit.block)
   if (!input.ok) return refuse(at, input.message)
-  const block = assemble(edit.id, input.value, peek => peekedLines(peek, peeks))
+  const block = assemble(edit.id, input.value, hosted => hostedLines(hosted, sources))
   if (!block.ok) return refuse(at, block.message)
   return { ok: true, value: { ...draft, blocks: draft.blocks.with(index, block.value) } }
 }
@@ -476,35 +593,35 @@ function removeBlock(draft: Draft, edit: Op<'remove'>, at: string): Result<Draft
   return { ok: true, value: { ...draft, blocks: draft.blocks.filter(block => block.id !== edit.id) } }
 }
 
-function applyEdit(draft: Draft, edit: BoardEdit, at: string, peeks: Peeks): Result<Draft> {
+function applyEdit(draft: Draft, edit: BoardEdit, at: string, sources: Sources): Result<Draft> {
   switch (edit.op) {
-    case 'insert': return insertBlock(draft, edit, at, peeks)
-    case 'update': return updateBlock(draft, edit, at, peeks)
-    case 'replace': return replaceBlock(draft, edit, at, peeks)
+    case 'insert': return insertBlock(draft, edit, at, sources)
+    case 'update': return updateBlock(draft, edit, at, sources)
+    case 'replace': return replaceBlock(draft, edit, at, sources)
     case 'remove': return removeBlock(draft, edit, at)
   }
 }
 
 // All or nothing: each edit builds a new block list from the last, so a refusal returns before the given board is touched.
-export function applyEdits(board: Board, edits: BoardEdit[], context: { now: number; peeks: ReadonlyMap<string, string[]> }): Result<{ board: Board; inserted: string[] }> {
+export function applyEdits(board: Board, edits: BoardEdit[], context: Sources & { now: number }): Result<{ board: Board; inserted: string[] }> {
   let draft: Draft = { blocks: board.blocks, nextId: board.nextId, inserted: [] }
   for (const [index, edit] of edits.entries()) {
-    const next = applyEdit(draft, edit, `edits[${index}]`, context.peeks)
+    const next = applyEdit(draft, edit, `edits[${index}]`, context)
     if (!next.ok) return next
     draft = next.value
   }
   return { ok: true, value: { board: { ...board, updatedAt: context.now, nextId: draft.nextId, blocks: draft.blocks }, inserted: draft.inserted } }
 }
 
-export type ModelBlock = Exclude<Block, CodePeekBlock> | (Omit<CodePeekBlock, 'lines'> & { lineCount: number })
+export type ModelBlock = Exclude<Block, CodePeekBlock | TraceBlock> | (Omit<CodePeekBlock, 'lines'> & { lineCount: number }) | (Omit<TraceBlock, 'lines'> & { lineCount: number })
 export type ModelBoard = Omit<Board, 'blocks'> & { blocks: ModelBlock[] }
 
-// What the get action returns: the model drew these blocks and does not need the file text back.
+// What the get action returns: the model drew these blocks and does not need the file or run text back. A code block is the model's own text, so it stays.
 export function boardForModel(board: Board): ModelBoard {
   return {
     ...board,
     blocks: board.blocks.map((block): ModelBlock => {
-      if (block.type !== 'code_peek') return block
+      if (block.type !== 'code_peek' && block.type !== 'trace') return block
       const { lines, ...rest } = block
       return { ...rest, lineCount: lines.length }
     }),
@@ -521,13 +638,18 @@ function storedLines(raw: unknown, peek: CodePeekInput): Parsed<string[]> {
   return bad('lines', `must hold ${wanted} strings of at most ${PEEK_LINE_MAX} characters`)
 }
 
+function storedTraceLines(raw: unknown): Parsed<string[]> {
+  if (isStringArray(raw) && raw.length >= 1 && raw.length <= PEEK_MAX_LINES && raw.every(line => line.length <= PEEK_LINE_MAX)) return good(raw)
+  return bad('lines', `must hold 1-${PEEK_MAX_LINES} strings of at most ${PEEK_LINE_MAX} characters`)
+}
+
 function parseStoredBlock(raw: unknown, at: string): Parsed<Block> {
   if (!isRecord(raw)) return bad(at, 'must be an object')
   const id = raw.id
   if (typeof id !== 'string' || !BLOCK_ID.test(id)) return bad(child(at, 'id'), 'must look like b1, b2, ...')
-  const input = within(at, parseBlockInput(omit(raw, 'id', ...(raw.type === 'code_peek' ? ['lines'] : []))))
+  const input = within(at, parseBlockInput(omit(raw, 'id', ...(raw.type === 'code_peek' || raw.type === 'trace' ? ['lines'] : []))))
   if (!input.ok) return input
-  return within(at, assemble(id, input.value, peek => storedLines(raw.lines, peek)))
+  return within(at, assemble(id, input.value, hosted => (hosted.type === 'code_peek' ? storedLines(raw.lines, hosted) : storedTraceLines(raw.lines))))
 }
 
 function stamp(raw: unknown, field: string): Parsed<number> {
