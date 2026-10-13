@@ -1,0 +1,441 @@
+# Board P4: the board cites the run — trace and code blocks, a decisions slot, markdown export, boards across handoff.
+# Idea taken from github.com/devdotfast/whiteboard (its trace_quote block and shareable review documents, not its
+# desktop app). P1 (flows/improvement/p4-board.yaml, 8a22c15+6fb20dc) built the tool and the pane section; P2
+# (p5-board-interview.yaml, 6a92c6c) made interview and pm draw on it; P3 (p6-board-results.yaml, 0d36822+4541cdc)
+# drew the result board and the block chips.
+# Decisions (2026-10-13): Q1 both a model-drawn `trace` block and a `decisions` slot on the result board; Q2 the host
+# fills a trace's lines from the run checkpoint, like a code_peek (the model names run, node and part only); Q3 export
+# is a board tool action returning markdown, no /dag subcommand and no headless settle change; Q4 a handoff acceptance
+# copies EVERY board of the source session into the accepting session's file (the source keeps its copy).
+# Later runs: code_peek ref/diff blocks, drawing the plan DAG into the approval board (planning doctrine, needs a shape
+# eval rerun), board_ref links, small vocabulary extras (divider, dashed edges, move op).
+#
+# PREREQUISITE: `git status --short -- hooks tests skills README.md docs .claude-plugin` prints nothing, and no other
+# session edits this checkout.
+# Run it with:  /dag run flows/improvement/p7-board-trace.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan (components -> waves):
+#   wave 1: board-contract (the types every other node imports)
+#   wave 2: board-engine, board-render, result-decisions, board-export (four lanes, disjoint writes)
+#   wave 3: board-host (wires trace resolution, the export action, the decisions feed and the handoff copy into
+#           register.ts)
+#   wave 4: board-docs
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: quick for the contract and the two self-contained pure modules (renderer, exporter); unspecified-low for
+# board-engine (validation rules plus the tracesNeeded counterpart of peeksNeeded) and result-decisions; unspecified-high
+# for board-host (four behaviours meeting in the 3000+ line register.ts); writing for docs.
+# Wave-2 nodes declare only file checks: four lanes edit tests/ at once, so a full `claude plugin test .` or a whole-
+# project tsc could fail on a sibling's half-written file. Each worker still runs the suite itself; board-host and
+# review-spec run it on the whole result.
+# Expected lint warnings: "one producer owns 3 files" on board-engine and board-render; each is one slice.
+key: improve-p7-board-trace-1
+name: Board P4 - trace and code blocks, decisions slot, export, handoff boards
+goal: >
+  The board tool gains `code` (a snippet the model proposes, validated but never file-read) and `trace` (a quote of a
+  run artifact — node output, answer, error or verification evidence — whose lines the host fills from the run
+  checkpoint like a code_peek) blocks and an `export` action returning markdown, the result board gains a `decisions`
+  slot drawing the run's DecisionRecord rows at settle, a handoff acceptance copies the source session's boards into
+  the accepting session's board file, the pane renders both new blocks with localized trace part labels, and
+  tests, README.md and docs/reference.md are updated.
+review:
+  request: |
+    whiteboard 차용 4차. trace/code 블록, 결정 로그, export, 핸드오프 보드 계승.
+    Agreed decisions for P4: Q1 both a trace block and a decisions slot on the result board; Q2 the host fills trace
+    lines from the run checkpoint (the model names run, node and part only, like code_peek); Q3 export is a board tool
+    action returning markdown only; Q4 a handoff acceptance copies all of the source session's boards into the
+    accepting session (the source keeps its copy).
+    Out of scope: code_peek ref/diff blocks, the plan DAG on the approval board (needs a shape eval rerun), board_ref
+    links, further vocabulary (divider, dashed edges, move op).
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "feat(board): cite run traces, export markdown and inherit boards on handoff"
+    paths:
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - hooks/engine/board-export.ts
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - hooks/ui/result-board.ts
+      - hooks/register.ts
+      - tests/board-engine.test.ts
+      - tests/board-blocks.test.ts
+      - tests/board-export.test.ts
+      - tests/result-board.test.ts
+      - tests/board-host.test.ts
+      - tests/control-harness.ts
+      - README.md
+      - docs/reference.md
+nodes:
+  - id: board-contract
+    label: Code and trace block types
+    category: quick
+    writes:
+      - hooks/engine/board-types.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board-types.ts
+        contains: "export type TracePart ="
+      - kind: file
+        path: hooks/engine/board-types.ts
+        contains: "export type CodeBlock ="
+      - kind: command
+        argv: [bunx, "-p", typescript@5, tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Extend hooks/engine/board-types.ts with the code and trace block types every other node imports.
+      CONTEXT: hooks/engine/board-types.ts defines the six current block types, BlockInput and BoardEdit; the code style
+      is two-space indent, no semicolons, single quotes (root AGENTS.md). hooks/engine/ is pure: no `$`, no clock.
+      DELIVERABLE: edit hooks/engine/board-types.ts to add, next to the existing block types:
+      ```ts
+      export type TracePart = 'output' | 'answer' | 'error' | 'verification'
+      // code is a snippet the model proposes; nothing reads it back from a file, so it carries its text directly.
+      export type CodeBlock = { id: string; type: 'code'; title?: string; language?: string; code: string; note?: string }
+      // lines is the run artifact's text when the block was drawn, so the quote survives the run checkpoint's later edits.
+      export type TraceBlock = { id: string; type: 'trace'; title?: string; run: string; node: string; part: TracePart; lines: string[]; note?: string }
+      ```
+      then add `CodeBlock | TraceBlock` to the `Block` union, and `Omit<CodeBlock, 'id'>` and `Omit<TraceBlock, 'id' | 'lines'>`
+      to the `BlockInput` union (a trace's lines come only from the host's checkpoint read, like a code_peek's). Update the
+      comments above CodePeekInput/BlockInput so both host-filled kinds are named. Do not touch RunLink, Board or BoardFile.
+      In ## Output give the added type names.
+      SCOPE: Write ONLY hooks/engine/board-types.ts. Other nodes own every other file. Never commit, push, install or reload plugins.
+      VERIFY: Run `bunx -p typescript@5 tsc -p . --noEmit`: exit code 0.
+      STOP WHEN: the file holds the additions above and the typecheck exits 0.
+
+  - id: board-engine
+    label: Code/trace validation, tracesNeeded and the tool spec
+    category: unspecified-low
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - tests/board-engine.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "export function tracesNeeded("
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "export function traceKey("
+      - kind: file
+        path: hooks/engine/board-spec.ts
+        contains: "'export'"
+      - kind: file
+        path: tests/board-engine.test.ts
+        contains: "trace"
+    prompt: |
+      TASK: Teach the board engine the `code` and `trace` blocks and the `export` action: validation and atomic edits in
+      hooks/engine/board.ts, description and input schema in hooks/engine/board-spec.ts, tests in tests/board-engine.test.ts.
+      CONTEXT: Read hooks/engine/board-types.ts first (board-contract just extended it; do not edit it) and
+      hooks/engine/board.ts end to end — the new types follow the code_peek pattern exactly: parse* functions per type,
+      BLOCK_TYPES/BLOCK_FIELDS, peeksNeeded + assemble + context.peeks for host-filled lines, storedLines for persisted
+      blocks, boardForModel for `get`. hooks/engine/ is pure. Follow hooks/engine/AGENTS.md and tests/AGENTS.md
+      (import test/expect from 'claude-code/testing').
+      DELIVERABLE:
+      (1) hooks/engine/board.ts:
+        - Constants: CODE_MAX = 4000 characters and at most PEEK_MAX_LINES lines each at most PEEK_LINE_MAX characters
+          (reuse the existing constants); LANGUAGE_MAX = 20. A trace's stored lines hold 1-PEEK_MAX_LINES strings of at
+          most PEEK_LINE_MAX each.
+        - BLOCK_TYPES gains 'code' and 'trace'; BLOCK_FIELDS: code -> ['title', 'language', 'code', 'note'], trace ->
+          ['title', 'run', 'node', 'part', 'note']. TRACE_PARTS = ['output', 'answer', 'error', 'verification'].
+        - parseCode: `code` is required text of 1-4000 characters measured WITHOUT trimming (a snippet may indent its
+          first line; refuse an all-whitespace value), at most 40 lines, every line at most 240 characters (the error
+          names the line index); `language` optional at most 20; `note` at most 200; `title` at most 80.
+        - parseTrace: `run` required text 1-64 characters (RUN_ID_MAX), `node` required text 1-64, `part` one of
+          TRACE_PARTS, `note` at most 200, `title` at most 80. No line-range fields in v1.
+        - `type TraceRequest = { run: string; node: string; part: TracePart }`, `traceKey(request: TraceRequest): string`
+          returning `${run}#${node}#${part}`, and `tracesNeeded(board: Board, edits: BoardEdit[]): TraceRequest[]`:
+          deduplicated requests from insert and replace of a trace block and from an update whose changes touch run,
+          node or part of an existing trace block (TRACE_FIELDS = ['run', 'node', 'part']) — the peeksNeeded shape.
+        - applyEdits context gains `traces: ReadonlyMap<string, string[]>`; generalise assemble (and its linesFor
+          callback) so a trace takes its lines from `context.traces` by traceKey, a missing entry failing with
+          `invalid_board_edit` naming run, node and part, exactly as a missing peek fails. An update of a trace's run,
+          node or part takes lines from the map; an update of only title/note keeps the stored lines. `lines` stays a
+          FIXED_FIELD.
+        - parseStoredBlock: a persisted trace omits `lines` from the re-parsed input like a code_peek and validates them
+          with a new storedTraceLines (1-40 strings of at most 240 characters); parseBoardFile keeps one path.
+        - ModelBlock/boardForModel: a trace returns `lineCount` instead of `lines`, like a code_peek; a code block is
+          returned whole.
+      (2) hooks/engine/board-spec.ts: the action enum gains 'export' ({board_id}; returns the board as markdown). Add
+          `code` and `trace` to the description's block list and one compact export phrase. The description must stay at
+          most 2048 characters — shorten existing prose if needed; tests/board-engine.test.ts already asserts the limit.
+      (3) tests/board-engine.test.ts (extend, never rewrite unrelated cases): code insert passes and refuses (>40
+          lines, a 241-character line naming its index, empty code, unknown field); trace insert passes, an update
+          touching run/node/part re-resolves lines while a title/note update keeps them; tracesNeeded for insert,
+          replace and a part update (deduplicated by traceKey); a trace missing its context entry fails with
+          invalid_board_edit; parseBoardFile round trip with code and trace; boardForModel replaces a trace's lines
+          with lineCount; the description stays <= 2048 and the schema's action enum holds 'export'.
+      In ## Output list every new exported name with its signature, the new limits and error shapes, and the final
+      description character count; board-host and board-docs consume this list.
+      SCOPE: Write ONLY hooks/engine/board.ts, hooks/engine/board-spec.ts and tests/board-engine.test.ts. Read anything.
+      hooks/engine/board-types.ts belongs to board-contract: if a type you need is missing, end with
+      `DAG_NODE_STATUS: failed: missing-input: <type>` instead of editing it. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
+      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+
+  - id: board-render
+    label: Terminal renderers for code and trace
+    category: quick
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - tests/board-blocks.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/board-blocks.ts
+        contains: "export function codeLines("
+      - kind: file
+        path: hooks/ui/board-blocks.ts
+        contains: "export function traceLines("
+      - kind: file
+        path: tests/board-blocks.test.ts
+        contains: "trace"
+    prompt: |
+      TASK: Render a board's `code` and `trace` blocks as terminal lines, in hooks/ui/board-blocks.ts, and dispatch them
+      in hooks/ui/board-model.ts.
+      CONTEXT: Read hooks/engine/board-types.ts (the new CodeBlock and TraceBlock; do not edit it) and
+      hooks/ui/board-blocks.ts — codePeekLines is the template: a strong source header line, gutter-numbered body lines
+      (tab -> TAB, fit to textColumns), a dim note. hooks/ui/ is pure; follow hooks/ui/AGENTS.md (measure with width/fit,
+      CJK counts 2) and tests/AGENTS.md.
+      DELIVERABLE:
+      (1) hooks/ui/board-blocks.ts exporting `codeLines(block: CodeBlock, columns: number): Line[]` and
+          `traceLines(block: TraceBlock, columns: number, parts: Record<TracePart, string>): Line[]`.
+          - codeLines: header line is strong `<language ?? 'code'>` plus ` · <title>` when set and room allows (the
+            fitTail pattern so the source end survives); body lines numbered 1..n with the same gutter style as
+            codePeekLines; then the note, dim.
+          - traceLines: header line is strong `<node> · <parts[part]>` plus ` · <title>` when room allows; body numbered
+            1..n; then the note, dim. No run id in the header (runIds are long; the block header above it shows
+            `[b4] trace · title`).
+      (2) hooks/ui/board-model.ts: BoardStrings gains `parts: Record<TracePart, string>` — EN
+          {output: 'output', answer: 'answer', error: 'error', verification: 'verification'}, KO
+          {output: '출력', answer: '답변', error: '오류', verification: '검증'} — passed to traceLines; the renderBlock switch
+          gains `case 'code': return codeLines(block, columns)` and `case 'trace': return traceLines(block, columns, t.parts)`.
+      (3) tests/board-blocks.test.ts (extend; import test/expect from 'claude-code/testing'): a code block shows its
+          language header, numbered lines and note, and a code block without a language or title still renders; a trace
+          block shows `<node> · output` in English and `<node> · 출력` in Korean; every returned line's width() stays
+          within columns at a narrow width such as 20; a long first line clips rather than overflows.
+      In ## Output give the exported signatures and the added BoardStrings key.
+      SCOPE: Write ONLY hooks/ui/board-blocks.ts, hooks/ui/board-model.ts and tests/board-blocks.test.ts. Read anything.
+      Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
+      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+
+  - id: result-decisions
+    label: Decisions slot on the result board
+    category: unspecified-low
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/result-board.ts
+      - tests/result-board.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/result-board.ts
+        contains: "'decisions'"
+      - kind: file
+        path: tests/result-board.test.ts
+        contains: "decision"
+    prompt: |
+      TASK: Give the result board a fifth fact slot `decisions`: a table of the run's DecisionRecord rows, drawn at
+      settle and refreshed like the other slots.
+      CONTEXT: Read hooks/ui/result-board.ts — RESULT_SLOTS, resultFacts(run, language), factEdits — and
+      hooks/engine/decisions.ts for DecisionRecord (kind 'routing'|'permission'|'recovery'|'mode', subject, proposed,
+      selected, outcome, source, backend, confidence, at, runId). hooks/ui/ is pure; the host (another node) filters and
+      hands the records in, so the signature grows a parameter. Follow hooks/ui/AGENTS.md and tests/AGENTS.md.
+      DELIVERABLE:
+      (1) hooks/ui/result-board.ts: RESULT_SLOTS becomes ['summary', 'nodes', 'graph', 'writes', 'decisions'].
+          ResultStrings gains `decisionsTitle` and `decisionColumns` — EN title 'Decisions' with columns
+          ['Kind', 'Subject', 'Picked', 'Outcome'], KO title '결정' with columns ['종류', '대상', '선택', '결과'] — and a
+          `moreDecisions(count)` string following moreNodes.
+          `decisionsBlock(run: Run, records: readonly DecisionRecord[], t: ResultStrings): BlockInput | undefined`:
+          records whose runId equals run.runId, ordered by `at`, become rows of [kind, cut(subject, CELL_MAX),
+          cut(selected, CELL_MAX), outcome] through capRows; undefined when the run has none.
+          `resultFacts(run: Run, language: Language, records: readonly DecisionRecord[] = [])`: the signature gains
+          records (defaulted so existing direct callers still compile); the facts map adds `decisions: decisionsBlock(...)`.
+      (2) tests/result-board.test.ts (extend): a record list filtered to the run yields a decisions table (a routing and
+          a recovery record appear; another run's record does not); more than 30 rows caps with the moreDecisions line;
+          a run with no records yields facts.decisions === undefined; factEdits inserts the slot on first draw and
+          replaces it on a refresh (the existing factEdits tests already pin the slot mechanics — extend them for the
+          fifth slot).
+      In ## Output give the new slot name, the column labels EN/KO, and the resultFacts signature; board-host and
+      board-docs consume this.
+      SCOPE: Write ONLY hooks/ui/result-board.ts and tests/result-board.test.ts. Read anything. Never commit, push,
+      install or reload plugins.
+      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
+      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+
+  - id: board-export
+    label: Markdown serializer for a board
+    category: quick
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board-export.ts
+      - tests/board-export.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board-export.ts
+        contains: "export function boardToMarkdown("
+      - kind: file
+        path: tests/board-export.test.ts
+        contains: "mermaid"
+    prompt: |
+      TASK: Create hooks/engine/board-export.ts, a pure serializer turning a board into a markdown document, with tests.
+      CONTEXT: Read hooks/engine/board-types.ts (all eight block types after board-contract's additions). The export
+      action (another node) returns this text to the model; the document is what a whiteboard-style review becomes when
+      it leaves the pane. hooks/engine/ is pure: no `$`, no clock. Follow hooks/engine/AGENTS.md and tests/AGENTS.md.
+      DELIVERABLE:
+      (1) hooks/engine/board-export.ts exporting `boardToMarkdown(board: Board): string`:
+          - First line `# <board.title>`; each block then preceded by `<!-- <block id> -->` so an exported document keeps
+            its citation anchors.
+          - section: `## <title>` then the text verbatim. callout: blockquote lines `> **<tone><' — ' + title if set>**:`
+            then `> <text line>` per line. table: a markdown table, `|` inside cells escaped as `\|`. code_peek: a line
+            `` `<path>` (L<start>–L<end>) `` then a fenced code block of its lines, then the note as `*<note>*`. code: a
+            fenced code block with the language as its info string, then the note. trace: a line `` `<node> · <part>` ``
+            then a fenced code block of its lines, then the note.
+          - flow: a fenced ```mermaid block `flowchart LR`: a node line per node — `id["label"]` for process or no kind,
+            `id{"label"}` for decision, `id(["label"])` for terminal — then `from -->|label| to` or `from --> to`. A
+            label's `"` becomes `'`. sequence: a fenced ```mermaid block `sequenceDiagram`: `participant <id> as "label"`
+            per participant, then per step `from->>to: label` for call or no kind, `from-->>to: label` for return,
+            `from-)to: label` for async, and `Note over from,to: label` for note.
+          - Blocks are separated by one blank line; the document ends with a single newline.
+      (2) tests/board-export.test.ts (import test/expect from 'claude-code/testing'): a board holding one of every block
+          type exports its heading, `<!-- b1 -->` anchors, a blockquoted callout, a pipe table with an escaped cell,
+          fenced code_peek and trace lines, and both mermaid blocks; a decision node's label renders `{"…"}`; an empty
+          board exports only its title; a title with a `"` survives.
+      In ## Output give the exported signature and the exact mermaid mappings.
+      SCOPE: Write ONLY hooks/engine/board-export.ts and tests/board-export.test.ts. Read anything. Never commit, push,
+      install or reload plugins.
+      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
+      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+
+  - id: board-host
+    label: Trace resolution, export action, decisions feed and handoff boards
+    category: unspecified-high
+    dependsOn:
+      - board-engine
+      - board-render
+      - result-decisions
+      - board-export
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/board-host.test.ts
+      - tests/control-harness.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        contains: "tracesNeeded"
+      - kind: file
+        path: hooks/register.ts
+        contains: "boardToMarkdown"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, "-p", typescript@5, tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Wire the new board behaviours into hooks/register.ts: resolve trace requests when a board edit arrives, serve
+      the `export` action, feed decision records to the result board, and copy the source session's boards on a handoff
+      acceptance. Tests in tests/board-host.test.ts (extend tests/control-harness.ts only if a knob is missing).
+      CONTEXT: register.ts is the only host-boundary file — read the board section around handleTool 'board' (search
+      `// The board tool`), editBoard, openBoard, drawResultBoard, handoffAction and the boards helpers (boardsPath,
+      saveBoards, loadBoards, `const runs = new Map<string, Run>()` at line ~159, `decisionRecords` at ~799). Engine
+      exports consumed: tracesNeeded, traceKey, TraceRequest, boardToMarkdown (board-export.ts), and the new resultFacts
+      signature (result-board.ts) — read those modules first for exact shapes.
+      DELIVERABLE:
+      (1) In editBoard, before applyEdits: for each `tracesNeeded(board, edits)` request resolve lines and fill a
+          `Map<traceKey, string[]>` passed as `traces`. Resolution: the run is `[...runs.values()].find(candidate =>
+          candidate.sessionId === sessionId && candidate.runId === request.run)`; the node is `run.nodes.find(n =>
+          n.id === request.node)`. Part text: output -> node.output, answer -> node.answer, error -> node.error,
+          verification -> one line per `node.verification?.evidence` entry (`<passed|failed|not_run> <one-line check
+          summary> — <detail>`). A missing run, missing node or empty part leaves the key out of the map (applyEdits then
+          reports `could not read <run>#<node>#<part>`). Lines: split on '\n'; longer than 40 becomes the first 39 plus
+          `… +<N> more lines`.
+      (2) The board action `export`: find the board like `get`, reply `ok({ board_id: board.boardId, markdown:
+          boardToMarkdown(board) })`.
+      (3) drawResultBoard: call resultFacts with `decisionRecords.filter(record => record.runId === run.runId)` so the
+          decisions slot draws.
+      (4) In handoffAction's accept path, after the accepted run persists: `inheritBoards($, handoff.from)` reads
+          `${projectRoot}/${BOARDS_SUBDIR}/${handoff.from}.json`; a missing or unparsable file is a no-op. Every board
+          whose boardId the accepting session does not already hold is appended to `boards` with `sessionId` rewritten
+          to the accepting session (parseBoardFile requires it), then saveBoards. If a copied board's run link names the
+          accepted run, make it the selectedBoardId. Failures are logged with $.ui.log and never fail the accept.
+      (5) tests/board-host.test.ts (extend): an edit inserting a trace returns ok and the persisted board file holds the
+          resolved lines; a trace naming an unknown run/node fails with invalid_board_edit; export returns markdown
+          containing `flowchart LR` for a board with a flow; a settle draws a decisions block when decisionRecords holds
+          rows for the run (seed the records the way the harness exposes, or write the session's decisions file before
+          boot — check how loadRuns/loadBoards-era state is seeded); a handoff acceptance copies the source session's
+          board file into the accepting session's boards (handoff-robustness.test.ts has the session fixtures to copy).
+      In ## Output give the helper names, the trace resolution rules, where inheritBoards runs, and every new test name.
+      SCOPE: Write ONLY hooks/register.ts, tests/board-host.test.ts and tests/control-harness.ts. Read anything. Never
+      commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exit 0 with 0 failing; `bunx -p typescript@5 tsc -p . --noEmit` exit 0.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+
+  - id: board-docs
+    label: Document the new board surface
+    category: writing
+    dependsOn:
+      - board-engine
+      - board-render
+      - result-decisions
+      - board-export
+      - board-host
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "trace"
+      - kind: file
+        path: docs/reference.md
+        contains: "export"
+      - kind: file
+        path: README.md
+        contains: "trace"
+    prompt: |
+      TASK: Update README.md and docs/reference.md for the new board surface.
+      CONTEXT: README.md is Korean user-facing prose; docs/reference.md is the Korean reference. Read the 보드 sections of
+      both (README ~line 83, reference.md `## 보드` ~line 578), the board node's ## Output for exact limits and action
+      shapes, and result-decisions' ## Output for the slot and column labels.
+      DELIVERABLE:
+      - docs/reference.md: the 도구 액션 table gains `export` ({board_id} -> {board_id, markdown}; flow와 sequence는 mermaid
+        블록으로, 블록마다 `<!-- b3 -->` 주석이 붙습니다). The 블록 종류 table gains `code` (`code` 1-4000자, 40줄·줄당 240자,
+        `language?` 20자, `note?` 200자, `title?` 80자 — 파일이 아니라 모델이 쓴 스니펫)과 `trace` (`run`, `node`,
+        `part` (`output`, `answer`, `error`, `verification`), `note?`, `title?` — 줄은 호스트가 이 세션의 런
+        체크포인트에서 읽어 채우고, 40줄을 넘으면 앞의 39줄과 `… +N more lines` 표시를 저장합니다; 코드가 바뀌어도 그때
+        인용한 내용이 남습니다). 결과 보드 단락에 `decisions` 슬롯(해당 런의 판단 기록 표: 종류·대상·선택·결과)을 추가합니다.
+        handoff 단락에 수락 세션이 소스 세션의 보드 전체를 복사해 이어받는다는 한두 문장(소스 파일은 그대로, 이미 있는
+        boardId는 건너뜀, 수락한 런의 결과 보드가 선택됨)을 추가합니다.
+      - README.md: the 보드 단락에 trace 인용과 `export`(markdown)를 한두 문장으로 추가합니다.
+      Match the surrounding tone and terminology (보드, 블록, 인용). Keep the diff minimal elsewhere.
+      In ## Output list the sections changed and the wording added.
+      SCOPE: Write ONLY README.md and docs/reference.md. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: Re-read both files: every limit and action matches the nodes' ## Output reports; the tables still render.
+      STOP WHEN: both files describe the new surface accurately in Korean.
