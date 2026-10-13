@@ -14,7 +14,7 @@ type Row = { nodes: GraphNode[]; boxWidth: number; left: number; centers: Map<st
 // band above the target's row. One lane per target, so a fan-in shares it.
 type Lane = { target: string; sources: { id: string; row: number }[]; start: number; end: number; x: number; hot: boolean }
 
-function perRowFor(area: number): number {
+export function perRowFor(area: number): number {
   return Math.max(1, Math.floor((area + GAP) / (MIN_BOX + GAP)))
 }
 
@@ -191,7 +191,7 @@ function boxes(model: GraphModel, row: Row, prefix: Segment[], prefixWidth: numb
     const head = `${node.icon} ${node.state}${node.activity ? ` ${node.activity}` : ''}`
     const room = inner - width(head) - 1
     const status = node.tail && room >= 4 ? `${head} ${fitTail(node.tail, room)}` : head
-    const title = fit(`${node.selected ? '>' : ' '} [${node.expanded ? '-' : '+'}] ${node.label}`, inner, true)
+    const title = fit(node.bare ? node.label : `${node.selected ? '>' : ' '} [${node.expanded ? '-' : '+'}] ${node.label}`, inner, true)
     const from = fit(node.incoming.length ? `← ${node.incoming.join(', ')}` : model.labels.startNode, inner, true)
     if (!isRelated(focus, node.id)) return [{ text: title, dim: true as const }, { text: fit(status, inner, true), dim: true as const }, { text: from, dim: true as const }]
     return [

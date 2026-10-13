@@ -1,0 +1,202 @@
+import type { CalloutBlock, CalloutTone, CodePeekBlock, SectionBlock, TableBlock } from '../engine/board-types.ts'
+import { ACCENT, clean, fit, fitTail, width, type Line, type Segment } from './text.ts'
+
+// The text blocks of a board (section, callout, table, code_peek) as terminal lines. Every returned line is at most
+// `columns` cells wide and holds no control characters, because block text comes from the model and the files it read.
+
+export type CalloutLabels = Record<CalloutTone, string>
+
+type Style = Omit<Segment, 'text'>
+
+const TONE_COLOR: Record<CalloutTone, string> = { info: ACCENT, decision: 'green', risk: 'red', warning: 'yellow' }
+const CALLOUT_BAR = '▌ '
+const BULLET = '• '
+const TABLE_SEPARATOR = ' │ '
+const TABLE_RULE_JOIN = '─┼─'
+const CODE_SEPARATOR = ' │ '
+const TITLE_SEPARATOR = ' · '
+const TAB = '  '
+// A narrower column shows too little of a cell to tell the rows apart.
+const MIN_CELL = 4
+
+const HEADING = /^#+\s+(.*)$/
+const BULLET_ITEM = /^[-*]\s+(.*)$/
+const NUMBERED_ITEM = /^(\d+[.)])\s+(.*)$/
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const strong = (text: string, style: Style = {}): Segment => ({ text, ...style, bold: true })
+const faint = (text: string): Segment => ({ text, dim: true })
+const at = (sizes: readonly number[], index: number): number => sizes[index] ?? 0
+
+// Breaks at spaces, counting cells, and splits a word wider than `columns` where it overflows.
+export function wrapText(text: string, columns: number): string[] {
+  if (columns <= 0) return []
+  const lines: string[] = []
+  let current = ''
+  for (const word of clean(text).split(/\s+/).filter(Boolean)) {
+    const joined = current ? `${current} ${word}` : word
+    if (width(joined) <= columns) {
+      current = joined
+      continue
+    }
+    if (current) lines.push(current)
+    current = ''
+    for (const { segment } of graphemes.segment(word)) {
+      // A wide glyph in a one-cell column cannot be shown, so it becomes an ellipsis instead of looping forever.
+      const piece = width(segment) > columns ? '…' : segment
+      if (current && width(current + piece) > columns) {
+        lines.push(current)
+        current = ''
+      }
+      current += piece
+    }
+  }
+  if (current) lines.push(current)
+  return lines
+}
+
+// Layouts aim at `columns`; this trims what a very narrow pane leaves over, and strips control characters.
+function clip(line: Line, columns: number): Line {
+  const out: Line = []
+  let used = 0
+  for (const segment of line) {
+    const text = clean(segment.text)
+    if (!text) continue
+    if (used + width(text) <= columns) {
+      out.push({ ...segment, text })
+      used += width(text)
+      continue
+    }
+    const cut = fit(text, columns - used)
+    if (cut) out.push({ ...segment, text: cut })
+    break
+  }
+  return out
+}
+
+function clipAll(lines: Line[], columns: number): Line[] {
+  return columns > 0 ? lines.map(line => clip(line, columns)) : []
+}
+
+function titleLines(title: string, columns: number, style: Style): Line[] {
+  return wrapText(title, columns).map(part => [strong(part, style)])
+}
+
+// Renders each non-blank source line. A run of blank lines becomes one empty line, and none leads or trails.
+function eachLine(text: string, render: (line: string) => Line[]): Line[] {
+  const out: Line[] = []
+  let gap = false
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line) {
+      gap = true
+      continue
+    }
+    const rendered = render(line)
+    if (gap && out.length > 0 && rendered.length > 0) out.push([])
+    gap = false
+    out.push(...rendered)
+  }
+  return out
+}
+
+// The marker leads the first line and the wrapped lines sit under the text, not under the marker.
+function hanging(marker: string, text: string, columns: number): Line[] {
+  const indent = ' '.repeat(width(marker))
+  return wrapText(text, Math.max(1, columns - width(marker))).map((part, index) => [{ text: index === 0 ? marker : indent }, { text: part }])
+}
+
+function markdownLines(line: string, columns: number): Line[] {
+  const heading = HEADING.exec(line)
+  if (heading) return wrapText(heading[1] ?? '', columns).map(part => [strong(part)])
+  const bullet = BULLET_ITEM.exec(line)
+  if (bullet) return hanging(BULLET, bullet[1] ?? '', columns)
+  const numbered = NUMBERED_ITEM.exec(line)
+  if (numbered) return hanging(`${numbered[1]} `, numbered[2] ?? '', columns)
+  return wrapText(line, columns).map(part => [{ text: part }])
+}
+
+export function sectionLines(block: SectionBlock, columns: number): Line[] {
+  const title = titleLines(block.title, columns, { color: ACCENT })
+  return clipAll([...title, ...eachLine(block.text ?? '', line => markdownLines(line, columns))], columns)
+}
+
+export function calloutLines(block: CalloutBlock, columns: number, labels: CalloutLabels): Line[] {
+  const color = TONE_COLOR[block.tone]
+  const inner = Math.max(1, columns - width(CALLOUT_BAR))
+  const label = strong(fit(labels[block.tone], inner), { color })
+  const parts = wrapText(block.title ?? '', inner)
+  const [first] = parts
+  // The title shares the label's line when it fits there, so a titled callout costs no extra row.
+  const sameLine = first !== undefined && parts.length === 1 && width(label.text) + 1 + width(first) <= inner
+  const head: Line[] = sameLine ? [[label, { text: ' ' }, strong(first)]] : [[label], ...parts.map(part => [strong(part)])]
+  const body = eachLine(block.text, line => wrapText(line, inner).map(part => [{ text: part }]))
+  return clipAll([...head, ...body].map(line => [{ text: CALLOUT_BAR, color }, ...line]), columns)
+}
+
+// Settles `sizes` on `budget` cells: add to the column furthest below its natural width, or take from the widest one.
+function settle(sizes: number[], natural: readonly number[], budget: number): void {
+  let sum = sizes.reduce((cells, size) => cells + size, 0)
+  while (sum !== budget) {
+    const grow = sum < budget
+    let best = -1
+    let top = 0
+    sizes.forEach((size, index) => {
+      const score = grow ? at(natural, index) - size : size - MIN_CELL
+      if (score > top) {
+        best = index
+        top = score
+      }
+    })
+    if (best < 0) return
+    const step = grow ? 1 : -1
+    sizes[best] = at(sizes, best) + step
+    sum += step
+  }
+}
+
+function columnWidths(natural: readonly number[], columns: number): number[] {
+  const budget = columns - width(TABLE_SEPARATOR) * (natural.length - 1)
+  const total = natural.reduce((cells, size) => cells + size, 0)
+  if (total <= budget) return [...natural]
+  // A proportional share, but never under MIN_CELL and never over the widest cell. Flooring loses cells and the
+  // MIN_CELL clamp adds some, so settle() corrects the sum.
+  const sizes = natural.map(size => Math.min(size, Math.max(MIN_CELL, Math.floor(size * budget / total))))
+  settle(sizes, natural, budget)
+  return sizes
+}
+
+function rowLine(cells: readonly string[], sizes: readonly number[], style: Style): Line {
+  const line: Line = []
+  sizes.forEach((size, index) => {
+    if (index > 0) line.push(faint(TABLE_SEPARATOR))
+    line.push({ text: fit(cells[index] ?? '', size, index < sizes.length - 1), ...style })
+  })
+  return line
+}
+
+export function tableLines(block: TableBlock, columns: number): Line[] {
+  const title = titleLines(block.title ?? '', columns, {})
+  if (block.columns.length === 0) return clipAll(title, columns)
+  const rows = block.rows.map(row => block.columns.map((_, index) => row[index] ?? ''))
+  const natural = block.columns.map((_, index) => Math.max(width(block.columns[index] ?? ''), ...rows.map(row => width(row[index] ?? ''))))
+  const sizes = columnWidths(natural, columns)
+  const rule = faint(sizes.map(size => '─'.repeat(size)).join(TABLE_RULE_JOIN))
+  return clipAll([...title, rowLine(block.columns, sizes, { bold: true }), [rule], ...rows.map(row => rowLine(row, sizes, {}))], columns)
+}
+
+export function codePeekLines(block: CodePeekBlock, columns: number): Line[] {
+  // The tail of a long path stays, so the line range after it is never the part that is cut.
+  const range = fitTail(`${block.path}:${block.start}-${block.end}`, columns)
+  const room = columns - width(range)
+  const title: Line = block.title && room > width(TITLE_SEPARATOR) ? [{ text: fit(`${TITLE_SEPARATOR}${block.title}`, room) }] : []
+  const gutter = width(String(block.start + block.lines.length - 1))
+  const textColumns = columns - gutter - width(CODE_SEPARATOR)
+  const body = block.lines.map((text, index): Line => [
+    faint(String(block.start + index).padStart(gutter)),
+    faint(CODE_SEPARATOR),
+    { text: fit(text.replace(/\t/g, TAB), textColumns) },
+  ])
+  const note = wrapText(block.note ?? '', columns).map((part): Line => [faint(part)])
+  return clipAll([[strong(range), ...title], ...body, ...note], columns)
+}

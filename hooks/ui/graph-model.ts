@@ -14,6 +14,8 @@ export type GraphNode = {
   /** Badge while the node's worker waits for a permission answer; the graph and lanes show it as `activity`. */
   waiting?: string
   incoming: string[]
+  /** Board flow boxes set this: the title line is the bare label, without the selection and fold markers the DAG pane draws. */
+  bare?: true
   selected: boolean
   expanded: boolean
   startedAt: number | null
