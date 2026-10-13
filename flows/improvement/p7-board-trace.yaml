@@ -29,7 +29,10 @@
 # project tsc could fail on a sibling's half-written file. Each worker still runs the suite itself; board-host and
 # review-spec run it on the whole result.
 # Expected lint warnings: "one producer owns 3 files" on board-engine and board-render; each is one slice.
-key: improve-p7-board-trace-1
+# Note on the type union: board-contract widens Block/BlockInput, so the whole project cannot typecheck until both
+# board.ts (board-engine) and board-model.ts (board-render) handle the new members. No node before board-host gets a
+# whole-project tsc check; the suite stays green throughout because it exercises behaviour, not types.
+key: improve-p7-board-trace-2
 name: Board P4 - trace and code blocks, decisions slot, export, handoff boards
 goal: >
   The board tool gains `code` (a snippet the model proposes, validated but never file-read) and `trace` (a quote of a
@@ -84,8 +87,6 @@ nodes:
       - kind: file
         path: hooks/engine/board-types.ts
         contains: "export type CodeBlock ="
-      - kind: command
-        argv: [bunx, "-p", typescript@5, tsc, "-p", ".", "--noEmit"]
     prompt: |
       TASK: Extend hooks/engine/board-types.ts with the code and trace block types every other node imports.
       CONTEXT: hooks/engine/board-types.ts defines the six current block types, BlockInput and BoardEdit; the code style
@@ -103,8 +104,12 @@ nodes:
       comments above CodePeekInput/BlockInput so both host-filled kinds are named. Do not touch RunLink, Board or BoardFile.
       In ## Output give the added type names.
       SCOPE: Write ONLY hooks/engine/board-types.ts. Other nodes own every other file. Never commit, push, install or reload plugins.
-      VERIFY: Run `bunx -p typescript@5 tsc -p . --noEmit`: exit code 0.
-      STOP WHEN: the file holds the additions above and the typecheck exits 0.
+      VERIFY: Re-read the file and check it holds the additions above. Sanity-check it alone:
+      `bunx tsc --strict --noEmit hooks/engine/board-types.ts` exits 0 (the file has no imports). Do NOT typecheck the
+      whole project: widening the unions breaks board.ts and board-model.ts on purpose until the wave-2 lanes land
+      their consumers, and those files belong to other nodes. If the types are already present from an earlier
+      attempt, confirm the content and finish.
+      STOP WHEN: the file holds the additions above and the single-file typecheck exits 0.
 
   - id: board-engine
     label: Code/trace validation, tracesNeeded and the tool spec
@@ -178,9 +183,11 @@ nodes:
       SCOPE: Write ONLY hooks/engine/board.ts, hooks/engine/board-spec.ts and tests/board-engine.test.ts. Read anything.
       hooks/engine/board-types.ts belongs to board-contract: if a type you need is missing, end with
       `DAG_NODE_STATUS: failed: missing-input: <type>` instead of editing it. Never commit, push, install or reload plugins.
-      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
-      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
-      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+      VERIFY: Run `command claude plugin test .` (the `command` prefix bypasses a shell alias): exit 0 and 0 failing
+      tests. Do NOT typecheck the whole project: the widened unions make board.ts or board-model.ts fail tsc until the
+      sibling wave-2 lanes land their consumers, and board-host runs the project-wide typecheck at the end. If a suite
+      failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: the suite exits 0 and every behaviour above has a test.
 
   - id: board-render
     label: Terminal renderers for code and trace
@@ -231,9 +238,11 @@ nodes:
       In ## Output give the exported signatures and the added BoardStrings key.
       SCOPE: Write ONLY hooks/ui/board-blocks.ts, hooks/ui/board-model.ts and tests/board-blocks.test.ts. Read anything.
       Never commit, push, install or reload plugins.
-      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
-      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
-      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+      VERIFY: Run `command claude plugin test .` (the `command` prefix bypasses a shell alias): exit 0 and 0 failing
+      tests. Do NOT typecheck the whole project: the widened unions make board.ts or board-model.ts fail tsc until the
+      sibling wave-2 lanes land their consumers, and board-host runs the project-wide typecheck at the end. If a suite
+      failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: the suite exits 0 and every behaviour above has a test.
 
   - id: result-decisions
     label: Decisions slot on the result board
@@ -279,9 +288,11 @@ nodes:
       board-docs consume this.
       SCOPE: Write ONLY hooks/ui/result-board.ts and tests/result-board.test.ts. Read anything. Never commit, push,
       install or reload plugins.
-      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
-      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
-      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+      VERIFY: Run `command claude plugin test .` (the `command` prefix bypasses a shell alias): exit 0 and 0 failing
+      tests. Do NOT typecheck the whole project: the widened unions make board.ts or board-model.ts fail tsc until the
+      sibling wave-2 lanes land their consumers, and board-host runs the project-wide typecheck at the end. If a suite
+      failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: the suite exits 0 and every behaviour above has a test.
 
   - id: board-export
     label: Markdown serializer for a board
@@ -328,9 +339,11 @@ nodes:
       In ## Output give the exported signature and the exact mermaid mappings.
       SCOPE: Write ONLY hooks/engine/board-export.ts and tests/board-export.test.ts. Read anything. Never commit, push,
       install or reload plugins.
-      VERIFY: Run `command claude plugin test .`: exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`:
-      exit 0. Sibling lanes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
-      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+      VERIFY: Run `command claude plugin test .` (the `command` prefix bypasses a shell alias): exit 0 and 0 failing
+      tests. Do NOT typecheck the whole project: the widened unions make board.ts or board-model.ts fail tsc until the
+      sibling wave-2 lanes land their consumers, and board-host runs the project-wide typecheck at the end. If a suite
+      failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: the suite exits 0 and every behaviour above has a test.
 
   - id: board-host
     label: Trace resolution, export action, decisions feed and handoff boards
