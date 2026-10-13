@@ -45,8 +45,9 @@ function seed(h: Harness, scope: 'project' | 'global' = 'project', projectRoot =
     id: SKILL, description: 'Writing asynchronous tests', body: 'Subscribe first.', scope,
     reason: 'Prior user correction', evidence: ['seed'], replaces: [],
   }], { events, sessionId: 'seed', projectRoot, now: 1 })
-  h.files.set(`${ROOT}/library.json`, JSON.stringify(seeded))
-  const skill = seeded.skills[0]
+  if (!seeded.ok) throw new Error(seeded.error.message)
+  h.files.set(`${ROOT}/library.json`, JSON.stringify(seeded.value))
+  const skill = seeded.value.skills[0]
   if (!skill) throw new Error('Missing seeded skill')
   h.files.set(PATH, renderLearnedSkill(skill))
 }
@@ -439,7 +440,7 @@ test('a restart completes a pending publication before exposing the skill', asyn
   expect(block ? JSON.parse(block).skills[0].path : undefined).toBe(PATH)
 })
 
-test('publication recovery preserves a manual edit made after the failed write', async ($, on) => {
+test('publication recovery preserves a manual edit and still finishes so later learning is not blocked', async ($, on) => {
   const h = harness(on, { home: HOME })
   await boot($, 'off')
   await ask($)
@@ -452,7 +453,56 @@ test('publication recovery preserves a manual edit made after the failed write',
   h.files.set(PATH, 'Manual edit after interrupted publication')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   expect(h.files.get(PATH)).toBe('Manual edit after interrupted publication')
-  expect(h.files.has(`${ROOT}/pending.json`)).toBe(true)
+  expect(h.files.has(`${ROOT}/pending.json`)).toBe(false)
+  expect(library(h).skills[0]?.id).toBe(SKILL)
+  await ask($)
+  expect(library(h).skills[0]?.opportunities).toBe(1)
+})
+
+test('a failed learning batch waits for new tool calls instead of respawning at every turn boundary', { options: { learning_interval: 1 } }, async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  const read = { tool: 'Read', file_path: '/work/test.ts', agentId: 'ordinary-worker' } as const
+  await $.tool.call(read)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  await complete($, 'not proposal json', batch.agentId)
+  await complete($, 'Worker finished.', 'ordinary-worker')
+  expect(h.spawns.length).toBe(1)
+  expect(session(h).learnedThrough).toBe(0)
+  await $.tool.call(read)
+  await complete($, 'Worker finished again.', 'ordinary-worker')
+  expect(h.spawns.length).toBe(2)
+})
+
+test('a proposal that masking pushes past its length limit keeps its evidence instead of reporting success', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  const description = `${'Use signals. '.repeat(37)}token=abc`
+  expect(description.length).toBeLessThanOrEqual(500)
+  await complete($, JSON.stringify({ skills: [proposal(h, { description })] }), batch.agentId)
+  expect(h.files.has(PATH)).toBe(false)
+  expect(session(h).learnedThrough).toBe(0)
+  expect(h.logs.some(line => line.includes('saved 1 skill proposal'))).toBe(false)
+})
+
+test('learning status shows only this project\'s skills and leaves bodies in their files', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  seed(h, 'project', '/elsewhere')
+  await boot($, 'off')
+  const status = await $.command.run({ command: 'dag', args: 'learning', origin: { kind: 'plugin', name: 'test' }, presentation: { isFullscreen: false, columns: 80 } })
+  const shown = JSON.parse(status.text ?? '{}')
+  expect(shown.skills).toEqual([])
+  seed(h, 'global', '/elsewhere')
+  const global = JSON.parse((await command($, 'learning')).text ?? '{}')
+  expect(global.skills.map((skill: { id: string }) => skill.id)).toEqual([SKILL])
+  expect(global.skills[0].body).toBeUndefined()
 })
 
 test('retention removes old inactive evidence and archives but protects current sessions and running batches', async ($, on) => {

@@ -288,7 +288,9 @@ async function publishLearningTransaction($: EngineInterface, transaction: Learn
     return previous?.revision !== skill.revision || previous.archived !== skill.archived
   })
   // Validate every destination before publishing the first file. Recovery accepts only the exact before/after text,
-  // so a failed index write is distinguishable from an unmanaged file or a person's later edit.
+  // so a failed index write is distinguishable from an unmanaged file or a person's later edit. Recovery skips such a
+  // skill rather than stopping: a pending.json that never clears would fail every later update in every session.
+  const preserved = new Set<string>()
   for (const skill of changed) {
     const previous = transaction.before.skills.find(item => item.id === skill.id)
     const active = `${learnedSkillsDir}/${skill.id}/SKILL.md`
@@ -300,13 +302,16 @@ async function publishLearningTransaction($: EngineInterface, transaction: Learn
       const beforeText = path === active && previous ? renderLearnedSkill(previous) : undefined
       const afterText = recovering ? renderLearnedSkill(skill) : undefined
       if (stat.isLink || stat.kind !== 'file' || (text !== beforeText && text !== afterText)) {
-        throw new Error(`Preserving an unmanaged or manually changed skill: ${path}`)
+        if (!recovering) throw new Error(`Preserving an unmanaged or manually changed skill: ${path}`)
+        preserved.add(skill.id)
+        $.ui.log(`Preserving a manually changed skill while finishing a learning publication: ${path}`)
       }
     }
   }
   const pending = `${learningRoot}/pending.json`
   if (!recovering) await learningWrite($, pending, JSON.stringify(transaction) + '\n')
   for (const skill of changed) {
+    if (preserved.has(skill.id)) continue
     const path = `${learnedSkillsDir}/${skill.id}/SKILL.md`
     if (skill.archived) {
       if (await $.fs.exists(path)) {
@@ -476,15 +481,19 @@ async function finishLearning($: EngineInterface, end: AgentEnd): Promise<void> 
           }
         }
       }
-      return applyLearningProposals(library, parsed.value, { events: batch.events, sessionId, projectRoot, now })
+      const applied = applyLearningProposals(library, parsed.value, { events: batch.events, sessionId, projectRoot, now })
+      if (!applied.ok) throw new Error(`${applied.error.message} Retained evidence for relearning.`)
+      return applied.value
     })
-    learningSession = {
-      ...learningSession, learnedThrough: batch.through,
-      toolsSinceLearn: learningSession.events.filter(event => event.kind === 'tool' && Number(event.id.split(':').at(-1)) > batch.through).length,
-    }
+    learningSession = { ...learningSession, learnedThrough: batch.through }
     $.ui.log(`Session learning saved ${parsed.value.length} skill proposal(s).`)
   } finally {
-    learningSession = { ...learningSession, batch: undefined }
+    // A failed batch keeps its evidence, but only tool calls made after it count toward the next automatic batch;
+    // otherwise a persistent failure spawns a learner at every turn boundary until the daily limit.
+    learningSession = {
+      ...learningSession, batch: undefined,
+      toolsSinceLearn: learningSession.events.filter(event => event.kind === 'tool' && Number(event.id.split(':').at(-1)) > batch.through).length,
+    }
     await saveLearningSession($)
   }
   if (learningTurnRequested && !mainTurnBusy) {
@@ -2527,7 +2536,11 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
       await pruneLearningData($)
     } else if (action !== 'status') return { text: 'Usage: /dag learning [status|on|off|prune]' }
     learningLibrary = await readLearningLibrary($)
-    return { text: JSON.stringify({ enabled: learningEnabled, running: learningSession.batch?.agentId, pendingEvents: learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough).length, root: learningRoot, usage: learningLibrary.usage, maxDailyRuns: learningDailyLimit, maxInputChars: learningMaxInputChars, retentionDays: learningRetentionDays, skills: learningLibrary.skills }, null, 2) }
+    // The model can run status too, so it lists only skills this project may use and leaves bodies in their SKILL.md.
+    const skills = learningLibrary.skills
+      .filter(skill => skill.scope === 'global' || skill.projectRoot === projectRoot)
+      .map(({ body, ...skill }) => skill)
+    return { text: JSON.stringify({ enabled: learningEnabled, running: learningSession.batch?.agentId, pendingEvents: learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough).length, root: learningRoot, usage: learningLibrary.usage, maxDailyRuns: learningDailyLimit, maxInputChars: learningMaxInputChars, retentionDays: learningRetentionDays, skills }, null, 2) }
   }
   if (verb === 'inspect') {
     const choice = rest[0]

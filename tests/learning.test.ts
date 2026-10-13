@@ -124,14 +124,14 @@ test('proposal batches reject duplicate ids and proposed replacement targets', (
 
 test('apply creates deterministic revision and history without mutating input', () => {
   const input = emptyLibrary()
-  const result = applyLearningProposals(input, [proposal()], context)
+  const result = value(applyLearningProposals(input, [proposal()], context))
   const learned = result.skills[0]
   expect(learned?.projectRoot).toBe(root)
   expect(learned?.history).toEqual([{ sessionId: 's', at: 10, reason: proposal().reason, evidence: ['e1', 'e2'] }])
   expect(learned?.createdAt).toBe(10)
   if (!learned) throw new Error('Expected learned skill')
   expect(learned.revision).toBe(hash(JSON.stringify([renderLearnedSkill(learned), 'project', root])))
-  expect(applyLearningProposals(input, [proposal()], context)).toEqual(result)
+  expect(value(applyLearningProposals(input, [proposal()], context))).toEqual(result)
   expect(input.skills).toEqual([])
 })
 
@@ -140,7 +140,7 @@ test('apply updates content and caps history while preserving origin and use cou
     scope: 'global', projectRoot: '/origin', opportunities: 3, uses: 2, lastUsedAt: 5,
     history: Array.from({ length: 20 }, (_, i) => ({ sessionId: `s${i}`, at: i, reason: 'Correction', evidence: [`e${i}`] })),
   })
-  const result = applyLearningProposals(library(previous), [proposal({ scope: 'global' })], context).skills[0]
+  const result = value(applyLearningProposals(library(previous), [proposal({ scope: 'global' })], context)).skills[0]
   expect(result?.history.length).toBe(20)
   expect(result?.history[0]?.sessionId).toBe('s1')
   expect(result?.history[19]?.evidence).toEqual(['e1', 'e2'])
@@ -153,7 +153,7 @@ test('apply updates content and caps history while preserving origin and use cou
 
 test('apply archives merged skills instead of deleting them', () => {
   const previous = skill()
-  const result = applyLearningProposals(library(previous), [proposal({ id: 'dag-learned-merged', replaces: [previous.id] })], context)
+  const result = value(applyLearningProposals(library(previous), [proposal({ id: 'dag-learned-merged', replaces: [previous.id] })], context))
   expect(result.skills.length).toBe(2)
   expect(result.skills[0]?.archived).toBe(true)
   expect(result.skills[0]?.history).toEqual(previous.history)
@@ -166,8 +166,8 @@ test('apply atomically rejects foreign evidence ownership changes and invalid ba
   for (const proposals of [
     [proposal({ scope: 'global' })], [proposal({ id: 'dag-learned-foreign' })],
     [proposal(), proposal()], [proposal({ replaces: ['dag-learned-foreign'] })],
-  ]) expect(applyLearningProposals(input, proposals, context)).toEqual(input)
-  expect(applyLearningProposals(input, [proposal()], { ...context, sessionId: 'other' })).toEqual(input)
+  ]) expect(applyLearningProposals(input, proposals, context).ok).toBe(false)
+  expect(applyLearningProposals(input, [proposal()], { ...context, sessionId: 'other' }).ok).toBe(false)
 })
 
 test('eligibility and catalog isolate projects archives and unmanaged skills', () => {
@@ -409,7 +409,7 @@ test('usage reservation counts attempts and resets exactly at UTC day boundary',
   expect(recordSkillOpportunity(first, root, 20).usage).toEqual(first.usage)
   expect(recordSkillUse(first, skill().id, root, 20).usage).toEqual(first.usage)
   expect(archiveUnusedSkills(first, { projectRoot: root, minOpportunities: 1, maxSkills: 1, now: 20 }).usage).toEqual(first.usage)
-  expect(applyLearningProposals(first, [proposal()], context).usage).toEqual(first.usage)
+  expect(value(applyLearningProposals(first, [proposal()], context)).usage).toEqual(first.usage)
 })
 
 test('learning transaction strictly round trips both library indexes without filepaths', () => {

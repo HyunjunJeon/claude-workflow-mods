@@ -104,7 +104,7 @@ DAG로 실행하면 진행 알림이 나오고, 실행이 끝나면 노드별 �
 
 ```text
 /dag learn                  아직 학습하지 않은 세션 경험을 지금 학습
-/dag learning               학습 상태·스킬·변경 근거 확인
+/dag learning               학습 상태, 이 프로젝트에서 쓰는 스킬과 변경 근거 확인
 /dag learning off           현재 세션의 학습 끄기
 /dag learning on            현재 세션의 학습 켜기
 ```

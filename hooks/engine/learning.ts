@@ -275,10 +275,11 @@ export function renderLearnedSkill(skill: LearnedSkill): string {
 export function applyLearningProposals(
   library: LearningLibrary, proposals: readonly LearningProposal[],
   context: { events: readonly LearningEvent[]; sessionId: string; projectRoot: string; now: number },
-): LearningLibrary {
+): Result<LearningLibrary> {
   const events = context.events.filter(event => event.sessionId === context.sessionId && event.projectRoot === context.projectRoot)
+  // The re-check sees masked text, which can outgrow a limit the raw answer met, so the caller must see the failure.
   const checked = parseLearningProposals(JSON.stringify({ skills: proposals }), events, library.skills)
-  if (!checked.ok) return library
+  if (!checked.ok) return checked
   const skills = library.skills.map(skill => ({ ...skill, history: [...skill.history] }))
   for (const proposal of checked.value) {
     const index = skills.findIndex(skill => skill.id === proposal.id)
@@ -299,8 +300,8 @@ export function applyLearningProposals(
     else skills[index] = learned
   }
   const replaced = new Set(checked.value.flatMap(proposal => proposal.replaces))
-  return { ...library, skills: skills.map(skill => replaced.has(skill.id)
-    ? { ...skill, archived: true, updatedAt: context.now } : skill) }
+  return { ok: true, value: { ...library, skills: skills.map(skill => replaced.has(skill.id)
+    ? { ...skill, archived: true, updatedAt: context.now } : skill) } }
 }
 
 export function learningCatalog(library: LearningLibrary, projectRoot: string, skillsDir: string): string {
