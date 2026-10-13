@@ -11,7 +11,7 @@ The model never invokes it on its own.
 The user is the product owner, so the questions ask what and why, never how.
 
 This skill runs under strict enforcement.
-The main conversation may use AskUserQuestion, Read, LSP, read-only Bash and the dag tool.
+The main conversation may use AskUserQuestion, Read, LSP, read-only Bash, the dag tool and the `mcp__dag-workflow__board` tool, which draws the interview (see `## The board`).
 It may NEVER use Agent, Write, Edit or mutating Bash.
 If a fact about the existing product or code matters, find it by reading.
 Do not ask the user for facts you can read.
@@ -39,22 +39,51 @@ Give each question exactly one of three classes:
 Keep three running lists while you interview.
 They hold the decided product decisions, the deferred technical decisions and the open items.
 Record each deferred technical decision under "Deferred to development".
+The board shows these lists to the user.
 
 Offer a "Decide later" option on every product question.
 Treat that choice as an unknown and add it to the open items.
 Never present an unknown as a confirmed requirement.
 
+## The board
+
+The board keeps the three lists on screen, so do not reprint them in chat.
+The tool may be deferred.
+Load it with ToolSearch `select:mcp__dag-workflow__board` before the first call.
+
+Before the first round:
+
+- `create` a board titled `PRD: <idea>`, in the user's language, at most 80 characters.
+- `insert` one `table` per list: `Product decisions`, `Deferred to development` and `Open items`.
+- Give each table the columns `Item` and `Source`, where Source is `user` or the question number, such as `Q3`.
+- Call `open` once.
+
+After every round, send ONE `edit` that `replace`s the tables that changed, with their whole new rows.
+In chat, say in one line which blocks changed, such as "Updated b2 and b3 (Q1-Q4)", instead of reprinting the lists.
+Call `get` when you do not know a block id.
+
+Keep within the limits: cells of at most 80 characters and at most 30 rows per table.
+Shorten a long item to its decision, and split a longer list into a second table with the same columns.
+
+FALLBACK: if the tool is unavailable, an edit is refused twice, or `open` replies `shown: false`, stop using the board.
+Keep the lists in chat as before, and show them again in `## Confirm before writing`.
+
 ## Confirm before writing
 
-When no product question is left, show these three lists:
+When no product question is left, the board holds these three lists:
 
 - Decided product decisions.
 - Deferred technical decisions.
 - Open items.
 
-Add a one-sentence product goal.
-Confirm the lists and the goal with one AskUserQuestion.
-If the user corrects an item, update the lists and confirm again.
+Write a one-sentence product goal.
+`insert` it as a `section` titled `Product goal`, with the sentence as its text.
+Then `get` the board and check that every item, its source and the goal match the conversation.
+Fix a mismatch with one edit.
+The board shows the lists, and AskUserQuestion confirms them.
+Point to the board in the question, then confirm the lists and the goal with one AskUserQuestion.
+On the fallback, show the lists and the goal in chat instead.
+If the user corrects an item, update the lists (on the board, with one edit) and confirm again.
 Write nothing before the user confirms.
 
 ## Writing the PRD

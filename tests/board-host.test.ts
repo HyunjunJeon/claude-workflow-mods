@@ -1,7 +1,7 @@
 import { expect, test, type Engine, type Mounted } from 'claude-code/testing'
 import type { EventOf, On } from 'claude-code'
 import { parseBoardFile } from '../hooks/engine/board.ts'
-import { boot, command, harness, ROOT } from './control-harness.ts'
+import { boot, command, finish, harness, ROOT, start } from './control-harness.ts'
 
 const BOARD_TOOL = 'mcp__dag-workflow__board'
 // The harness session id is 'source', so this session's boards live in source.json.
@@ -173,6 +173,56 @@ test('open shows the board in the Board section without taking the keyboard, and
   await ui.press({ key: 'board:prev' })
   await ui.press({ key: 'board:prev' })
   expect(await ui.find({ type: 'Text', text: 'Result (3/3)', in: 'inspector' })).toBeDefined()
+  await ui.unmount()
+})
+
+const RUN = { key: 'solo', name: 'Solo', nodes: [{ id: 'a', prompt: 'Write a', dependsOn: [], verify: [{ kind: 'command', argv: ['check-control'] }] }] }
+const KEEP_HINT = 'A run is active, so the /dag pane stays on the DAG; tell the user to press b to see the board.'
+
+test('open while a run of the session is running keeps the pane on the DAG, toasts and tells the model to point at b', async ($, on) => {
+  const h = opening(on)
+  await boot($)
+  await start($, RUN)
+  const first = await create($, 'Interview')
+  await create($, 'Plan')
+  const opened = await board($, { action: 'open', board_id: first })
+  expect(opened.value).toEqual({ board_id: first, shown: true, section: 'dag', hint: KEEP_HINT })
+  expect(h.opened.at(-1)).toEqual({ id: 'dag', title: 'DAG' })
+  expect(h.toasts.map(toast => toast.text)).toEqual(['Board updated: Interview · press b in the /dag pane'])
+
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  expect(await ui.find({ type: 'Button', key: 'section-dag' })).toMatchObject({ props: { label: '> DAG' } })
+  expect(await ui.find({ type: 'Button', key: 'section-board' })).toMatchObject({ props: { label: 'Board' } })
+  // Pressing b lands on the board the open named, not on the one created last.
+  await ui.press({ key: 'section-board' })
+  expect(await ui.find({ type: 'Text', text: 'Interview (1/2)', in: 'inspector' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('open while a run waits for approval keeps the pane on the DAG', { options: { start_approval: 'always' } }, async ($, on) => {
+  const h = opening(on)
+  await boot($)
+  await start($, RUN)
+  const boardId = await create($, 'Plan')
+  const opened = await board($, { action: 'open', board_id: boardId })
+  expect(opened.value).toMatchObject({ board_id: boardId, shown: true, section: 'dag' })
+  expect(h.toasts.map(toast => toast.text)).toContain('Board updated: Plan · press b in the /dag pane')
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  expect(await ui.find({ type: 'Button', key: 'section-dag' })).toMatchObject({ props: { label: '> DAG' } })
+  await ui.unmount()
+})
+
+test('open after the session\'s run settled switches to the Board section and does not toast', async ($, on) => {
+  const h = opening(on)
+  await boot($)
+  await start($, RUN)
+  await finish($, h)
+  const boardId = await create($, 'Interview')
+  const opened = await board($, { action: 'open', board_id: boardId })
+  expect(opened.value).toEqual({ board_id: boardId, shown: true })
+  expect(h.toasts.map(toast => toast.text)).not.toContain('Board updated: Interview · press b in the /dag pane')
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  expect(await ui.find({ type: 'Button', key: 'section-board' })).toMatchObject({ props: { label: '> Board' } })
   await ui.unmount()
 })
 

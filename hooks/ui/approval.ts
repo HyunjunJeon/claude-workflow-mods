@@ -13,8 +13,9 @@ const ATTENTION = 'yellow'
 
 // The compact block under the pane's approval line: the counts, one line per wave, anything that clashes or went
 // unchecked, the lint result and the routing note once. Every line is fitted to the pane, so a long warning ends in an
-// ellipsis instead of wrapping.
-export function approvalPreview(preview: Preview, columns: number, t: Strings): Line[] {
+// ellipsis instead of wrapping. A session that has a plan board passes its title, and the block ends with a line that
+// points at the Board section.
+export function approvalPreview(preview: Preview, columns: number, t: Strings, boardTitle?: string): Line[] {
   const row = (text: string, style: Omit<Segment, 'text'> = {}): Line => [{ text: fit(text, columns), ...style }]
   const attention = { color: ATTENTION }
   const lines: Line[] = [
@@ -29,5 +30,6 @@ export function approvalPreview(preview: Preview, columns: number, t: Strings): 
   else if (preview.warnings.length <= LINT_LISTED) lines.push(...preview.warnings.map(warning => row(t.previewLint(warning), attention)))
   else lines.push(row(t.previewLintMany(preview.warnings.length, first), attention))
   lines.push(row(t.previewRouting, { dim: true }))
+  if (boardTitle !== undefined) lines.push(row(t.previewBoard(boardTitle)))
   return lines
 }

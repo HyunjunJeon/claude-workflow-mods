@@ -410,6 +410,56 @@ test('the approval preview model speaks Korean for its labels and keeps ids, cat
   expect(lines[4]).toMatch(/^lint 경고 5건, 첫째: node "a": /)
 })
 
+test('the approval preview model ends with the plan board line when it is given a board title, in either language', () => {
+  const plainBlock = plain(approvalPreview(previewOf(CLEAN), 100, t))
+  expect(plain(approvalPreview(previewOf(CLEAN), 100, t, 'Interview'))).toEqual([...plainBlock, 'Plan board: Interview · press b to view'])
+  expect(plain(approvalPreview(previewOf(CLEAN), 100, stringsFor('ko'), '인터뷰')).at(-1)).toBe('계획 보드: 인터뷰 · b로 보기')
+  const narrow = approvalPreview(previewOf(CLEAN), 20, t, 'Interview').at(-1)?.map(segment => segment.text).join('') ?? ''
+  expect(width(narrow)).toBeLessThanOrEqual(20)
+  expect(narrow.endsWith('…')).toBe(true)
+})
+
+const BOARD_TOOL = 'mcp__dag-workflow__board'
+
+async function boardCall($: Engine, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const reply = await $.tool.call({ tool: BOARD_TOOL, ...input })
+  if (typeof reply.result !== 'string') throw new Error('Expected a board JSON result')
+  return JSON.parse(reply.result)
+}
+
+async function createBoard($: Engine, title: string): Promise<string> {
+  const created = await boardCall($, { action: 'create', title })
+  if (typeof created.board_id !== 'string') throw new Error(JSON.stringify(created))
+  return created.board_id
+}
+
+test('the pane approval block names the board the session updated last, not the one it created last', ALWAYS, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const interview = await createBoard($, 'Interview')
+  await h.clock.set(5_000)
+  await createBoard($, 'Plan')
+  await h.clock.set(9_000)
+  await boardCall($, { action: 'edit', board_id: interview, edits: [{ op: 'insert', block: { type: 'section', title: 'Goal', text: 'Ship it.' } }] })
+  await modelStart($)
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  const texts = await paneTexts(ui)
+  expect(texts.filter(text => text.startsWith('Plan board:'))).toEqual(['Plan board: Interview · press b to view'])
+  expect(texts.indexOf('Plan board: Interview · press b to view')).toBeGreaterThan(texts.indexOf(t.approvalWaiting))
+  await ui.unmount()
+})
+
+test('the pane approval block has no plan board line when the session has no board', ALWAYS, async ($, on) => {
+  harness(on)
+  await boot($)
+  await modelStart($)
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  const texts = await paneTexts(ui)
+  expect(texts).toContain(t.previewRouting)
+  expect(texts.some(text => text.startsWith('Plan board:'))).toBe(false)
+  await ui.unmount()
+})
+
 test('the pane approval block shows the preview of a held run: waves with models, write conflicts and lint warnings', ALWAYS, async ($, on) => {
   harness(on)
   await boot($)

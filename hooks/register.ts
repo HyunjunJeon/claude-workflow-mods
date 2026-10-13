@@ -2201,17 +2201,27 @@ async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): 
 }
 
 // The pane opens as for a run the model starts: without the keyboard, and not over the person's own close. The reply
-// says when the board is not on screen, so the model does not point the person at a pane they cannot see.
+// says when the board is not on screen, so the model does not point the person at a pane they cannot see. While a run of
+// this session has not settled the pane stays on the DAG, which is what the person is watching, and a toast says the
+// board changed; the model tells them to press b.
 async function openBoard($: EngineInterface, board: Board): Promise<ToolReply> {
+  const keepsDag = ownsUnsettledRun()
   selectedBoardId = board.boardId
-  inspectorView = 'board'
+  if (!keepsDag) inspectorView = 'board'
   inspectorPage = 0
   selectedDecisionId = undefined
   await openPane($, false)
   $.ui.invalidate('ui.render')
   if (!paneSurface) return ok({ board_id: board.boardId, shown: false, hint: 'This surface draws no /dag pane, so the board is saved but not on screen.' })
   if (paneClosedByUser) return ok({ board_id: board.boardId, shown: false, hint: 'The user closed the /dag pane, so it stays closed; they can show the board with /dag inspect board.' })
-  return ok({ board_id: board.boardId, shown: true })
+  if (!keepsDag) return ok({ board_id: board.boardId, shown: true })
+  $.ui.toast(t.toastBoardUpdated(board.title), { timeoutMs: ATTENTION_TOAST_MS })
+  return ok({ board_id: board.boardId, shown: true, section: 'dag', hint: 'A run is active, so the /dag pane stays on the DAG; tell the user to press b to see the board.' })
+}
+
+// The title the approval block points at: the board this session changed last. A tie goes to the later one in the list.
+function latestBoardTitle(): string | undefined {
+  return boards.reduce<Board | undefined>((latest, board) => (latest === undefined || board.updatedAt >= latest.updatedAt ? board : latest), undefined)?.title
 }
 
 // The board tool (engine/board-spec.ts): the main conversation draws boards that the pane's Board section shows.
@@ -2906,7 +2916,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
   const approval = run.sessionId === sessionId && awaitingApproval(run)
     ? [
         line([{ text: t.approvalWaiting, color: ACCENT, bold: true }]),
-        ...approvalPreview(previewDefinition(run.definition, { maxConcurrent }), e.props.bodyColumns, t).map(line),
+        ...approvalPreview(previewDefinition(run.definition, { maxConcurrent }), e.props.bodyColumns, t, latestBoardTitle()).map(line),
         Box({
           flexDirection: 'row',
           columnGap: 2,

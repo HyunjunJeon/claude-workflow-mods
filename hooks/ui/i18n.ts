@@ -64,6 +64,7 @@ export type Strings = {
   toastSettledFailed: (run: string, failed: number) => string
   toastPaneWaiting: (reason: string) => string
   toastApproval: (run: string) => string
+  toastBoardUpdated: (title: string) => string
   approvalWaiting: string
   awaitingApproval: string
   previewSummary: (nodes: number, waves: number, widest: number, maxConcurrent: number) => string
@@ -74,6 +75,7 @@ export type Strings = {
   previewLintMany: (count: number, first: string) => string
   previewLintClean: string
   previewRouting: string
+  previewBoard: (title: string) => string
   approve: string
   reject: string
   runDeferred: string
@@ -158,6 +160,7 @@ const EN: Strings = {
   toastSettledFailed: (run, failed) => `DAG ${run} settled with ${failed} failed node(s)`,
   runDeferred: 'The run starts when the current turn ends.',
   toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
+  toastBoardUpdated: title => `Board updated: ${title} · press b in the /dag pane`,
   approvalWaiting: 'Waiting for your approval: no node starts until you approve this run.',
   awaitingApproval: EN_AWAITING,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `${nodes} node${nodes === 1 ? '' : 's'}, ${waves} wave${waves === 1 ? '' : 's'}, widest wave ${widest} (max concurrent ${maxConcurrent})`,
@@ -168,6 +171,7 @@ const EN: Strings = {
   previewLintMany: (count, first) => `${count} lint warnings, first: ${first}`,
   previewLintClean: 'lint: no warnings',
   previewRouting: 'category and model are proposals; Jev may reroute a node at start.',
+  previewBoard: title => `Plan board: ${title} · press b to view`,
   approve: 'approve',
   reject: 'reject',
   toastPaneWaiting: reason => `DAG pane not shown · type 0 at an empty prompt or run /dag to open it (${reason})`,
@@ -249,6 +253,7 @@ const KO: Strings = {
   toastSettledFailed: (run, failed) => `DAG ${run} 종료: 실패 노드 ${failed}개`,
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
   toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
+  toastBoardUpdated: title => `보드 갱신: ${title} · /dag 패널에서 b`,
   approvalWaiting: '승인 대기 중: 이 실행을 승인하기 전에는 어떤 노드도 시작하지 않습니다.',
   awaitingApproval: KO_AWAITING,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `노드 ${nodes}개, 웨이브 ${waves}개, 가장 넓은 웨이브 ${widest} (동시 실행 한도 ${maxConcurrent})`,
@@ -259,6 +264,7 @@ const KO: Strings = {
   previewLintMany: (count, first) => `lint 경고 ${count}건, 첫째: ${first}`,
   previewLintClean: 'lint 경고 없음',
   previewRouting: '카테고리와 모델은 제안값이며 시작할 때 Jev가 노드를 재배정할 수 있습니다.',
+  previewBoard: title => `계획 보드: ${title} · b로 보기`,
   approve: '승인',
   reject: '거절',
   toastPaneWaiting: reason => `DAG 패널 미표시 · 빈 프롬프트에서 0을 입력하거나 /dag로 여세요 (${reason})`,
