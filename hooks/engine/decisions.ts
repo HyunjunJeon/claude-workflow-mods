@@ -13,7 +13,7 @@ export type DecisionRecord = {
   readonly subject: string
   readonly proposed: string
   readonly selected: string
-  // rule: the final-audit rule raised a quick final audit to unspecified-low, whatever Jev answered.
+  // rule: the final-audit rule raised a trivial final audit to standard, whatever Jev answered.
   readonly source: 'jev' | 'baseline' | 'rule'
   // Which Jev backend answered or failed; absent in records written before the model fallback or without a call.
   readonly backend?: 'http' | 'model'

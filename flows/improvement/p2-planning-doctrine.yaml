@@ -31,8 +31,8 @@
 # review-standards reads skills/dag-node-review-standards/SKILL.md with Read instead of load_skills: a skill directory
 # created during a run does not resolve until /reload-plugins, which must not run while a run is active.
 #
-# Categories: quick for the mechanical notices file and the progress row. writing for the doctrine drafts and the three
-# skills (documentation prose). unspecified-low for synthesize-planning (judgment: merge four drafts into an existing
+# Categories: trivial for the mechanical notices file and the progress row. writing for the doctrine drafts and the three
+# skills (documentation prose). standard for synthesize-planning (judgment: merge four drafts into an existing
 # doctrine without contradicting it) and for both reviews (the standing final-audit exception: judgment, not a command).
 key: improve-p2-planning-doctrine-1
 name: Improvement P2 - planning doctrine
@@ -62,7 +62,7 @@ nodes:
         contains: "Standards verdict: PASS"
       - kind: file
         path: notes/p2-2a-two-axis-wave.md
-        contains: "unspecified-low"
+        contains: "standard"
       - kind: file
         path: notes/p2-2a-two-axis-wave.md
         contains: "dag-workflow:dag-node-review-standards"
@@ -75,13 +75,13 @@ nodes:
       - decision D5: both review nodes are end nodes of the graph and there is no aggregator node, because the axes are deliberately not merged or re-ranked and the run-settled summary already shows every node output side by side.
 
       DELIVERABLE: notes/p2-2a-two-axis-wave.md with three parts.
-      Part 1: the literal line `Target heading: ### Two-axis review (code-changing runs)`, then the ready-to-paste doctrine text of that subsection (English, in the style of planning.md, at most 60 lines). It covers: when the template applies and when the single verification node stays; the shape (both nodes depend on ALL producer nodes, nothing depends on them, no aggregator, both run on `unspecified-low` or higher under the standing final-audit rule); what each node judges, as listed above; the fixed verdict lines `Spec verdict: PASS` / `Spec verdict: FAIL` and `Standards verdict: PASS` / `Standards verdict: FAIL`, with the rule that a FAIL verdict ends the node with `DAG_NODE_STATUS: failed: <what failed>`; the rule that each reviewer declares a `verify` file check whose `contains` is its own PASS verdict line, so a FAIL verdict fails the node; and the rule that the main conversation reads the two reports side by side and never merges or ranks findings across axes.
+      Part 1: the literal line `Target heading: ### Two-axis review (code-changing runs)`, then the ready-to-paste doctrine text of that subsection (English, in the style of planning.md, at most 60 lines). It covers: when the template applies and when the single verification node stays; the shape (both nodes depend on ALL producer nodes, nothing depends on them, no aggregator, both run on `standard` or higher under the standing final-audit rule); what each node judges, as listed above; the fixed verdict lines `Spec verdict: PASS` / `Spec verdict: FAIL` and `Standards verdict: PASS` / `Standards verdict: FAIL`, with the rule that a FAIL verdict ends the node with `DAG_NODE_STATUS: failed: <what failed>`; the rule that each reviewer declares a `verify` file check whose `contains` is its own PASS verdict line, so a FAIL verdict fails the node; and the rule that the main conversation reads the two reports side by side and never merges or ranks findings across axes.
       Part 2: a ready-to-paste prompt skeleton for `review-spec` and one for `review-standards`. Each skeleton carries the five markers TASK:, DELIVERABLE:, SCOPE:, VERIFY:, STOP WHEN, has the reviewer write its own notes file (a name that does not start with REPORT, SUMMARY, FINDINGS or ANALYSIS), keeps the reviewer read-only on everything it reviews, and names its verdict line. The review-standards skeleton tells the planner to give that node `load_skills: ["dag-workflow:dag-node-review-standards"]`.
       Part 3: a line `Placement: under "## Verification wave"` and a `Conflicts` section listing every sentence of the current planning.md that this draft contradicts or that needs rewording (write `none` when there is none).
       In ## Output give the file path, the target heading, and the conflicts.
 
       SCOPE: Read skills/dag-planning/references/planning.md IN FULL, skills/dag-planning/SKILL.md, hooks/engine/lint.ts, and the Phase 2 section of docs/improvement-plan.md. Fetch the mattpocock source with `gh api repos/mattpocock/skills/contents/skills/engineering/code-review/SKILL.md --jq .content | base64 -d` and read it (MIT licensed: paraphrase it, do not paste long passages; in a DAG the reviewer cannot spawn sub-agents and cannot ask the user anything). Write ONLY notes/p2-2a-two-axis-wave.md. Do not edit planning.md or any other file; the 2b, 2c and 2d drafts, the skill nodes and the integration node belong to other nodes. NEVER run git commit or git push, never run an install command (npm, bun add, pip, brew), never reload plugins (/reload-plugins), and never edit anything under .claude/.
-      VERIFY: Re-read your file and confirm it contains each of these literal strings: `### Two-axis review (code-changing runs)`, `review-spec`, `review-standards`, `Spec verdict: PASS`, `Standards verdict: PASS`, `unspecified-low`, `dag-workflow:dag-node-review-standards`. The runtime checks the same strings after you report.
+      VERIFY: Re-read your file and confirm it contains each of these literal strings: `### Two-axis review (code-changing runs)`, `review-spec`, `review-standards`, `Spec verdict: PASS`, `Standards verdict: PASS`, `standard`, `dag-workflow:dag-node-review-standards`. The runtime checks the same strings after you report.
       STOP WHEN: the file exists with all three parts and every literal string above is present. If `gh api` fails, do not invent the source text: end with `DAG_NODE_STATUS: failed: missing-input: gh api could not fetch the code-review source`.
 
   - id: draft-2b
@@ -365,7 +365,7 @@ nodes:
 
   - id: third-party-notices
     label: Write the third-party MIT notices
-    category: quick
+    category: trivial
     writes:
       - THIRD_PARTY_NOTICES.md
     verify:
@@ -400,7 +400,7 @@ nodes:
   # ---- Wave 2: integrate the doctrine drafts into planning.md and point SKILL.md at them ----
   - id: synthesize-planning
     label: Integrate the drafts into planning.md
-    category: unspecified-low
+    category: standard
     dependsOn:
       - draft-2a
       - draft-2b
@@ -464,7 +464,7 @@ nodes:
   # ---- Wave 3: verification wave (D5), two independent end nodes, no aggregator ----
   - id: review-spec
     label: Spec review of the Phase 2 deliverables
-    category: unspecified-low
+    category: standard
     dependsOn:
       - synthesize-planning
       - skill-debugging
@@ -502,7 +502,7 @@ nodes:
 
   - id: review-standards
     label: Standards review of the Phase 2 deliverables
-    category: unspecified-low
+    category: standard
     dependsOn:
       - synthesize-planning
       - skill-debugging
@@ -525,7 +525,7 @@ nodes:
       Background: this is the Standards axis of a two-axis review; a sibling node judges the Spec axis separately, so do not judge whether the plan items are all present. The deliverables are: the four new subsections of skills/dag-planning/references/planning.md (`### Two-axis review (code-changing runs)`, `### Safe-but-wrong audit checklist`, `### Vertical slices and wide refactors`, `### Debug chain (diagnose run, then fix run)`), the pointers in skills/dag-planning/SKILL.md, the three skills skills/dag-node-debugging/SKILL.md, skills/dag-node-review-standards/SKILL.md and skills/dag-node-testing/SKILL.md, and THIRD_PARTY_NOTICES.md. The upstream outputs above are claims until you check them against the files. Read skills/dag-node-review-standards/SKILL.md first (written earlier in this same run; read it with the Read tool, it is not preloaded) and follow its report shape; where it and this prompt differ, this prompt wins.
 
       DELIVERABLE: notes/p2-review-standards.md with a `## Standards` section holding (a) documented-standard violations (hard, each citing the file and the rule) and (b) possible smells (judgment calls, each named "possible <Smell>" with the quoted passage), a one-line summary with the count per kind and the worst issue, and a final line `Standards verdict: PASS` (only when there is no documented-standard violation and no contradiction) or `Standards verdict: FAIL (<n> violations)`. Check these rules:
-      - Existing doctrine in planning.md: no new text contradicts the sections "Decomposition doctrine" (including "Split implementation from its test? No", "Unknown cause: investigate, then fix", "Do not split when" and the one-deliverable-per-node rule), "Category routing" (the final audit never runs on quick; the two review nodes must be routed unspecified-low or higher), "Edges, data and write scopes", "Node prompt contract" (five markers TASK:, DELIVERABLE:, SCOPE:, VERIFY:, STOP WHEN in any prompt skeleton), "The verify contract" (checks that can fail; no deliverable named REPORT*, SUMMARY*, FINDINGS* or ANALYSIS*) and "Failure playbook". Every example node, edge and `verify` in the new text must itself satisfy these rules.
+      - Existing doctrine in planning.md: no new text contradicts the sections "Decomposition doctrine" (including "Split implementation from its test? No", "Unknown cause: investigate, then fix", "Do not split when" and the one-deliverable-per-node rule), "Category routing" (the final audit never runs on trivial; the two review nodes must be routed standard or higher), "Edges, data and write scopes", "Node prompt contract" (five markers TASK:, DELIVERABLE:, SCOPE:, VERIFY:, STOP WHEN in any prompt skeleton), "The verify contract" (checks that can fail; no deliverable named REPORT*, SUMMARY*, FINDINGS* or ANALYSIS*) and "Failure playbook". Every example node, edge and `verify` in the new text must itself satisfy these rules.
       - Plugin rules against code: compare the new text with hooks/engine/lint.ts (what `lintDefinition` warns about, including any vacuous-verify rules that earlier phases added), hooks/engine/node-prompt.ts (the `DAG_NODE_STATUS:` grammar, `## Output`, `load_skills`, the category table), hooks/engine/definition.ts and hooks/engine/verification.ts (verify and writes limits). A statement in the doctrine that the code contradicts is a violation.
       - README.md: the sections "계획 스킬", "정의 형식", "검증" and "자동 복구" must not be contradicted. README staleness that is not a contradiction (for example the content list of planning.md being less detailed than the new text) is a possible smell, never a violation, and you do not edit README.md.
       - The three skills: the frontmatter has the same shape as skills/dag-planning/SKILL.md (name equals the directory name, description, when_to_use); no step waits for a user answer; no step tells the worker to commit, push, install or reload plugins; the attribution line points at THIRD_PARTY_NOTICES.md; the Standards skill states the verdict-line grammar the planning.md subsection uses (`Standards verdict: PASS`).
@@ -540,7 +540,7 @@ nodes:
   # ---- Last: record the outcome in the progress table ----
   - id: progress-log
     label: Record P2 in the progress table
-    category: quick
+    category: trivial
     dependsOn:
       - review-spec
       - review-standards

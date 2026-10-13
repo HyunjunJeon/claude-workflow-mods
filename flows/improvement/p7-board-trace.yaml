@@ -22,8 +22,8 @@
 #           register.ts)
 #   wave 4: board-docs
 #   then:   review-spec, review-standards, commit (generated)
-# Categories: quick for the contract and the two self-contained pure modules (renderer, exporter); unspecified-low for
-# board-engine (validation rules plus the tracesNeeded counterpart of peeksNeeded) and result-decisions; unspecified-high
+# Categories: trivial for the contract and the two self-contained pure modules (renderer, exporter); standard for
+# board-engine (validation rules plus the tracesNeeded counterpart of peeksNeeded) and result-decisions; hard
 # for board-host (four behaviours meeting in the 3000+ line register.ts); writing for docs.
 # Wave-2 nodes declare only file checks: four lanes edit tests/ at once, so a full `claude plugin test .` or a whole-
 # project tsc could fail on a sibling's half-written file. Each worker still runs the suite itself; board-host and
@@ -77,7 +77,7 @@ commit:
 nodes:
   - id: board-contract
     label: Code and trace block types
-    category: quick
+    category: trivial
     writes:
       - hooks/engine/board-types.ts
     verify:
@@ -113,7 +113,7 @@ nodes:
 
   - id: board-engine
     label: Code/trace validation, tracesNeeded and the tool spec
-    category: unspecified-low
+    category: standard
     dependsOn:
       - board-contract
     load_skills:
@@ -191,7 +191,7 @@ nodes:
 
   - id: board-render
     label: Terminal renderers for code and trace
-    category: quick
+    category: trivial
     dependsOn:
       - board-contract
     load_skills:
@@ -246,7 +246,7 @@ nodes:
 
   - id: result-decisions
     label: Decisions slot on the result board
-    category: unspecified-low
+    category: standard
     dependsOn:
       - board-contract
     load_skills:
@@ -296,7 +296,7 @@ nodes:
 
   - id: board-export
     label: Markdown serializer for a board
-    category: quick
+    category: trivial
     dependsOn:
       - board-contract
     load_skills:
@@ -347,7 +347,7 @@ nodes:
 
   - id: board-host
     label: Trace resolution, export action, decisions feed and handoff boards
-    category: unspecified-high
+    category: hard
     dependsOn:
       - board-engine
       - board-render

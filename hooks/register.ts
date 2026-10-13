@@ -105,8 +105,8 @@ const JEV_MODEL_CALLS = 8
 const MODE_BUDGET_MS = 8_000
 // The reminder after an AskUserQuestion result that turns a direct turn into a dag one; the dag protocol follows it.
 const ANSWER_DAG_LINE = '[dag-workflow] This answer selects work that runs as a DAG under enforcement auto, so the main-loop tools are now gated for the rest of this turn: plan it with the dag-workflow:planning skill and start a run.'
-// The planning skill's final audit never runs on quick; the plugin holds it to that whatever the proposal or Jev said.
-const FINAL_AUDIT_CATEGORY = 'unspecified-low'
+// The planning skill's final audit never runs on trivial; the plugin holds it to that whatever the proposal or Jev said.
+const FINAL_AUDIT_CATEGORY = 'standard'
 const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
 const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
 const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
@@ -841,10 +841,10 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
     if (!ids.includes(node.id)) return node
     const choice = evaluation.choices.get(node.id)
     const def = run.definition.nodes.find(current => current.id === node.id)
-    const category = def?.category ?? 'quick'
+    const category = def?.category ?? 'trivial'
     const outcome = decisionOutcome(evaluation, choice, node.id, threshold)
     const jevChoice = outcome === 'applied' ? choice : undefined
-    const ruled = (jevChoice?.choice ?? category) === 'quick' && def !== undefined && isFinalAudit(run.definition, def)
+    const ruled = (jevChoice?.choice ?? category) === 'trivial' && def !== undefined && isFinalAudit(run.definition, def)
     records.push(decisionRecord({
       at, kind: 'routing', subject: node.id, runId: run.runId, nodeId: node.id,
       proposed: category, selected: ruled ? FINAL_AUDIT_CATEGORY : jevChoice?.choice ?? category,
@@ -853,7 +853,7 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
     }, evaluation, threshold))
     if (ruled) {
-      debug($, `final-audit rule ${run.runId}/${node.id}: ${FINAL_AUDIT_CATEGORY} instead of quick`)
+      debug($, `final-audit rule ${run.runId}/${node.id}: ${FINAL_AUDIT_CATEGORY} instead of trivial`)
       return { ...node, routing: { source: 'rule' as const, category: FINAL_AUDIT_CATEGORY } }
     }
     if (jevChoice) {

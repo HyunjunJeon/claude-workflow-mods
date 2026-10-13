@@ -76,7 +76,7 @@ export type NodeDef = {
 export type ReviewStage = {
   request: string // the user's request, pasted verbatim into review-spec
   notes: string // absolute folder for both notes files; default /tmp/dag-review/<cleaned key>-<6 hex>
-  category: string // the reviewers' category; default unspecified-low
+  category: string // the reviewers' category; default standard
   rules?: string[] // repository rule files for review-standards; absent means it searches for them
   security?: string[] // secure-coding guide ids for review-security, in SECURITY_GUIDES order (stages.ts); absent means no security reviewer
 }
@@ -112,7 +112,7 @@ export type NodeRun = {
   output?: string
   reportPath?: string
   routing?: {
-    // rule: a final audit proposed or routed as quick runs on unspecified-low.
+    // rule: a final audit proposed or routed as trivial runs on standard.
     readonly source: 'jev' | 'definition' | 'rule'
     readonly category: string
     readonly confidence?: number

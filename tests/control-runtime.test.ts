@@ -296,7 +296,7 @@ test('decisions expose persisted outcomes and rules without credentials', async 
   expect(result.decisions).toEqual(log.records)
   expect(log.records).toHaveLength(2)
   for (const record of log.records) {
-    expect(record).toMatchObject({ kind: 'routing', outcome: 'applied', proposed: 'quick', selected: 'quick', source: 'jev' })
+    expect(record).toMatchObject({ kind: 'routing', outcome: 'applied', proposed: 'trivial', selected: 'trivial', source: 'jev' })
     expect(typeof record.ruleset).toBe('string')
     expect(record.ruleset.length).toBeGreaterThan(0)
   }

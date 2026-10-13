@@ -101,7 +101,7 @@ const SHIP = {
       ],
     },
     {
-      id: 'verify-ship', prompt: 'Run the integration check', dependsOn: ['api', 'ui'], category: 'unspecified-low', writes: ['out/VERSION'],
+      id: 'verify-ship', prompt: 'Run the integration check', dependsOn: ['api', 'ui'], category: 'standard', writes: ['out/VERSION'],
       verify: [
         { kind: 'command', argv: ['report', '0', 'ok 1 api\nok 2 ui\nPASS 2 of 2\n'], expect: { stdout: { lastLine: 'PASS 2 of 2' } } },
         { kind: 'command', argv: ['report', '1', '', 'refused: missing token'], expect: { exit: [1], stderr: { contains: 'missing token' } } },
@@ -219,7 +219,7 @@ function cliDefinition(guardArgv: string[]) {
       { id: 'parser', prompt: 'Make strict mode reject malformed JSON', verify: [rejectsBadInput(['cli', '--strict', 'fixtures/bad.json'])] },
       { id: 'guard', prompt: 'Make strict mode reject an empty file', verify: [rejectsBadInput(guardArgv)] },
       { id: 'docs', prompt: 'Document strict mode', dependsOn: ['guard'], verify: CHECK },
-      { id: 'verify-cli', prompt: 'Check the CLI end to end', dependsOn: ['parser', 'docs'], category: 'unspecified-low', verify: CHECK },
+      { id: 'verify-cli', prompt: 'Check the CLI end to end', dependsOn: ['parser', 'docs'], category: 'standard', verify: CHECK },
     ],
   }
 }
@@ -285,7 +285,7 @@ test('scenario 4, approval: under the session override a model start holds, show
   const status = ((await command($, `status ${wide.run_id}`)).text ?? '').split('\n')
   expect(status[1]).toBe(`  awaiting approval: /dag approve ${wide.run_id} starts it, /dag reject ${wide.run_id} [reason] cancels it`)
   expect(status).toContain('Preview (nothing started): 3 nodes, 2 waves, widest wave 2, max concurrent 8')
-  expect(status).toContain('  wave 1: bump (quick -> sonnet), changelog (quick -> sonnet)')
+  expect(status).toContain('  wave 1: bump (trivial -> sonnet), changelog (trivial -> sonnet)')
 
   await command($, `reject ${wide.run_id} too broad, bump only`)
   await h.clock.settle()
@@ -436,7 +436,7 @@ const PREVIEW_TOOL = {
 }
 // A file check with no text field: touch passes it.
 const PREVIEW_README = { id: 'preview-readme', prompt: contract('Document the preview'), writes: ['README.md'], verify: [{ kind: 'file', path: 'README.md' }] }
-const REVIEW = { id: 'review-spec', prompt: contract('Review the change against the spec'), dependsOn: ['preview-tool', 'preview-readme'], category: 'unspecified-low', writes: [], verify: CHECK }
+const REVIEW = { id: 'review-spec', prompt: contract('Review the change against the spec'), dependsOn: ['preview-tool', 'preview-readme'], category: 'standard', writes: [], verify: CHECK }
 // A commit at the end: "preview" holds "review", but not at the start of a word, so this is no verification node.
 const commit = (dependsOn: string[]) => ({
   id: 'commit', label: 'Commit the run preview', prompt: contract('Commit the phase'), dependsOn,
@@ -540,7 +540,7 @@ const CLEANUP = {
     },
     // Any file of the project may hold the entry. The run's own checkpoint holds it too, since it keeps this definition.
     { id: 'changelog', prompt: 'Add the changelog entry', writes: ['CHANGELOG.md'], verify: [{ kind: 'file', path: '.', contains: ENTRY }] },
-    { id: 'verify-cleanup', prompt: 'Run the loader tests', dependsOn: ['drop-eval', 'changelog'], category: 'unspecified-low', verify: CHECK },
+    { id: 'verify-cleanup', prompt: 'Run the loader tests', dependsOn: ['drop-eval', 'changelog'], category: 'standard', verify: CHECK },
   ],
 }
 
@@ -785,7 +785,7 @@ test('scenario 10, stages: review and commit declared on a definition expand int
   expect(saved.status).toBe('completed')
   expect(states(h, runId)).toEqual(['code:completed', 'docs:completed', 'review-spec:completed', 'review-standards:completed', 'commit:completed'])
   // The run keeps what the user wrote, not the expansion's text, so an amend sends the original fields.
-  expect(saved.definition).toMatchObject({ review: { request: GREET_REQUEST, notes: '/tmp/dag-review/greet-5d65d5', category: 'unspecified-low' }, commit: [{ paths: ['src/greet.ts'] }, { paths: ['README.md'] }] })
+  expect(saved.definition).toMatchObject({ review: { request: GREET_REQUEST, notes: '/tmp/dag-review/greet-5d65d5', category: 'standard' }, commit: [{ paths: ['src/greet.ts'] }, { paths: ['README.md'] }] })
   expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([`DAG run "Greet" (${runId}) settled: completed.`])
   expect(h.spawns).toHaveLength(5)
 })

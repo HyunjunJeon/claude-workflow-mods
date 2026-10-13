@@ -10,7 +10,7 @@ const FAN_IN = {
   name: 'Fan in',
   nodes: [
     { id: 'a', prompt: 'Write a.txt', verify: VERIFY },
-    { id: 'b', prompt: 'Write b.txt', category: 'quick', verify: VERIFY },
+    { id: 'b', prompt: 'Write b.txt', category: 'trivial', verify: VERIFY },
     { id: 'c', prompt: 'Merge a.txt and b.txt', dependsOn: ['a', 'b'], verify: VERIFY },
   ],
 }

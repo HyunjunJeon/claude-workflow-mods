@@ -6,7 +6,7 @@ goal: Two notes files are written in parallel and then checked together.
 nodes:
   - id: notes-alpha
     label: Write the alpha notes
-    category: quick
+    category: trivial
     writes:
       - scratch/notes-alpha.md
     verify:
@@ -21,7 +21,7 @@ nodes:
       STOP WHEN: the file exists and contains the word alpha. In ## Output give the file path.
   - id: notes-beta
     label: Write the beta notes
-    category: quick
+    category: trivial
     writes:
       - scratch/notes-beta.md
     verify:
@@ -36,7 +36,7 @@ nodes:
       STOP WHEN: the file exists and contains the word beta. In ## Output give the file path.
   - id: verify
     label: Verify both notes files
-    category: unspecified-low
+    category: standard
     dependsOn:
       - notes-alpha
       - notes-beta

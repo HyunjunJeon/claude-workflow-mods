@@ -8,7 +8,7 @@ import { parseChecks, projectPath, readOnlyAbsolutePath } from './verification.t
 
 export const REVIEW_SPEC_ID = 'review-spec'
 export const REVIEW_STANDARDS_ID = 'review-standards'
-export const DEFAULT_REVIEW_CATEGORY = 'unspecified-low'
+export const DEFAULT_REVIEW_CATEGORY = 'standard'
 export const REVIEW_STANDARDS_SKILL = 'dag-workflow:review-standards'
 export const ANTI_SLOP_SKILL = 'dag-workflow:anti-slop'
 export const REVIEW_SECURITY_ID = 'review-security'
@@ -563,7 +563,7 @@ function commitNode(definition: Definition, commits: CommitEntry[], review: Revi
     id: COMMIT_ID,
     prompt: commitPrompt(definition, commits, review, paths),
     dependsOn: review ? reviewerIds(review) : user.map(node => node.id),
-    category: 'quick',
+    category: 'trivial',
     label: 'Commit',
     verify: [
       ...commits.map((entry, index): VerificationCheck => ({

@@ -11,15 +11,15 @@ export const FOREGROUND_RULE = 'Run commands in the foreground. Do not end your 
 const OUTPUT_HEADING = /^#{1,4}\s*Output\s*:?\s*$/im
 
 const CATEGORY_MODELS: Readonly<Record<string, string>> = {
-  quick: 'sonnet',
-  'unspecified-low': 'sonnet',
-  'unspecified-high': 'opus',
-  'deep-low': 'sonnet',
-  'deep-high': 'opus',
+  trivial: 'sonnet',
+  standard: 'sonnet',
+  hard: 'opus',
+  debugging: 'sonnet',
+  reasoning: 'opus',
   writing: 'sonnet',
-  'visual-engineering': 'sonnet',
-  artistry: 'opus',
-  ultrabrain: 'opus',
+  frontend: 'sonnet',
+  creative: 'opus',
+  crux: 'opus',
   architect: 'opus',
 }
 

@@ -15,8 +15,8 @@
 #           fixtures in tests/policy.test.ts, tests/runtime.test.ts and tests/shape.test.ts, so it owns those test edits
 #   wave 3: readme, which documents the output of all six lanes
 #   wave 4: final-audit, which depends on all seven producers
-# Categories: quick for the two small code lanes; writing for the three skill files and the README (prose);
-# unspecified-low for goal-lint (judgment about which existing tests to repair) and for the final audit (it judges seven inputs).
+# Categories: trivial for the two small code lanes; writing for the three skill files and the README (prose);
+# standard for goal-lint (judgment about which existing tests to repair) and for the final audit (it judges seven inputs).
 # Assumptions beyond the plan: the skill files credit their sources inline (THIRD_PARTY_NOTICES.md belongs to Phase 2);
 # the "eval 8 scenarios show AskUserQuestion 0" criterion and the tmux interview check are NOT part of this run.
 key: improve-p3-alignment-1
@@ -31,7 +31,7 @@ goal: >
 nodes:
   - id: protocol-flag
     label: Add the non-interactive protocol flag
-    category: quick
+    category: trivial
     writes:
       - hooks/engine/policy.ts
       - hooks/register.ts
@@ -61,7 +61,7 @@ nodes:
 
   - id: eval-ask-count
     label: Count AskUserQuestion calls in the eval runner
-    category: quick
+    category: trivial
     writes:
       - eval/run.ts
     verify:
@@ -207,7 +207,7 @@ nodes:
 
   - id: goal-lint
     label: Warn when a definition has no goal
-    category: unspecified-low
+    category: standard
     dependsOn:
       - protocol-flag
     writes:
@@ -279,7 +279,7 @@ nodes:
 
   - id: final-audit
     label: Final audit of Phase 3
-    category: unspecified-low
+    category: standard
     dependsOn:
       - protocol-flag
       - eval-ask-count

@@ -158,7 +158,7 @@ test('the lint flags contract gaps per node and a missing verification node only
   expect(isVerificationNode({ id: 'verify', prompt: full, dependsOn: [] })).toBe(false)
 })
 
-test('the lint reserves quick for mechanical checks rather than a final audit', async () => {
+test('the lint reserves trivial for mechanical checks rather than a final audit', async () => {
   const def = (nodes: unknown[]) => {
     const r = parseDefinition({ key: 'k', goal: 'a fixture goal', nodes })
     if (!r.ok) throw new Error(r.error.message)
@@ -166,14 +166,14 @@ test('the lint reserves quick for mechanical checks rather than a final audit', 
   }
   const full = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: done.'
   const lanes = [{ id: 'a', prompt: full }, { id: 'b', prompt: full }]
-  expect(lintDefinition(def([...lanes, { id: 'audit', category: 'quick', prompt: full, dependsOn: ['a', 'b'] }]))).toHaveLength(1)
+  expect(lintDefinition(def([...lanes, { id: 'audit', category: 'trivial', prompt: full, dependsOn: ['a', 'b'] }]))).toHaveLength(1)
   expect(lintDefinition(def([...lanes, { id: 'audit', prompt: full, dependsOn: ['a', 'b'] }]))).toHaveLength(1)
-  expect(lintDefinition(def([...lanes, { id: 'audit', category: 'unspecified-low', prompt: full, dependsOn: ['a', 'b'] }]))).toEqual([])
-  expect(lintDefinition(def([...lanes, { id: 'verify-a', category: 'quick', prompt: full, dependsOn: ['a'] }]))).toEqual([])
+  expect(lintDefinition(def([...lanes, { id: 'audit', category: 'standard', prompt: full, dependsOn: ['a', 'b'] }]))).toEqual([])
+  expect(lintDefinition(def([...lanes, { id: 'verify-a', category: 'trivial', prompt: full, dependsOn: ['a'] }]))).toEqual([])
   expect(
     lintDefinition(def([
       ...lanes,
-      { id: 'verify-ab', category: 'quick', prompt: full, dependsOn: ['a', 'b'] },
+      { id: 'verify-ab', category: 'trivial', prompt: full, dependsOn: ['a', 'b'] },
       { id: 'report', category: 'writing', prompt: full, dependsOn: ['verify-ab'] },
     ])),
   ).toEqual([])
@@ -208,13 +208,13 @@ const contract = 'TASK: do it. DELIVERABLE: x. SCOPE: y. VERIFY: z. STOP WHEN: d
 const fileCheck = (path: string) => ({ kind: 'file', path, contains: 'ok' })
 const lane = (id: string, writes: string[], extra: Record<string, unknown> = {}) => ({
   id,
-  category: 'quick',
+  category: 'trivial',
   prompt: contract,
   writes,
   verify: writes.map(fileCheck),
   ...extra,
 })
-const audit = (dependsOn: string[]) => lane('audit', ['notes/audit.md'], { category: 'unspecified-low', dependsOn })
+const audit = (dependsOn: string[]) => lane('audit', ['notes/audit.md'], { category: 'standard', dependsOn })
 
 test('a change with its own tests and docs stays one node without an under-split warning', async () => {
   expect(lintDefinition(underSplitDef([
@@ -274,7 +274,7 @@ test('the under-split lints stay silent on every expected scenario shape', async
       lane('fix', ['mathutil.py'], { dependsOn: ['diagnose'] }),
       audit(['fix']),
     ],
-    // 450 items at 200 per quick node: three batches is the minimum
+    // 450 items at 200 per trivial node: three batches is the minimum
     'wide-harvest': [
       ...[1, 2, 3].map(n => lane(`batch-${n}`, [`notes/batch-${n}.md`])),
       lane('totals', ['todo-report.md'], { dependsOn: ['batch-1', 'batch-2', 'batch-3'] }),

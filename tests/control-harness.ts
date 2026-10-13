@@ -31,7 +31,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const submits: { text: string; context: readonly string[]; origin: string }[] = []
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
-  // permission: the Jev answer to a permission question; unset, the question gets the generic 'quick' answer.
+  // permission: the Jev answer to a permission question; unset, the question gets the generic 'trivial' answer.
   const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
@@ -47,7 +47,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     const answers = Object.fromEntries(Object.keys(request.questions).map(id => [id, id === 'permission' && control.permission
       ? { type: 'choice', ...control.permission }
       : {
-        type: 'choice', choice: id === 'recovery' ? control.recovery : 'quick',
+        type: 'choice', choice: id === 'recovery' ? control.recovery : 'trivial',
         confidence: id === 'recovery' ? control.confidence : 0.99,
       }]))
     return { value: { status: control.httpStatus, ok: control.httpStatus === 200, headers: {}, text: JSON.stringify({ answers }) } }

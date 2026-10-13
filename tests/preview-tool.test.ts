@@ -15,7 +15,7 @@ const DEFINITION = {
   nodes: [
     { id: 'api', prompt: FULL, writes: ['src'], verify: CHECK },
     { id: 'ui', prompt: FULL, writes: ['src/ui.ts'], verify: CHECK },
-    { id: 'wrap', prompt: FULL, dependsOn: ['api', 'ui'], category: 'deep-high', writes: ['docs/wrap.md'], verify: CHECK },
+    { id: 'wrap', prompt: FULL, dependsOn: ['api', 'ui'], category: 'reasoning', writes: ['docs/wrap.md'], verify: CHECK },
   ],
 }
 
@@ -39,7 +39,7 @@ const DEFINITION_YAML = [
   '  - id: wrap',
   `    prompt: ${FULL}`,
   '    dependsOn: [api, ui]',
-  '    category: deep-high',
+  '    category: reasoning',
   '    writes: [docs/wrap.md]',
   '    verify:',
   '      - kind: command',
@@ -70,7 +70,7 @@ test('a dry run start returns the preview of the definition and says it is a dry
   expect(reply.preview.waves).toEqual([['api', 'ui'], ['wrap']])
   expect(reply.preview.critical_path).toEqual(['api', 'wrap'])
   expect(reply.preview.max_concurrent).toBe(8)
-  expect(reply.preview.nodes.map(node => `${node.id}:${node.category}:${node.model}`)).toEqual(['api:quick:sonnet', 'ui:quick:sonnet', 'wrap:deep-high:opus'])
+  expect(reply.preview.nodes.map(node => `${node.id}:${node.category}:${node.model}`)).toEqual(['api:trivial:sonnet', 'ui:trivial:sonnet', 'wrap:reasoning:opus'])
   expect(reply.preview.write_conflicts).toEqual([{ a: 'api', b: 'ui', paths: ['src/ui.ts'] }])
   expect(reply.existing_run_id).toBeUndefined()
 })
@@ -262,8 +262,8 @@ test('/dag preview <file> prints the header, the waves, the critical path and th
   const out = await command($, 'preview flows/demo.yaml')
   const lines = (out.text ?? '').split('\n')
   expect(lines[0]).toBe('Preview (nothing started): 3 nodes, 2 waves, widest wave 2, max concurrent 8')
-  expect(lines).toContain('  wave 1: api (quick -> sonnet), ui (quick -> sonnet)')
-  expect(lines).toContain('  wave 2: wrap (deep-high -> opus)')
+  expect(lines).toContain('  wave 1: api (trivial -> sonnet), ui (trivial -> sonnet)')
+  expect(lines).toContain('  wave 2: wrap (reasoning -> opus)')
   expect(lines).toContain('Critical path: api -> wrap')
   expect(lines).toContain('  api <-> ui: src/ui.ts')
   expect(lines.filter(line => line.startsWith('unchecked write scope'))).toEqual([])

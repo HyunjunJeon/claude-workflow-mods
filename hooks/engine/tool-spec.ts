@@ -92,7 +92,7 @@ export const INPUT_SCHEMA = {
           properties: {
             request: { type: 'string', description: 'The user\'s request, verbatim; review-spec judges the change against it' },
             notes: { type: 'string', description: 'Absolute folder for the notes files; default /tmp/dag-review/<key>-<6 hex digits of its hash>' },
-            category: { type: 'string', description: 'The reviewers\' category; default unspecified-low' },
+            category: { type: 'string', description: 'The reviewers\' category; default standard' },
             rules: { type: 'array', items: { type: 'string' }, description: 'Rule file paths review-standards reads first; it still searches for CONTRIBUTING, CLAUDE.md, AGENTS.md and similar' },
             security: { type: 'array', items: { type: 'string', enum: Object.keys(SECURITY_GUIDES) }, description: 'Secure-coding guides (kisa: KISA; owasp: OWASP Top 10 and CWE Top 25; agent: agent trust boundaries); adds seven lens nodes, one verifier per candidate at run time and review-security, which gates the commit. Opt-in: set it only when the request or a project rule file asks' },
           },

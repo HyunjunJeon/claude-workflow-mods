@@ -227,10 +227,10 @@ test('node outcomes come from the turn end reason and the status line', async ()
 })
 
 test('categories route to models and an explicit agent type', async () => {
-  expect(spawnTarget({ id: 'x', prompt: 'p', dependsOn: [], category: 'quick' })).toEqual({ subagentType: 'general-purpose', model: 'sonnet' })
+  expect(spawnTarget({ id: 'x', prompt: 'p', dependsOn: [], category: 'trivial' })).toEqual({ subagentType: 'general-purpose', model: 'sonnet' })
   expect(spawnTarget({ id: 'x', prompt: 'p', dependsOn: [], agent: 'Explore' })).toEqual({ subagentType: 'Explore', model: 'sonnet' })
   expect(spawnTarget({ id: 'x', prompt: 'p', dependsOn: [], category: 'unknown' })).toEqual({ subagentType: 'general-purpose', model: 'sonnet' })
-  expect(spawnTarget({ id: 'x', prompt: 'p', dependsOn: [], category: 'deep-high' })).toEqual({ subagentType: 'general-purpose', model: 'opus' })
+  expect(spawnTarget({ id: 'x', prompt: 'p', dependsOn: [], category: 'reasoning' })).toEqual({ subagentType: 'general-purpose', model: 'opus' })
 })
 
 test('snapshots use the omo projection shape and layers follow dependencies', async () => {

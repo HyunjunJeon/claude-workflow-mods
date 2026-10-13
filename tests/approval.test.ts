@@ -17,11 +17,11 @@ const FAN_IN = { key: 'fan-in', name: 'Fan in', nodes: [node('a'), node('b'), no
 const SOLO = { key: 'solo', name: 'Solo', nodes: [node('a')] }
 const ALWAYS = { options: { start_approval: 'always' } } as const
 const ALWAYS_KO = { options: { start_approval: 'always', language: 'ko' } } as const
-// Two nodes that share src/x while running side by side, and a deep-high node behind them that runs on opus.
+// Two nodes that share src/x while running side by side, and a reasoning node behind them that runs on opus.
 const WRITES = {
   key: 'writes',
   name: 'Writes',
-  nodes: [{ ...node('a'), writes: ['src'] }, { ...node('b'), writes: ['src/x'] }, { ...node('c', ['a', 'b']), category: 'deep-high' }],
+  nodes: [{ ...node('a'), writes: ['src'] }, { ...node('b'), writes: ['src/x'] }, { ...node('c', ['a', 'b']), category: 'reasoning' }],
 }
 const full = (id: string, dependsOn: string[] = [], extra: object = {}) => ({
   id,
@@ -32,7 +32,7 @@ const full = (id: string, dependsOn: string[] = [], extra: object = {}) => ({
   ...extra,
 })
 // A definition the lint has nothing to say about.
-const CLEAN = { key: 'clean', name: 'Clean', goal: 'Both files exist and hold their names', nodes: [full('a'), full('b'), full('verify-all', ['a', 'b'], { writes: [], category: 'unspecified-low' })] }
+const CLEAN = { key: 'clean', name: 'Clean', goal: 'Both files exist and hold their names', nodes: [full('a'), full('b'), full('verify-all', ['a', 'b'], { writes: [], category: 'standard' })] }
 const NOTE = 'The user must approve this run in the /dag pane or with /dag approve <run_id> before any node starts. Do not poll; you will receive a message when it is approved or rejected.'
 const USER_ONLY = 'This action requires a user command or pane control.'
 const t = stringsFor('en')
@@ -349,8 +349,8 @@ test('the approval preview model lists each wave with its category and model, th
   const lines = plain(approvalPreview(previewOf(WRITES), 200, t))
   expect(lines).toEqual([
     '3 nodes, 2 waves, widest wave 2 (max concurrent 8)',
-    '  wave 1: a (quick -> sonnet), b (quick -> sonnet)',
-    '  wave 2: c (deep-high -> opus)',
+    '  wave 1: a (trivial -> sonnet), b (trivial -> sonnet)',
+    '  wave 2: c (reasoning -> opus)',
     'write conflicts: a <-> b: src/x',
     '5 lint warnings, first: node "a": the prompt lacks TASK: and STOP WHEN - follow the node prompt contract (TASK, DELIVERABLE, SCOPE, VERIFY, STOP WHEN).',
     'category and model are proposals; Jev may reroute a node at start.',
@@ -363,8 +363,8 @@ test('the approval preview model names unchecked write scopes, lists a few lint 
   const clean = plain(approvalPreview(previewOf(CLEAN), 100, t))
   expect(clean).toEqual([
     '3 nodes, 2 waves, widest wave 2 (max concurrent 8)',
-    '  wave 1: a (quick -> sonnet), b (quick -> sonnet)',
-    '  wave 2: verify-all (unspecified-low -> sonnet)',
+    '  wave 1: a (trivial -> sonnet), b (trivial -> sonnet)',
+    '  wave 2: verify-all (standard -> sonnet)',
     'lint: no warnings',
     'category and model are proposals; Jev may reroute a node at start.',
   ])
@@ -381,7 +381,7 @@ test('the approval preview model marks a wave wider than the concurrency cap', (
 test('the approval preview model fits every line to the pane width and ends a cut line with an ellipsis', () => {
   const lines = approvalPreview(previewOf(WRITES), 30, t)
   expect(lines.every(line => width(line.map(segment => segment.text).join('')) <= 30)).toBe(true)
-  expect(plain(lines)[1]).toBe('  wave 1: a (quick -> sonnet)…')
+  expect(plain(lines)[1]).toBe('  wave 1: a (trivial -> sonne…')
   expect(approvalPreview(previewOf(WRITES), 0, t).map(line => line[0]?.text)).toEqual(['', '', '', '', '', ''])
 })
 
@@ -403,8 +403,8 @@ test('the approval preview model speaks Korean for its labels and keeps ids, cat
   const lines = plain(approvalPreview(previewOf(WRITES), 120, stringsFor('ko')))
   expect(lines.slice(0, 4)).toEqual([
     '노드 3개, 웨이브 2개, 가장 넓은 웨이브 2 (동시 실행 한도 8)',
-    '  웨이브 1: a (quick -> sonnet), b (quick -> sonnet)',
-    '  웨이브 2: c (deep-high -> opus)',
+    '  웨이브 1: a (trivial -> sonnet), b (trivial -> sonnet)',
+    '  웨이브 2: c (reasoning -> opus)',
     '쓰기 충돌: a <-> b: src/x',
   ])
   expect(lines[4]).toMatch(/^lint 경고 5건, 첫째: node "a": /)
@@ -470,8 +470,8 @@ test('the pane approval block shows the preview of a held run: waves with models
   expect(at).toBeGreaterThan(-1)
   expect(texts.slice(at + 1, at + 6)).toEqual([
     '3 nodes, 2 waves, widest wave 2 (max concurrent 8)',
-    '  wave 1: a (quick -> sonnet), b (quick -> sonnet)',
-    '  wave 2: c (deep-high -> opus)',
+    '  wave 1: a (trivial -> sonnet), b (trivial -> sonnet)',
+    '  wave 2: c (reasoning -> opus)',
     'write conflicts: a <-> b: src/x',
     expect.stringMatching(/^5 lint warnings, first: node "a": the prompt lacks TASK/),
   ])
@@ -483,11 +483,11 @@ test('the preview leaves the pane once the run is approved', ALWAYS, async ($, o
   await boot($)
   const { run_id: runId } = await modelStart($, WRITES)
   const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
-  expect(await paneTexts(ui)).toContain('  wave 2: c (deep-high -> opus)')
+  expect(await paneTexts(ui)).toContain('  wave 2: c (reasoning -> opus)')
   await command($, `approve ${runId}`)
   await h.clock.settle()
   await ui.redraw(PANE.props)
-  expect(await paneTexts(ui)).not.toContain('  wave 2: c (deep-high -> opus)')
+  expect(await paneTexts(ui)).not.toContain('  wave 2: c (reasoning -> opus)')
   await ui.unmount()
 })
 
@@ -498,8 +498,8 @@ test('/dag status of a held run appends the preview, and the preview is gone aft
   const lines = ((await command($, `status ${runId}`)).text ?? '').split('\n')
   expect(lines[1]).toBe(`  awaiting approval: /dag approve ${runId} starts it, /dag reject ${runId} [reason] cancels it`)
   expect(lines).toContain('Preview (nothing started): 3 nodes, 2 waves, widest wave 2, max concurrent 8')
-  expect(lines).toContain('  wave 1: a (quick -> sonnet), b (quick -> sonnet)')
-  expect(lines).toContain('  wave 2: c (deep-high -> opus)')
+  expect(lines).toContain('  wave 1: a (trivial -> sonnet), b (trivial -> sonnet)')
+  expect(lines).toContain('  wave 2: c (reasoning -> opus)')
   expect(lines).toContain('  a <-> b: src/x')
   expect(lines).toContain('Warnings:')
   await command($, `approve ${runId}`)

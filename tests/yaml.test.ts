@@ -7,7 +7,7 @@ key: review-fan-in
 name: "Review: fan in"
 nodes:
   - id: navigation
-    category: quick
+    category: trivial
     prompt: Audit the navigation module.
   - id: gate-wiring
     label: 'Gate wiring'
@@ -30,7 +30,7 @@ test('a DAG definition written in YAML parses into the same shape as JSON', asyn
     key: 'review-fan-in',
     name: 'Review: fan in',
     nodes: [
-      { id: 'navigation', category: 'quick', prompt: 'Audit the navigation module.' },
+      { id: 'navigation', category: 'trivial', prompt: 'Audit the navigation module.' },
       { id: 'gate-wiring', label: 'Gate wiring', load_skills: ['code-review', 'security'], prompt: 'Check every gate is wired.\nReport each missing one.\n' },
       { id: 'verify', dependsOn: ['navigation', 'gate-wiring'], prompt: 'Verify the evidence from both audits.' },
     ],

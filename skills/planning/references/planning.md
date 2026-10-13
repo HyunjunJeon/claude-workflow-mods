@@ -6,7 +6,7 @@ Each section addresses a failure observed in practice.
 
 Reading does not replace planning.
 Before `start`, state one concise plan and execute it.
-Include the components, waves and their sizes, edges and their data, and a one-line reason for every non-`quick` category.
+Include the components, waves and their sizes, edges and their data, and a one-line reason for every non-`trivial` category.
 Name the verification node, or both review nodes for a code-changing run.
 If conditions require a change, state a revised plan instead of changing nodes without explanation.
 
@@ -18,9 +18,9 @@ Assign every node to exactly one component.
 Do not merge a multi-component request into one node because it looks small.
 Do not invent components.
 
-**Split first, route second.** First ask how to split the work into more `quick` nodes, not which category it needs.
+**Split first, route second.** First ask how to split the work into more `trivial` nodes, not which category it needs.
 Parallel pieces must have disjoint write scopes, self-contained prompts and independent checks.
-Under those conditions, many small `quick` nodes are better than one large node on a stronger model.
+Under those conditions, many small `trivial` nodes are better than one large node on a stronger model.
 They finish sooner, fail independently and cost less per unit of work.
 Use a stronger model only for work that still needs the full problem context after splitting.
 
@@ -43,7 +43,7 @@ Split along the axis that makes pieces independent:
 
 **Default shape is fan-out, then fan-in.** Start N parallel lanes without dependencies.
 Then use one synthesis node that depends on all lanes and receives their outputs.
-Start synthesis at `quick` or `unspecified-low`: merging verified results is mechanical unless the merge needs judgment.
+Start synthesis at `trivial` or `standard`: merging verified results is mechanical unless the merge needs judgment.
 A wide refactor is the exception. Its lanes depend on `expand` (see Vertical slices and wide refactors).
 
 **One-step tasks are one-node DAGs.** Under enforcement auto (the default), a small request can run directly in the main conversation when the protocol line says so, and then no DAG is planned.
@@ -52,14 +52,14 @@ A single edit still needs a node with the full prompt contract and a VERIFY step
 Do not invent extra nodes.
 
 **Large harvests: nodes are not units of work.** For hundreds of files or sources, assign batches to nodes.
-Each `quick` node handles about 50-200 items and writes one bounded report.
+Each `trivial` node handles about 50-200 items and writes one bounded report.
 Use `nodes = ceil(items / items_per_node)`.
 The aggregator reads reports, not hundreds of raw outputs.
 
 **One node, one deliverable.** Count deliverables before defining nodes.
 Each independent file or separately named document section is a candidate lane: one per algorithm, page or module.
 A producer needs splitting if its `writes` lists three independent files, or its prompt lists `## A`, `## B`, `## C`.
-Use one `quick` or `writing` node per deliverable, without `dependsOn` between them.
+Use one `trivial` or `writing` node per deliverable, without `dependsOn` between them.
 Then use one synthesis node that depends on all lanes to assemble results or make recommendations.
 
 Section writers use separate files, such as `notes/<topic>.md`.
@@ -108,14 +108,14 @@ This run fixes nothing.
 The reproduction file supports run 2; it is not a code change.
 Thus `verify-repro` is run 1's whole verification wave. The two-axis review belongs to run 2.
 
-- Start read-only investigation lanes: one `quick` node per independent area, such as the failing path, recent changes, configuration and inputs. Skip these lanes if the suspect area fits in one file. Each lane writes only `notes/<bug>-<lane>-notes.md` and never edits the investigated code.
-- Use one diagnosis node that depends on all lanes. Select `unspecified-low`, or `deep-low` for difficult or cross-module debugging. Set `load_skills: ["dag-workflow:debugging"]`. Declare `writes` for `notes/<bug>-diagnosis.md` and any reproduction file to create. Use `verify` file checks for the field names below in the diagnosis notes.
+- Start read-only investigation lanes: one `trivial` node per independent area, such as the failing path, recent changes, configuration and inputs. Skip these lanes if the suspect area fits in one file. Each lane writes only `notes/<bug>-<lane>-notes.md` and never edits the investigated code.
+- Use one diagnosis node that depends on all lanes. Select `standard`, or `debugging` for difficult or cross-module debugging. Set `load_skills: ["dag-workflow:debugging"]`. Declare `writes` for `notes/<bug>-diagnosis.md` and any reproduction file to create. Use `verify` file checks for the field names below in the diagnosis notes.
 - Quote the user's symptom verbatim in the prompt. The `## Output` and notes file contain exactly these fields:
   - `Reproduction command:` One command in argv form, run from the project root without a shell.
   - `Observed failure:` Exit code and symptom line, with secrets redacted.
   - `Hypotheses:` 3 to 5, ranked and falsifiable: "If X is the cause, changing Y will make the bug disappear (or changing Z will make it worse)". Refine or discard hypotheses without predictions.
   - `Root cause:` File and line, or "not yet determined".
-- Use one verification node (`quick`, id `verify-repro`) that depends on diagnosis. It runs the recorded command exactly. It checks for a non-zero exit and the user's symptom line. It writes `Reproduction confirmed: exit <n>` to `notes/<bug>-repro-check.md`; this is its `verify` file check. If the command exits 0 or fails differently, end with `DAG_NODE_STATUS: failed: <what differs>`. Without `expect.exit` the runtime accepts only exit 0, so declare the expected failure natively: `expect` with the recorded exit code and a `stdout` or `stderr` text field naming the symptom (see "Checks for absence or expected failure"). This node independently checks both symptom and exit code. An unrelated command error is not a reproduction.
+- Use one verification node (`trivial`, id `verify-repro`) that depends on diagnosis. It runs the recorded command exactly. It checks for a non-zero exit and the user's symptom line. It writes `Reproduction confirmed: exit <n>` to `notes/<bug>-repro-check.md`; this is its `verify` file check. If the command exits 0 or fails differently, end with `DAG_NODE_STATUS: failed: <what differs>`. Without `expect.exit` the runtime accepts only exit 0, so declare the expected failure natively: `expect` with the recorded exit code and a `stdout` or `stderr` text field naming the symptom (see "Checks for absence or expected failure"). This node independently checks both symptom and exit code. An unrelated command error is not a reproduction.
 - **Red-capable rule.** Diagnosis must already have run the command and observed failure. A command that exits 0 before the fix proves nothing. The failure must be the user's symptom, not another failure. Keep the verdict the same on every run: pin the clock, seed randomness and isolate files. For intermittent bugs, repeat the trigger inside the command and exit non-zero if any iteration fails. Remove inputs, steps and configuration one at a time until each remaining element is required to reproduce the failure.
 - **Fast.** The runtime kills checks after 30 seconds. First narrow slower loops to one test, a fixture or smaller input. Aim for seconds.
 - **No loop.** If no red-capable loop can be built, do not guess hypotheses. List the attempts and end with `DAG_NODE_STATUS: failed: clarification: <what is needed>`. The main conversation asks for a reproducing environment, redacted artifact (log, HAR, payload), or permission for temporary instrumentation. Then it `retry`s the node with the answer.
@@ -129,7 +129,7 @@ Paste the facts into the prompts because nothing crosses runs automatically.
 - Order the prompt's work: run the command and report its exit code, fix the root cause, then rerun the command. If the first run exits 0, end with `DAG_NODE_STATUS: failed: missing-input: reproduction no longer fails`. Keep the reproduction file, fixtures and helpers, including indirect dependencies of regression tests and `verify`. The runtime and final audit need them after the report.
 - If the command still fails, the node fails. `retry` with the original prompt plus what the attempt ruled out, so the next hypothesis moves up. `retry` replaces the prompt; it does not append to it.
 - `Root cause: not yet determined` is allowed. In that case, start run 2 with an investigation node. It tests hypotheses in rank order, one change at a time. The fix node depends on it and still uses the reproduction command as `verify`.
-- End run 2 with a final audit on `unspecified-low`, dependent on the fix node. It reruns the reproduction and tag search (see Debug logs). Since the run changes code, this audit is `review-spec`, joined by `review-standards` (see Two-axis review). The observable goal is "the reproduction command exits 0 and no debug tag remains".
+- End run 2 with a final audit on `standard`, dependent on the fix node. It reruns the reproduction and tag search (see Debug logs). Since the run changes code, this audit is `review-spec`, joined by `review-standards` (see Two-axis review). The observable goal is "the reproduction command exits 0 and no debug tag remains".
 
 **Debug logs.** The main conversation selects one tag per bug: `[DEBUG-` plus four hex characters, for example `[DEBUG-a4f2]`.
 Put it in every prompt that may add logs and in the final audit.
@@ -201,7 +201,7 @@ Use slices for features. Use deliverable-unit splitting for work with independen
 ## Category routing
 
 `category` routes a node to a model.
-Start each node at `quick`. Increase the category only as difficulty requires.
+Start each node at `trivial`. Increase the category only as difficulty requires.
 Choose specialty categories by the kind of work, never by difficulty.
 
 The main conversation proposes categories in the DAG definition.
@@ -216,38 +216,38 @@ Workers use Sonnet or Opus. Haiku is not a worker route.
 
 The difficulty ladder, bottom rung first:
 
-1. **`quick`** (sonnet) - THE DEFAULT. Mechanical, single-file, or pattern-following work. You need a reason to leave it.
-2. **`unspecified-low`** (sonnet) - small but not mechanical: a few files, or a judgment call a template cannot make.
-3. **`unspecified-high`** (opus) - a standard multi-file feature or fix with real integration surface.
+1. **`trivial`** (sonnet) - THE DEFAULT. Mechanical, single-file, or pattern-following work. You need a reason to leave it.
+2. **`standard`** (sonnet) - small but not mechanical: a few files, or a judgment call a template cannot make.
+3. **`hard`** (opus) - a standard multi-file feature or fix with real integration surface.
 
-Escalate only after trying to split work into safe parallel `quick` pieces.
+Escalate only after trying to split work into safe parallel `trivial` pieces.
 Give a one-line reason, such as "touches six files across three packages".
 Work that can be split safely does not need escalation.
 
 **One standing exception: the final audit.** A final audit judges the whole result from two or more inputs, and nothing depends on it.
 Code-changing runs have two final audits (see Two-axis review).
-Never use `quick` for a final audit. Use `unspecified-low`, or higher for reasoning across many files.
+Never use `trivial` for a final audit. Use `standard`, or higher for reasoning across many files.
 This separates judgment from mechanical checks; both categories use Sonnet.
-Command-and-output comparisons, such as a per-lane test or build, stay `quick`.
+Command-and-output comparisons, such as a per-lane test or build, stay `trivial`.
 
 The plugin enforces this rule on both proposed and Jev-routed categories.
-A final audit assigned `quick` runs on `unspecified-low`, with decision source `rule`.
+A final audit assigned `trivial` runs on `standard`, with decision source `rule`.
 
 Specialty categories:
 
 | Category | Model | Route a node here when |
 | --- | --- | --- |
-| `visual-engineering` | sonnet | Frontend, UI, styling or animation. |
+| `frontend` | sonnet | Frontend, UI, styling or animation. |
 | `writing` | sonnet | Documents, prose or technical writing. |
-| `deep-low` | sonnet | Difficult debugging or cross-module reasoning beyond the ladder, resolved from what the worker reads. |
-| `deep-high` | opus | The same work, but evidence cannot resolve the central decision: trade-offs, cross-package contracts or correctness argued from invariants. |
-| `ultrabrain` | opus | At most one node per graph: the hard reasoning problem on which everything else depends. |
+| `debugging` | sonnet | Difficult debugging or cross-module reasoning beyond the ladder, resolved from what the worker reads. |
+| `reasoning` | opus | The same work, but evidence cannot resolve the central decision: trade-offs, cross-package contracts or correctness argued from invariants. |
+| `crux` | opus | At most one node per graph: the hard reasoning problem on which everything else depends. |
 | `architect` | opus | System design: compare options and propose the design for other nodes to implement. |
-| `artistry` | opus | Unconventional problem-solving beyond standard patterns. |
+| `creative` | opus | Unconventional problem-solving beyond standard patterns. |
 
 Without a confident Jev override, missing or unrecognized `category` values select Sonnet explicitly.
 They do not inherit the session or agent type's model.
-Using `deep-*` or Opus for every node is a routing failure: mechanical lanes pay for the most expensive worker.
+Using an Opus category for every node is a routing failure: mechanical lanes pay for the most expensive worker.
 Use `agent` only when a specific type fits better than `general-purpose`.
 For example, use `Explore` for read-only investigation.
 
@@ -302,7 +302,7 @@ Rules that make node prompts obeyed:
 | --- | --- |
 | Prompt | Missing literal `TASK:` or `STOP WHEN`. |
 | Verification | A graph with two or more nodes has no verification node. |
-| Final audit | A final audit runs on `quick`. |
+| Final audit | A final audit runs on `trivial`. |
 | Files | One producer owns three or more files, counting `writes` and file `verify` paths. |
 | Sections | The only producer names three or more `## Section` headings in its prompt. |
 
@@ -390,7 +390,7 @@ Validate the script with matching, non-matching and missing-input cases.
 **Every graph that changes something ends with at least one verification node** that depends on ALL producer nodes and therefore receives all their outputs. The synthesis node's own claim is not evidence.
 
 - The verification node (in a code-changing run: `review-spec`) runs the REAL check - the test command, the build, the endpoint call - and reports the captured output in its `## Output`.
-- Each final audit falsifies the whole result against the repository, not the producers' reports, so it runs on `unspecified-low` or higher (see Category routing).
+- Each final audit falsifies the whole result against the repository, not the producers' reports, so it runs on `standard` or higher (see Category routing).
 - Each verification node's prompt names the exact invocation and the binary observable that decides PASS vs FAIL, and tells it to report `DAG_NODE_STATUS: failed: <what failed>` when the check fails. The final audit also reports `DAG_NODE_STATUS: failed: partial/supporting-output - <what is missing>` when the safe-but-wrong audit checklist below finds a shortfall.
 - **Keep the audit proportionate.** The final audit sits on the critical path of every run, so its prompt asks for the declared checks plus at most two one-command probes (checklist items 2 and 3) and terse notes: one line per item, only the decisive output line. Never ask it to write verifier scripts, harnesses or mutants. Measured on 2026-10-10: final audits took 150-230 s while each producer took 5-30 s, and one audit spent about 95 s writing its own verifier script with mutants.
 - **A paginated deliverable (PDF, DOCX, deck, print HTML) is verified by its rendered pages**, every page, not by file size or keyword probes.
@@ -422,7 +422,7 @@ The rest of this section describes what a reviewer does and applies to generated
     "name": "Retry backoff",
     "goal": "fetchWithRetry in src/http.ts retries 5xx responses up to three times with exponential backoff, and tests/http.test.ts passes.",
     "nodes": [
-      { "id": "impl", "category": "unspecified-low", "writes": ["src/http.ts", "tests/http.test.ts"],
+      { "id": "impl", "category": "standard", "writes": ["src/http.ts", "tests/http.test.ts"],
         "verify": [{ "kind": "command", "argv": ["bun", "test", "tests/http.test.ts"] }],
         "prompt": "TASK: Add exponential-backoff retry for 5xx responses to fetchWithRetry. DELIVERABLE: the change in src/http.ts and a test in tests/http.test.ts that fails without it. SCOPE: edit those two files only. VERIFY: run bun test tests/http.test.ts. STOP WHEN: the test passes." }
     ],
@@ -436,7 +436,7 @@ The plugin adds `review-spec` and `review-standards`, each depending on `impl`, 
 None of the three is listed under `nodes`; the definition declares only the user's work.
 
 - **When it applies.** At least one producer adds or edits code: source, tests, configuration or build files. Documentation, research and data runs keep one verification node to avoid extra review time. A one-node run (see "One-step tasks are one-node DAGs") stays one node with its VERIFY step.
-- **Shape.** Both reviewers depend on all producers, have no dependents and use no aggregator. Do not merge or re-rank the axes. The settled summary already shows outputs side by side. Keep `review` in both ids so the plugin recognizes them. Use `unspecified-low` or higher because they judge the result. The plugin enforces this only with two or more inputs. With one producer, leaving `quick` produces no warning.
+- **Shape.** Both reviewers depend on all producers, have no dependents and use no aggregator. Do not merge or re-rank the axes. The settled summary already shows outputs side by side. Keep `review` in both ids so the plugin recognizes them. Use `standard` or higher because they judge the result. The plugin enforces this only with two or more inputs. With one producer, leaving `trivial` produces no warning.
 - **`review-spec` judges the result against the goal and the request.** Report (a) missing or partial implementation, (b) unrequested behavior (scope creep), and (c) implemented but wrong-looking behavior. Each finding quotes its request sentence and cites evidence as file:line. For (b), quote the nearest sentence it exceeds, or state that no sentence covers it. The spec is the run's `goal` plus request text pasted into the prompt. "See the goal" is not a quote. Rerun the producers' real check from `verify`; record its exit code as evidence for (c). Use `## Request sentences`, `## Findings`, and `## Real check` in the notes file, one line per entry. Under Findings, include groups (a), (b), (c), each `none` when empty. Include the Safe-but-wrong audit checklist below in the prompt.
 - **`review-standards` judges the result against the repository's rule files** and the Fowler code-smell baseline. For a generated reviewer list known rule files in `review.rules`; the node reads them first and then searches the repository root and the touched folders for more. For a hand-written reviewer name known files, such as CONTRIBUTING and CLAUDE.md, in the prompt; the node searches for more. Load the baseline with `load_skills: ["dag-workflow:review-standards", "dag-workflow:anti-slop"]`; a generated reviewer loads both already. A hard anti-slop pattern the diff proves on a changed line is a breach, recorded as `anti-slop: <pattern> - <file:line> - <proof>; <fix>`; its readability calls are judgment calls. `load_skills` is outside the fingerprint; adding it through `amend` re-runs nothing. Quote the rule for every documented breach. Label smells as judgment calls, never hard violations. Repository rules override the baseline. Skip what a linter or compiler already enforces. Use `## Rule sources`, `## Rule breaches`, and `## Judgment calls` in the notes file, each `none` when empty. If no rule files exist, say so and use only the baseline. If the baseline is missing from context, write "baseline unavailable" and judge only documented rules.
 - **Verdict lines.** Write each notes file once, in full, with exactly one final verdict line. Use `Spec verdict: PASS` or `Spec verdict: FAIL`, and `Standards verdict: PASS` or `Standards verdict: FAIL`. Spec passes only when (a), (b), (c) are empty, the real check exits 0, and the checklist holds. Standards fails only for documented-rule breaches; judgment calls alone pass. On FAIL, end the node with `DAG_NODE_STATUS: failed: <what failed>`.

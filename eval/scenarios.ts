@@ -8,7 +8,7 @@ export type Scenario = {
   unchanged?: string[]
 }
 
-// 450 files hold 675 TODOs, above the doctrine's 200 items per quick node, so a plan that follows it needs at least three batches and a fan-in.
+// 450 files hold 675 TODOs, above the doctrine's 200 items per trivial node, so a plan that follows it needs at least three batches and a fan-in.
 const todoFiles = Object.fromEntries(
   Array.from({ length: 450 }, (_, i) => {
     const n = i + 1

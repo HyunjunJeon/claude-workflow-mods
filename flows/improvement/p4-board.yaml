@@ -22,9 +22,9 @@
 #   wave 4: board-host (wires the engine, view and retention into register.ts and policy.ts)
 #   wave 5: board-docs (documents what board-host reports)
 #   then:   review-spec, review-standards, commit (generated)
-# Categories: quick for mechanical lanes (contract, renderers, retention, view dispatch); unspecified-low for the engine
+# Categories: trivial for mechanical lanes (contract, renderers, retention, view dispatch); standard for the engine
 # (validation rules and atomic edits), the flow layout (must leave DAG output byte-identical) and the sequence layout
-# (new layout algorithm); unspecified-high for board-host (integration across the 3000+ line register.ts); writing for docs.
+# (new layout algorithm); hard for board-host (integration across the 3000+ line register.ts); writing for docs.
 # Wave-2 nodes declare only file checks: five lanes edit tests/ at once, so a full `claude plugin test .` in their verify
 # could fail on a sibling's half-written file. Each worker still runs the suite itself; board-view, board-host and
 # review-spec run it on the whole result.
@@ -76,7 +76,7 @@ commit:
 nodes:
   - id: board-contract
     label: Shared board types
-    category: quick
+    category: trivial
     writes:
       - hooks/engine/board-types.ts
     verify:
@@ -151,7 +151,7 @@ nodes:
 
   - id: board-engine
     label: Board validation, atomic edits and the board tool spec
-    category: unspecified-low
+    category: standard
     dependsOn:
       - board-contract
     load_skills:
@@ -195,7 +195,7 @@ nodes:
 
   - id: flow-layout
     label: Flow diagram layout on the DAG graph layout
-    category: unspecified-low
+    category: standard
     dependsOn:
       - board-contract
     load_skills:
@@ -229,7 +229,7 @@ nodes:
 
   - id: sequence-layout
     label: Sequence diagram layout
-    category: unspecified-low
+    category: standard
     dependsOn:
       - board-contract
     load_skills:
@@ -258,7 +258,7 @@ nodes:
 
   - id: board-blocks
     label: Renderers for section, callout, table and code_peek blocks
-    category: quick
+    category: trivial
     dependsOn:
       - board-contract
     load_skills:
@@ -293,7 +293,7 @@ nodes:
 
   - id: board-retention
     label: Prune old board files with the retention setting
-    category: quick
+    category: trivial
     dependsOn:
       - board-contract
     load_skills:
@@ -320,7 +320,7 @@ nodes:
 
   - id: board-view
     label: Board section view model with pagination
-    category: quick
+    category: trivial
     dependsOn:
       - flow-layout
       - sequence-layout
@@ -355,7 +355,7 @@ nodes:
 
   - id: board-host
     label: Wire the board tool, persistence, retention and the Board pane section
-    category: unspecified-high
+    category: hard
     dependsOn:
       - board-engine
       - board-view

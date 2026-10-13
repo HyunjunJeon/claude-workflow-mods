@@ -12,7 +12,7 @@ function fanIn(runId = 'r1', sessionId = 's1', createdAt = 1): Run {
     key: 'fan-in-' + runId,
     name: 'Fan in',
     nodes: [
-      { id: 'a', prompt: 'A', category: 'quick', task_summary: 'write a.txt' },
+      { id: 'a', prompt: 'A', category: 'trivial', task_summary: 'write a.txt' },
       { id: 'b', prompt: 'B' },
       { id: 'c', prompt: 'C', dependsOn: ['a', 'b'] },
     ],

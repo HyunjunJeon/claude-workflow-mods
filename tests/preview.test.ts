@@ -30,26 +30,26 @@ test('a single node is its own critical path', async () => {
   expect(preview([node('only')]).critical_path).toEqual(['only'])
 })
 
-test('a final audit proposed as quick previews as unspecified-low on sonnet', async () => {
-  const nodes = [node('a'), node('b'), node('final-audit', ['a', 'b'], { category: 'quick' })]
+test('a final audit proposed as trivial previews as standard on sonnet', async () => {
+  const nodes = [node('a'), node('b'), node('final-audit', ['a', 'b'], { category: 'trivial' })]
   const audit = preview(nodes).nodes.find(n => n.id === 'final-audit')
-  expect(audit?.category).toBe('unspecified-low')
+  expect(audit?.category).toBe('standard')
   expect(audit?.model).toBe('sonnet')
 })
 
-test('a final audit without a category is treated as quick and shown as unspecified-low', async () => {
+test('a final audit without a category is treated as trivial and shown as standard', async () => {
   const audit = preview([node('a'), node('b'), node('verify-all', ['a', 'b'])]).nodes.find(n => n.id === 'verify-all')
-  expect(audit?.category).toBe('unspecified-low')
+  expect(audit?.category).toBe('standard')
 })
 
-test('a node that is not a final audit keeps quick and an unset category shows quick', async () => {
-  const p = preview([node('a', [], { category: 'quick' }), node('b')])
-  expect(p.nodes.map(n => [n.category, n.model])).toEqual([['quick', 'sonnet'], ['quick', 'sonnet']])
+test('a node that is not a final audit keeps trivial and an unset category shows trivial', async () => {
+  const p = preview([node('a', [], { category: 'trivial' }), node('b')])
+  expect(p.nodes.map(n => [n.category, n.model])).toEqual([['trivial', 'sonnet'], ['trivial', 'sonnet']])
 })
 
-test('unspecified-high previews on opus and an unregistered category on sonnet', async () => {
-  const p = preview([node('a', [], { category: 'unspecified-high' }), node('b', [], { category: 'made-up' })])
-  expect(p.nodes.map(n => [n.category, n.model])).toEqual([['unspecified-high', 'opus'], ['made-up', 'sonnet']])
+test('hard previews on opus and an unregistered category on sonnet', async () => {
+  const p = preview([node('a', [], { category: 'hard' }), node('b', [], { category: 'made-up' })])
+  expect(p.nodes.map(n => [n.category, n.model])).toEqual([['hard', 'opus'], ['made-up', 'sonnet']])
 })
 
 test('a node reports its agent, dependencies, check count, writes and skills', async () => {
@@ -62,11 +62,11 @@ test('a node reports its agent, dependencies, check count, writes and skills', a
       verify: [{ kind: 'file', path: 'src/x.ts', contains: 'x' }, { kind: 'command', argv: ['bun', 'test'] }],
     }),
   ])
-  expect(p.nodes[0]).toEqual({ id: 'a', wave: 1, category: 'quick', model: 'sonnet', agent: 'general-purpose', depends_on: [], checks: 0, writes: null, load_skills: [] })
+  expect(p.nodes[0]).toEqual({ id: 'a', wave: 1, category: 'trivial', model: 'sonnet', agent: 'general-purpose', depends_on: [], checks: 0, writes: null, load_skills: [] })
   expect(p.nodes[1]).toEqual({
     id: 'b',
     wave: 2,
-    category: 'quick',
+    category: 'trivial',
     model: 'sonnet',
     agent: 'reviewer',
     depends_on: ['a'],
@@ -177,7 +177,7 @@ test('an unknown category adds a warning after the lint warnings and still previ
 })
 
 test('known categories, an unset category and the final-audit rule add no category warning', async () => {
-  const nodes = [node('a', [], { category: 'architect' }), node('b', [], { category: 'deep-low' }), node('c'), node('final-audit', ['a', 'b', 'c'], { category: 'quick' })]
+  const nodes = [node('a', [], { category: 'architect' }), node('b', [], { category: 'debugging' }), node('c'), node('final-audit', ['a', 'b', 'c'], { category: 'trivial' })]
   expect(preview(nodes).warnings).toEqual(lintDefinition(def(nodes)))
 })
 

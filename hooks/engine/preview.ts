@@ -9,11 +9,11 @@ export type Preview = { node_count: number; waves: string[][]; critical_path: st
 
 const ROUTING_NOTE = 'category and model are the definition\'s proposal after the final-audit rule; Jev may reroute a node when the run starts.'
 
-// The category the node runs on at start. Same rule as the runtime: a final audit proposed as quick runs on unspecified-low.
+// The category the node runs on at start. Same rule as the runtime: a final audit proposed as trivial runs on standard.
 // Jev may still reroute a node when the real start happens (it can answer a different category), so this is the proposal after the rule, not a promise.
 function effectiveCategory(definition: Definition, node: NodeDef): string {
-  const proposed = node.category ?? 'quick'
-  return proposed === 'quick' && isFinalAudit(definition, node) ? 'unspecified-low' : proposed
+  const proposed = node.category ?? 'trivial'
+  return proposed === 'trivial' && isFinalAudit(definition, node) ? 'standard' : proposed
 }
 
 // The most specific path of two normalized paths when they overlap, else undefined. "." is the project root and overlaps everything.

@@ -33,7 +33,7 @@ test('metrics report widths, joins and the producer shape without the verificati
   const m = shapeOf(graph({ fix1: [], fix2: [], fix3: [], verify: ['fix1', 'fix2', 'fix3'] }))
   expect(m).toMatchObject({ nodes: 4, edges: 3, depth: 2, widths: [3, 1], maxWidth: 3, fanInNodes: 1, verify: true, shape: 'fan-out/fan-in', producerShape: 'parallel' })
   expect(m.categories).toEqual({ '(session)': 4 })
-  // Four prompt-contract warnings, and verify is a final audit without a category, which routes as quick.
+  // Four prompt-contract warnings, and verify is a final audit without a category, which routes as trivial.
   expect(m.warnings).toBe(5)
   expect(shapeOf(graph({ build: [], verify: ['build'] })).producerShape).toBe('single')
 })
@@ -82,13 +82,13 @@ test('Given recovery and routing on a node, when summarized, then they are carri
   const run = runWith([
     nodeRun('a', {
       attempt: 3,
-      routing: { source: 'jev', category: 'quick', confidence: 0.9 },
+      routing: { source: 'jev', category: 'trivial', confidence: 0.9 },
       recovery: { used: 2, kind: 'implementation', reason: 'r', model: 'opus', history: [] },
     }),
     nodeRun('b'),
   ])
   const { nodes, totals } = verificationOf(run)
-  expect(nodes[0]).toEqual({ id: 'a', state: 'completed', attempt: 3, verification: 'unrecorded', recoveryUsed: 2, recoveryKind: 'implementation', routedCategory: 'quick', routingSource: 'jev' })
+  expect(nodes[0]).toEqual({ id: 'a', state: 'completed', attempt: 3, verification: 'unrecorded', recoveryUsed: 2, recoveryKind: 'implementation', routedCategory: 'trivial', routingSource: 'jev' })
   expect(nodes[1]).toEqual({ id: 'b', state: 'completed', attempt: 1, verification: 'unrecorded', recoveryUsed: 0 })
   expect(totals.autoRetries).toBe(2)
 })

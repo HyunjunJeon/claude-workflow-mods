@@ -15,7 +15,7 @@
 #   wave 1: skill-interview, skill-pm, board-host-p2 (three lanes, disjoint writes)
 #   wave 2: board-docs-p2 (documents what the three lanes report)
 #   then:   review-spec, review-standards, commit (generated)
-# Categories: writing for the two skill files and the docs (model-facing and user-facing prose); unspecified-low for
+# Categories: writing for the two skill files and the docs (model-facing and user-facing prose); standard for
 # board-host-p2 (two small host behaviours in register.ts plus one pure UI change, with tests).
 # Expected lint warning: board-host-p2 owns more than three files; it is one slice (both behaviours meet in register.ts
 # and i18n.ts) and stays one node.
@@ -119,7 +119,7 @@ nodes:
 
   - id: board-host-p2
     label: Keep the DAG in front during a run and point the approval block at the board
-    category: unspecified-low
+    category: standard
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop

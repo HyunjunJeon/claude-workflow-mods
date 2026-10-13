@@ -32,9 +32,9 @@ function input(overrides: Partial<InspectorInput> = {}): InspectorInput {
 function decision(n: number, overrides: Partial<DecisionRecord> = {}): DecisionRecord {
   return {
     id: `d${n}`, at: 1_000 + n, sessionId: 'me', kind: 'routing', subject: `node-${n}`,
-    proposed: 'quick', selected: 'deep-low', source: 'jev', outcome: 'applied',
+    proposed: 'trivial', selected: 'debugging', source: 'jev', outcome: 'applied',
     ruleset: 'dag-policy-2026-10-02-v1', threshold: 0.9, latencyMs: 412, stateHash: 'h'.repeat(64),
-    confidence: 0.97, probabilities: { 'deep-low': 0.97, quick: 0.03 }, runId: 'r1', nodeId: 'a', ...overrides,
+    confidence: 0.97, probabilities: { 'debugging': 0.97, trivial: 0.03 }, runId: 'r1', nodeId: 'a', ...overrides,
   }
 }
 
@@ -86,15 +86,15 @@ test('decisions paginate eight rows newest first with finite page actions', () =
 
 test('decision detail exposes the recorded fields and only a back action', () => {
   const { confidence, probabilities, ...rest } = decision(2)
-  const baseline: DecisionRecord = { ...rest, source: 'baseline', outcome: 'ask', proposed: 'quick', selected: 'quick' }
+  const baseline: DecisionRecord = { ...rest, source: 'baseline', outcome: 'ask', proposed: 'trivial', selected: 'trivial' }
   const decisions = [decision(1), baseline, decision(3)]
   const detail = buildInspector(input({ decisions, selectedDecisionId: 'd3', page: 7 }))
   expect(ids(detail)).toEqual(['decision:back'])
   expect(detail.title.includes('d3')).toBe(true)
   const body = flat(detail)
-  for (const value of ['quick', 'deep-low', '0.97', '0.90', 'dag-policy-2026-10-02-v1', '412ms', 'r1 · a', '0.03']) expect(body.includes(value)).toBe(true)
+  for (const value of ['trivial', 'debugging', '0.97', '0.90', 'dag-policy-2026-10-02-v1', '412ms', 'r1 · a', '0.03']) expect(body.includes(value)).toBe(true)
   expect(squashed(detail).includes('h'.repeat(64))).toBe(true)
-  expect(detail.lines.filter(line => line.some(segment => segment.text === 'deep-low' && segment.color === 'cyan' && segment.bold === true)).length).toBe(2)
+  expect(detail.lines.filter(line => line.some(segment => segment.text === 'debugging' && segment.color === 'cyan' && segment.bold === true)).length).toBe(2)
   const narrow = buildInspector(input({ decisions, selectedDecisionId: 'd3', columns: 28 }))
   expect(squashed(narrow).includes('h'.repeat(64))).toBe(true)
   const plain = flat(buildInspector(input({ decisions, selectedDecisionId: 'd2' })))

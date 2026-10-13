@@ -22,7 +22,7 @@
 # Edges: result-host consumes every wave-1 Output (exported names and signatures); result-docs consumes the user-facing
 # facts from result-facts (block contents), chip-view (the hint text), settle-board-text (the model instructions) and
 # result-host (strings and behaviour).
-# Categories: unspecified-low for the five small pure modules with tests; unspecified-high for result-host (it joins
+# Categories: standard for the five small pure modules with tests; hard for result-host (it joins
 # five modules on the settle path and the prompt.submit hook, where a mistake loses the settle message or every
 # prompt's context); writing for the Korean README and docs.
 # Wave-1 checks are file checks only: the full suite and tsc cover every file, so they would fail on a sibling lane's
@@ -74,7 +74,7 @@ commit:
 nodes:
   - id: board-run-link
     label: A board can name the run it reports and the blocks that hold the run's facts
-    category: unspecified-low
+    category: standard
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop
@@ -108,7 +108,7 @@ nodes:
 
   - id: result-facts
     label: Build the result board's fact blocks from a settled run
-    category: unspecified-low
+    category: standard
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop
@@ -149,7 +149,7 @@ nodes:
 
   - id: chip-text
     label: Name a block as a chip and turn a cited chip into model context
-    category: unspecified-low
+    category: standard
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop
@@ -184,7 +184,7 @@ nodes:
 
   - id: chip-view
     label: Block headers in the Board section become chip buttons
-    category: unspecified-low
+    category: standard
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop
@@ -221,7 +221,7 @@ nodes:
 
   - id: settle-board-text
     label: The settle message names the result board and asks for a Verified result section
-    category: unspecified-low
+    category: standard
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop
@@ -250,7 +250,7 @@ nodes:
 
   - id: result-host
     label: Draw the result board at settle and turn chips into prompt context
-    category: unspecified-high
+    category: hard
     dependsOn:
       - board-run-link
       - result-facts

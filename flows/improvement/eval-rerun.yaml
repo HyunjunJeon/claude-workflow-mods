@@ -29,7 +29,7 @@ goal: eval/baselines/rerun-baseline.md holds the 8 rows of the eval re-run after
 nodes:
   - id: shard-1
     label: Run single-edit and parallel-files
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/rerun-shard-1.md
     verify:
@@ -84,7 +84,7 @@ nodes:
 
   - id: shard-2
     label: Run map-reduce-docs and pipeline-stats
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/rerun-shard-2.md
     verify:
@@ -139,7 +139,7 @@ nodes:
 
   - id: shard-3
     label: Run diamond-app and debug-fix
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/rerun-shard-3.md
     verify:
@@ -194,7 +194,7 @@ nodes:
 
   - id: shard-4
     label: Run wide-harvest and research-write
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/rerun-shard-4.md
     verify:
@@ -249,7 +249,7 @@ nodes:
 
   - id: baseline-combine
     label: Combine the shard tables into the re-run baseline
-    category: quick
+    category: trivial
     dependsOn:
       - shard-1
       - shard-2
@@ -322,7 +322,7 @@ nodes:
 
   - id: baseline-audit
     label: Audit the baseline against the result JSON files
-    category: unspecified-low
+    category: standard
     dependsOn:
       - shard-1
       - shard-2
@@ -365,7 +365,7 @@ nodes:
 
   - id: compare-p0
     label: Compare the re-run with the P0 baseline
-    category: quick
+    category: trivial
     dependsOn:
       - baseline-audit
     writes:

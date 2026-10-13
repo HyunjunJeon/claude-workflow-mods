@@ -25,7 +25,7 @@ goal: eval/baselines/p0-baseline.md holds the Phase 0 eval baseline with one row
 nodes:
   - id: shard-1
     label: Run single-edit and parallel-files
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/p0-shard-1.md
     verify:
@@ -80,7 +80,7 @@ nodes:
 
   - id: shard-2
     label: Run map-reduce-docs and pipeline-stats
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/p0-shard-2.md
     verify:
@@ -135,7 +135,7 @@ nodes:
 
   - id: shard-3
     label: Run diamond-app and debug-fix
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/p0-shard-3.md
     verify:
@@ -190,7 +190,7 @@ nodes:
 
   - id: shard-4
     label: Run wide-harvest and research-write
-    category: quick
+    category: trivial
     writes:
       - eval/baselines/p0-shard-4.md
     verify:
@@ -245,7 +245,7 @@ nodes:
 
   - id: baseline-combine
     label: Combine the shard tables into the P0 baseline
-    category: quick
+    category: trivial
     dependsOn:
       - shard-1
       - shard-2
@@ -315,7 +315,7 @@ nodes:
 
   - id: baseline-audit
     label: Audit the baseline against the result JSON files
-    category: unspecified-low
+    category: standard
     dependsOn:
       - shard-1
       - shard-2
@@ -358,7 +358,7 @@ nodes:
 
   - id: progress-log
     label: Record P0 in the progress table
-    category: quick
+    category: trivial
     dependsOn:
       - baseline-audit
     writes:

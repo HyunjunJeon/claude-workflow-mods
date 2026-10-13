@@ -150,9 +150,9 @@ export function lintDefinition(definition: Definition): string[] {
     warnings.push('the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.')
   }
   for (const node of definition.nodes) {
-    // A missing category routes as quick, so it is held to the same rule.
-    if ((node.category ?? 'quick') === 'quick' && isFinalAudit(definition, node)) {
-      warnings.push(`node "${node.id}": the final audit requires judgment across inputs, while quick is reserved for mechanical checks - it runs on unspecified-low instead; write unspecified-low or higher in the definition. Both quick and unspecified-low use sonnet.`)
+    // A missing category routes as trivial, so it is held to the same rule.
+    if ((node.category ?? 'trivial') === 'trivial' && isFinalAudit(definition, node)) {
+      warnings.push(`node "${node.id}": the final audit requires judgment across inputs, while trivial is reserved for mechanical checks - it runs on standard instead; write standard or higher in the definition. Both trivial and standard use sonnet.`)
     }
   }
   if (definition.goal === undefined || definition.goal.trim() === '') {

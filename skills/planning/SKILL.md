@@ -47,7 +47,7 @@ See the Debug chain in the reference.
 Before `start`, state one concise run plan:
 
 - Components and waves.
-- A one-line reason for every non-`quick` category.
+- A one-line reason for every non-`trivial` category.
 - Edges and the data each edge carries.
 - The verification node.
 
@@ -129,7 +129,7 @@ List as dependencies exactly the nodes whose results a node consumes - no more, 
     "name": "Docs refresh",
     "goal": "README.md documents the current DAG tool actions in hooks/engine/tool-spec.ts, with an independent audit report.",
     "nodes": [
-      { "id": "audit", "category": "quick", "writes": ["notes/docs-audit.md"],
+      { "id": "audit", "category": "trivial", "writes": ["notes/docs-audit.md"],
         "verify": [{ "kind": "file", "path": "notes/docs-audit.md", "contains": "## Stale pages" }],
         "prompt": "TASK: Compare README.md with hooks/engine/tool-spec.ts. DELIVERABLE: notes/docs-audit.md with a '## Stale pages' section listing missing or wrong action descriptions. SCOPE: read those two files, write only the report. VERIFY: recheck each finding against the tool schema. STOP WHEN: every action has been checked and the report exists." },
       { "id": "rewrite", "category": "writing", "dependsOn": ["audit"], "writes": ["README.md"],
@@ -138,7 +138,7 @@ List as dependencies exactly the nodes whose results a node consumes - no more, 
           { "kind": "command", "argv": ["git", "diff", "--check", "--", "README.md"] }
         ],
         "prompt": "TASK: Correct README.md using the audit. DELIVERABLE: updated action descriptions. SCOPE: edit README.md only. VERIFY: compare the changed descriptions to hooks/engine/tool-spec.ts and run git diff --check -- README.md. STOP WHEN: each finding is addressed." },
-      { "id": "verify", "category": "unspecified-low", "dependsOn": ["rewrite"], "writes": ["notes/docs-verify.md"],
+      { "id": "verify", "category": "standard", "dependsOn": ["rewrite"], "writes": ["notes/docs-verify.md"],
         "verify": [
           { "kind": "command", "argv": ["claude", "plugin", "validate", "."] },
           { "kind": "file", "path": "notes/docs-verify.md", "lastLine": "Action audit: PASS" }

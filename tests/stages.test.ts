@@ -15,7 +15,7 @@ const USER_NODES = [
   {
     id: 'build',
     prompt: full('build the CLI'),
-    category: 'unspecified-high',
+    category: 'hard',
     writes: ['src/cli.ts'],
     verify: [{ kind: 'command', argv: ['bun', 'test', 'tests/cli.test.ts'] }],
   },
@@ -47,8 +47,8 @@ test('review adds review-spec and review-standards after every user node, on the
   expect(definition.nodes.map(candidate => candidate.id)).toEqual(['build', 'docs', 'review-spec', 'review-standards'])
   const spec = node(definition, 'review-spec')
   const standards = node(definition, 'review-standards')
-  expect([spec.dependsOn, spec.category, spec.writes, spec.label]).toEqual([['build', 'docs'], 'unspecified-low', [], 'Review: spec axis'])
-  expect([standards.dependsOn, standards.category, standards.writes, standards.label]).toEqual([['build', 'docs'], 'unspecified-low', [], 'Review: standards axis'])
+  expect([spec.dependsOn, spec.category, spec.writes, spec.label]).toEqual([['build', 'docs'], 'standard', [], 'Review: spec axis'])
+  expect([standards.dependsOn, standards.category, standards.writes, standards.label]).toEqual([['build', 'docs'], 'standard', [], 'Review: standards axis'])
   expect(standards.load_skills).toEqual(['dag-workflow:review-standards', 'dag-workflow:anti-slop'])
   expect(spec.load_skills).toBeUndefined()
 })
@@ -58,11 +58,11 @@ const COMMITS = [
   { message: 'docs: document greet', paths: ['README.md'] },
 ]
 
-test('commit after review depends on both reviewers, runs on quick and declares no writes', () => {
+test('commit after review depends on both reviewers, runs on trivial and declares no writes', () => {
   const definition = parse({ review: { request: REQUEST }, commit: COMMITS })
   expect(definition.nodes.map(candidate => candidate.id)).toEqual(['build', 'docs', 'review-spec', 'review-standards', 'commit'])
   const commit = node(definition, 'commit')
-  expect([commit.dependsOn, commit.category, commit.writes]).toEqual([['review-spec', 'review-standards'], 'quick', undefined])
+  expect([commit.dependsOn, commit.category, commit.writes]).toEqual([['review-spec', 'review-standards'], 'trivial', undefined])
 })
 
 test('commit without review depends on every user node', () => {
@@ -190,12 +190,12 @@ test('reviewer verify checks read the verdict line and the findings heading of t
 })
 
 test('review notes, category and rules replace the defaults', () => {
-  const definition = parse({ review: { request: REQUEST, notes: '/var/tmp/greet-notes/', category: 'unspecified-high', rules: ['CONTRIBUTING.md', 'docs/style.md'] } })
+  const definition = parse({ review: { request: REQUEST, notes: '/var/tmp/greet-notes/', category: 'hard', rules: ['CONTRIBUTING.md', 'docs/style.md'] } })
   const spec = node(definition, 'review-spec')
   const standards = node(definition, 'review-standards')
   expect(spec.verify?.[0]).toEqual({ kind: 'file', path: '/var/tmp/greet-notes/review-spec-notes.md', lastLine: 'Spec verdict: PASS' })
   expect(standards.verify?.[0]).toEqual({ kind: 'file', path: '/var/tmp/greet-notes/review-standards-notes.md', lastLine: 'Standards verdict: PASS' })
-  expect([spec.category, standards.category]).toEqual(['unspecified-high', 'unspecified-high'])
+  expect([spec.category, standards.category]).toEqual(['hard', 'hard'])
   expect(standards.prompt).toContain('CONTRIBUTING.md, docs/style.md')
 })
 
@@ -315,9 +315,9 @@ test('the same input expands to the same nodes, fingerprints and hash, and spell
   const second = parse(input)
   expect(second).toEqual(first)
   expect(second.nodes.map(nodeFingerprint)).toEqual(first.nodes.map(nodeFingerprint))
-  const explicit = parse({ review: { request: REQUEST, notes: CLI_FOLDER, category: 'unspecified-low' }, commit: COMMITS })
+  const explicit = parse({ review: { request: REQUEST, notes: CLI_FOLDER, category: 'standard' }, commit: COMMITS })
   expect(definitionHash(explicit)).toBe(definitionHash(first))
-  expect(first.review).toEqual({ request: REQUEST, notes: CLI_FOLDER, category: 'unspecified-low' })
+  expect(first.review).toEqual({ request: REQUEST, notes: CLI_FOLDER, category: 'standard' })
   expect(first.commit).toEqual(COMMITS)
 })
 
@@ -386,8 +386,8 @@ test('lint finds no warning in a definition expanded with review and commit, or 
   expect(lintDefinition(parse({ review: { request: REQUEST } }))).toEqual([])
 })
 
-test('lint still flags reviewers routed to quick as final audits, so the clean result above is not vacuous', () => {
-  const warnings = lintDefinition(parse({ review: { request: REQUEST, category: 'quick' } }))
+test('lint still flags reviewers routed to trivial as final audits, so the clean result above is not vacuous', () => {
+  const warnings = lintDefinition(parse({ review: { request: REQUEST, category: 'trivial' } }))
   expect(warnings.filter(warning => warning.includes('final audit')).length).toBe(2)
 })
 
@@ -429,7 +429,7 @@ test('a YAML definition file declares review and commit in block style', () => {
   const parsed = parseDefinition(parseYaml(source))
   if (!parsed.ok) throw new Error(parsed.error.message)
   expect(parsed.value.nodes.map(candidate => candidate.id)).toEqual(['build', 'review-spec', 'review-standards', 'commit'])
-  expect(parsed.value.review).toEqual({ request: 'Add a greet CLI.\nKeep it small.', notes: '/tmp/dag-review/yaml-phase-7520b8', category: 'unspecified-low', rules: ['AGENTS.md'] })
+  expect(parsed.value.review).toEqual({ request: 'Add a greet CLI.\nKeep it small.', notes: '/tmp/dag-review/yaml-phase-7520b8', category: 'standard', rules: ['AGENTS.md'] })
   expect(node(parsed.value, 'commit').verify?.[0]).toEqual({ kind: 'command', argv: ['git', 'log', '-1', '--skip=0', '--format=%s'], expect: { stdout: { equals: 'feat(cli): add greet' } } })
 })
 
@@ -482,7 +482,7 @@ test('security adds seven lens nodes on the user nodes and review-security on th
     const current = node(definition, `security-${lens}`)
     const notes = `${CLI_FOLDER}/security-${lens}-notes.md`
     expect([current.dependsOn, current.category, current.writes, current.label, current.load_skills])
-      .toEqual([['build', 'docs'], 'unspecified-low', [], `Security lens: ${lens}`, ['dag-workflow:secure-coding']])
+      .toEqual([['build', 'docs'], 'standard', [], `Security lens: ${lens}`, ['dag-workflow:secure-coding']])
     expect(current.verify).toEqual([{ kind: 'file', path: notes, lastLine: 'Security lens: done' }, { kind: 'file', path: notes, contains: '## Candidates' }])
   }
   const security = node(definition, 'review-security')
@@ -626,8 +626,8 @@ test('each candidate becomes one verifier that depends on no node, so no lens or
   const built = verifierNodes(definition, 'security-injection', [CANDIDATE, second])
   if (!built.ok) throw new Error(built.error.message)
   expect(built.value.map(current => [current.id, current.dependsOn, current.expandedFrom, current.label, current.category, current.writes, current.load_skills])).toEqual([
-    ['security-verify-injection-1', [], 'security-injection', 'Security check: injection 1', 'unspecified-low', [], ['dag-workflow:secure-coding']],
-    ['security-verify-injection-2', [], 'security-injection', 'Security check: injection 2', 'unspecified-low', [], ['dag-workflow:secure-coding']],
+    ['security-verify-injection-1', [], 'security-injection', 'Security check: injection 1', 'standard', [], ['dag-workflow:secure-coding']],
+    ['security-verify-injection-2', [], 'security-injection', 'Security check: injection 2', 'standard', [], ['dag-workflow:secure-coding']],
   ])
   const notes = `${VERIFY_FOLDER}/injection/security-verify-injection-1-notes.md`
   expect(built.value[0]?.verify).toEqual([

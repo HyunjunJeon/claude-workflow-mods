@@ -3,7 +3,7 @@ import { appendDecisions, DECISION_LIMIT, parseDecisionLog, type DecisionRecord 
 
 const record: DecisionRecord = {
   id: 'd', at: 1, sessionId: 's', kind: 'routing', subject: 'node',
-  proposed: 'quick', selected: 'architect', source: 'jev', outcome: 'applied',
+  proposed: 'trivial', selected: 'architect', source: 'jev', outcome: 'applied',
   ruleset: 'v1', threshold: 0.9, latencyMs: 12, stateHash: 'hash', confidence: 0.95,
 }
 
@@ -22,7 +22,7 @@ test('decision history is bounded, ordered and isolated by project and session',
 })
 
 test('a decision the final-audit rule made survives a reload', () => {
-  const ruled: DecisionRecord = { ...record, proposed: 'quick', selected: 'unspecified-low', source: 'rule', outcome: 'low-confidence', confidence: 0.6 }
+  const ruled: DecisionRecord = { ...record, proposed: 'trivial', selected: 'standard', source: 'rule', outcome: 'low-confidence', confidence: 0.6 }
   expect(parseDecisionLog({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records: [ruled] }, '/p', 's')).toEqual([ruled])
 })
 

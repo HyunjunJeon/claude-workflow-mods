@@ -126,7 +126,7 @@ claude --plugin-dir /path/to/this-project
 계획 스킬은 검증도 묶어서 하게 합니다. 관련 변경은 한 단계 실행으로 묶고 끝에 검증 단계 하나(코드는 검토 한 쌍, 곧 `review-spec`과 `review-standards`)만 둡니다. 작은 변경마다 검토 한 쌍을 붙이지 않고, 단계 전체는 종단 시나리오 테스트로 증명합니다. 검토 한 쌍과 커밋은 정의의 `review`와 `commit` 필드로 선언하면 플러그인이 노드로 만들어 주므로 손으로 쓰지 않습니다([검토와 커밋 단계](#검토와-커밋-단계)).
 
 mod는 이 스킬을 강제로 연결합니다.  
-프로토콜과 거부 메시지가 스킬을 안내하고, strict와 auto에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/validate/check/test/review/audit로 시작하는 단어가 있고 다른 노드에 의존. `preview`는 해당하지 않습니다)가 없거나, 한 노드가 파일 셋 이상을 혼자 만들거나(`writes`와 파일 검사 `verify`의 경로를 세며 테스트 경로는 제외하고, 선언한 폴더와 그 안의 파일은 한 번만 세어 `writes: ['skills/x/']`에 그 안의 파일 둘을 검사하면 둘로 셉니다), 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `quick`이면 경고합니다. 경고는 실행을 막지 않지만, `quick`인 최종 감사는 실행할 때 `unspecified-low`로 올립니다.
+프로토콜과 거부 메시지가 스킬을 안내하고, strict와 auto에서는 스킬을 불러오기 전까지 첫 계획을 거부하며, `start`와 `amend` 결과의 `warnings`가 계약을 점검합니다. 정의에 `goal`이 없거나 공백뿐이거나(goal 누락, 정의당 경고 하나이며 다른 경고 뒤에 붙고 `goal`은 모든 노드가 봅니다), 노드 프롬프트에 `TASK:`나 `STOP WHEN`이 없거나, 노드가 둘 이상인데 검증 노드(id·label·요약에 verify/validate/check/test/review/audit로 시작하는 단어가 있고 다른 노드에 의존. `preview`는 해당하지 않습니다)가 없거나, 한 노드가 파일 셋 이상을 혼자 만들거나(`writes`와 파일 검사 `verify`의 경로를 세며 테스트 경로는 제외하고, 선언한 폴더와 그 안의 파일은 한 번만 세어 `writes: ['skills/x/']`에 그 안의 파일 둘을 검사하면 둘로 셉니다), 결과 전체를 판정하는 최종 감사(아무 노드도 의존하지 않고 입력이 둘 이상인 검증 노드)가 `trivial`이면 경고합니다. 경고는 실행을 막지 않지만, `trivial`인 최종 감사는 실행할 때 `standard`로 올립니다.
 
 ### 정렬 스킬: 인터뷰와 PM
 
@@ -169,7 +169,7 @@ name: Integration review
 goal: Find and confirm wiring bugs before the release
 nodes:
   - id: navigation
-    category: quick
+    category: trivial
     prompt: Audit src/navigation for dead routes. Write findings to notes/navigation.md.
     writes: [notes/navigation.md]
     verify:
@@ -186,7 +186,7 @@ nodes:
         path: notes/gates.md
         contains: "## Unwired gates"
   - id: verify
-    category: unspecified-low
+    category: standard
     dependsOn: [navigation, gate-wiring]
     prompt: Read notes/*.md, verify each finding against the code, and write the verdict to notes/verdict.md.
     writes: [notes/verdict.md]
@@ -205,7 +205,7 @@ nodes:
 | `prompt`                               | 혼자 읽어도 이해되는 작업 지시                                                                                                                                                                 |
 | `goal` (정의 수준)                         | 전체 목표. 모든 노드 프롬프트에 들어갑니다                                                                                                                                                          |
 | `dependsOn`                            | 먼저 완료돼야 하는 노드 id. 이 노드들의 출력이 프롬프트에 자동으로 들어갑니다                                                                                                                                     |
-| `category`                             | 모델 라우팅: `quick`/`unspecified-low`/`deep-low`/`writing`/`visual-engineering`=sonnet, `unspecified-high`/`deep-high`/`artistry`/`ultrabrain`/`architect`=opus. 생략하거나 미등록 값이면 sonnet |
+| `category`                             | 모델 라우팅: `trivial`/`standard`/`debugging`/`writing`/`frontend`=sonnet, `hard`/`reasoning`/`creative`/`crux`/`architect`=opus. 생략하거나 미등록 값이면 sonnet |
 | `agent`                                | 서브에이전트 타입(예: `Explore`). 기본값 `general-purpose`. 모델을 강제로 상속하는 `fork`는 Sonnet 하한을 보장할 수 없어 거부                                                                                       |
 | `label`, `task_summary`, `description` | 패널 표시용                                                                                                                                                                            |
 | `load_skills`                          | 노드가 시작 전에 불러올 스킬 이름                                                                                                                                                               |
@@ -232,13 +232,13 @@ nodes:
         argv: [bun, test, tests/export.test.ts]
 review:
   request: "Add CSV export to the report page"   # 사용자의 요청 문장. review-spec에 그대로 들어감
-  category: unspecified-low                      # 생략하면 unspecified-low
+  category: standard                             # 생략하면 standard
 commit:
   - message: "feat(export): add CSV export"
     paths: [src/export.ts, tests/export.test.ts]
 ```
 
-카테고리 제안 기준은 `skills/planning/references/planning.md`의 **Category routing**에 있습니다. DAG를 작성하는 메인 Claude가 값을 제안하며, 사용자가 정의 파일을 작성하면 그 값이 제안이 됩니다. Jev가 켜져 있으면 `hooks/engine/jev.ts`의 분류 기준으로 작업 내용을 독립적으로 평가하고, 확신도가 기준 이상일 때 실행 카테고리를 바꿉니다. 최종 감사가 제안이나 Jev 판단으로 `quick`이 되면 Jev 설정과 관계없이 `unspecified-low`로 실행합니다(판단 주체 `rule`). 최종 모델은 `hooks/engine/node-prompt.ts`의 매핑으로 정합니다. `quick`과 `unspecified-low`는 모두 Sonnet이지만 기계적 작업과 판단 작업을 구분하는 이름입니다. 작업자 모델은 최소 Sonnet이며, 세션이나 에이전트 타입의 Haiku 설정을 상속하지 않도록 모델을 명시합니다.
+카테고리 제안 기준은 `skills/planning/references/planning.md`의 **Category routing**에 있습니다. DAG를 작성하는 메인 Claude가 값을 제안하며, 사용자가 정의 파일을 작성하면 그 값이 제안이 됩니다. Jev가 켜져 있으면 `hooks/engine/jev.ts`의 분류 기준으로 작업 내용을 독립적으로 평가하고, 확신도가 기준 이상일 때 실행 카테고리를 바꿉니다. 최종 감사가 제안이나 Jev 판단으로 `trivial`이 되면 Jev 설정과 관계없이 `standard`로 실행합니다(판단 주체 `rule`). 최종 모델은 `hooks/engine/node-prompt.ts`의 매핑으로 정합니다. `trivial`과 `standard`는 모두 Sonnet이지만 기계적 작업과 판단 작업을 구분하는 이름입니다. 작업자 모델은 최소 Sonnet이며, 세션이나 에이전트 타입의 Haiku 설정을 상속하지 않도록 모델을 명시합니다.
 
 ## Jev 를 활용한 자동 판단
 
@@ -358,7 +358,7 @@ verify:
 
 두 축 검토 한 쌍과 커밋 노드는 모든 코드 변경 실행에 같은 모양으로 들어가므로, 손으로 쓰지 않고 정의 수준의 `review`와 `commit` 필드로 선언합니다. 플러그인이 정의를 파싱할 때(`start`, `amend`, `/dag run`, 드라이런) 이 필드를 노드로 확장하고, 그 노드의 검사도 [검증](#검증)의 검사 문법으로 만들어 붙입니다. 프롬프트는 템플릿입니다. 드라이런(`start {dryRun: true}`)의 `preview`에는 확장된 노드가 보입니다.
 
-- `review: {request, notes?, category?, rules?, security?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `unspecified-low`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. 검토는 크리티컬 패스 끝에 있으므로 템플릿이 범위를 정해 둡니다. 노트는 항목마다 한 줄로 쓰고 출력은 결정적인 줄만 인용합니다. `review-spec`은 선언된 검사 외에 직접 만든 probe를 두 개까지만 실행하고(안전하지만 틀린 산출물 점검표의 2·3번), 검증 스크립트·테스트 하네스·mutant를 만들지 않습니다. 2026-10-10 eval에서 최종 감사 노드는 150-230초, 생산 노드는 5-30초였고, 감사 하나는 직접 만든 검증 스크립트와 mutant에 약 95초를 썼습니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다. `security`는 아래 [보안 검토 (선택)](#보안-검토-선택)에 있습니다.
+- `review: {request, notes?, category?, rules?, security?}`: 노드 `review-spec`과 `review-standards`를 만듭니다. 둘 다 사용자 노드 전부에 의존하고 서로는 의존하지 않습니다. `request`는 사용자의 요청 문장이며 `review-spec` 프롬프트에만 그대로 붙여 넣습니다(`review-standards` 프롬프트에는 요청을 넣지 않습니다). 두 검토 노드는 파싱할 때 커밋 해시를 받지 않고, 실행하면서 직접 `git rev-parse HEAD`를 실행해 기준점을 고정합니다. `category`를 생략하면 `standard`입니다. 검토 노트는 `notes`가 없으면 `/tmp/dag-review/<안전하지 않은 문자를 바꾼 key>-<key의 6자리 16진수 해시>/`에 씁니다. 검증은 노트의 마지막 줄이 `Spec verdict: PASS`(`review-spec`)와 `Standards verdict: PASS`(`review-standards`)인지 `lastLine`으로 확인합니다. 플러그인은 생성된 검토 노드를 시도하기 전에 그 노트 파일을 먼저 지우므로, 이전 시도나 다른 실행이 남긴 오래된 판정으로는 통과하지 못합니다. 검토는 크리티컬 패스 끝에 있으므로 템플릿이 범위를 정해 둡니다. 노트는 항목마다 한 줄로 쓰고 출력은 결정적인 줄만 인용합니다. `review-spec`은 선언된 검사 외에 직접 만든 probe를 두 개까지만 실행하고(안전하지만 틀린 산출물 점검표의 2·3번), 검증 스크립트·테스트 하네스·mutant를 만들지 않습니다. 2026-10-10 eval에서 최종 감사 노드는 150-230초, 생산 노드는 5-30초였고, 감사 하나는 직접 만든 검증 스크립트와 mutant에 약 95초를 썼습니다. `rules`는 `review-standards`가 먼저 읽을 저장소 규칙 파일의 경로 목록입니다. 이 노드는 목록과 별개로 저장소 루트와 변경이 닿는 폴더에서 CONTRIBUTING, CLAUDE.md, AGENTS.md 같은 규칙 파일도 스스로 찾아 읽습니다. `security`는 아래 [보안 검토 (선택)](#보안-검토-선택)에 있습니다.
 - `commit: [{message, paths}]`: 노드 `commit`을 만듭니다. `review`가 있으면 검토 노드(`security`가 있으면 세 개, 없으면 두 개) 뒤에, 없으면 모든 사용자 노드 뒤에 실행합니다. 항목마다 그 `paths`만 스테이징해 `message`로 순서대로 커밋하고, 다른 변경은 스테이징하지 않으며 푸시하지 않습니다. 검증은 세 가지입니다. 커밋마다 `git log --format=%s`의 제목이 `message`의 첫 줄(제목)과 같은지만 비교하고(본문은 비교하지 않습니다), 나열한 `paths`가 모두 커밋됐는지(`git status --porcelain -- <paths>`가 비었는지) 확인하며, 각 커밋이 자기 `paths` 밖의 파일을 하나도 바꾸지 않았는지 확인합니다. 마지막 검사가 `git add -A` 같은 넓은 스테이징으로 관련 없는 변경이 커밋에 섞이는 것을 막습니다.
 
 `review-spec`, `review-standards`, `commit` id로 노드를 직접 정의하면 안 됩니다. `security`가 있으면 `review-security`, `security-<관점>`, `security-verify-`로 시작하는 id도 마찬가지입니다. `amend`에는 원래 `review`와 `commit` 필드를 다시 담아 보냅니다.
@@ -437,7 +437,7 @@ review:
 - `amend`: 선언된 정의에는 실행 중 추가된 검증 노드가 없으므로, `amend`하면 검증 노드를 만든 관점 노드가 다시 실행되어 검증 노드를 새로 만듭니다. 검증 노드가 실행 중이면 `amend`는 거부됩니다.
 - 고르는 방법: 계획 스킬은 요청이 시큐어코딩, 보안 검토, KISA, OWASP를 언급하거나 프로젝트 규칙 파일이 가이드를 지정할 때만 `security`를 넣고, 기본으로는 넣지 않습니다. 실행마다 고르려면 요청에 "KISA 기준으로 보안 검토까지"처럼 적거나 정의 파일에 `security`를 씁니다. 프로젝트 전체에 적용하려면 그 프로젝트의 `CLAUDE.md`나 `AGENTS.md`에 "코드 변경 실행은 `review.security: [kisa]`로 검토한다" 같은 한 줄을 둡니다.
 - 구현 노드: 코드를 쓰는 노드도 `load_skills: ["dag-workflow:secure-coding"]`과 프롬프트의 가이드 id로 같은 기준을 따르게 할 수 있습니다. 가이드 id가 없으면 그 노드는 `missing-input`으로 실패합니다.
-- 모델 등급: 보안 노드는 모두 `review.category`(기본 `unspecified-low`)를 씁니다. 더 깊게 보려면 `category: unspecified-high`로 올립니다.
+- 모델 등급: 보안 노드는 모두 `review.category`(기본 `standard`)를 씁니다. 더 깊게 보려면 `category: hard`로 올립니다.
 - 가이드 추가: `hooks/engine/stages.ts`의 `SECURITY_GUIDES`에 id와 이름을 한 줄 넣고, `skills/secure-coding/references/<id>.md`에 항목, 판본, 행마다 관점 열(`SECURITY_LENSES`의 id 중 하나)을 쓰고, `skills/secure-coding/SKILL.md`의 가이드 표와 이 표에 한 줄씩 더합니다. 도구 스키마의 허용 값은 `SECURITY_GUIDES`에서 만들어집니다.
 
 ## 자동 복구
@@ -472,7 +472,7 @@ review:
 
 ## 판단 기록
 
-라우팅·도구 승인·복구·실행 방식 판단을 세션마다 마지막 200개까지 `.claude/dag/decisions/<session>.json`에 남깁니다. 기본값 `auto`에서는 Jev에 물은 사용자 프롬프트마다 실행 방식 기록이 남으므로, DAG를 쓰지 않는 프로젝트에서도 첫 프롬프트에 `.claude/dag/.gitignore`와 이 파일이 생깁니다. 기록에는 제안값, 선택값, 판단 주체(`jev`/`baseline`/`rule`), 확신도, 선택지별 확률, 규칙 버전, 기준 확신도, 지연 시간, 결과(`applied`, `low-confidence`, `timeout` 등), 입력 상태의 해시가 들어갑니다. 결과는 Jev의 답이 어떻게 처리됐는지, 판단 주체는 최종 값을 누가 정했는지를 뜻합니다. 그래서 최종 감사 규칙이 Jev의 `quick`을 덮어쓰면 결과는 `applied`, 판단 주체는 `rule`로 남습니다. API 키와 도구 입력 전체는 저장하지 않습니다. `/dag decisions [id]`, 도구 액션 `decisions`, 패널의 Decisions 탭으로 봅니다. 노드 작업자의 도구 승인 기록에는 `runId`와 `nodeId`도 들어가고, 비대화형 세션에서 호출이 `ask`로 남았으면 그 원인을 적은 `note`도 붙습니다([결과 전달](#결과-전달)의 **비대화형 세션의 도구 허용** 문단).
+라우팅·도구 승인·복구·실행 방식 판단을 세션마다 마지막 200개까지 `.claude/dag/decisions/<session>.json`에 남깁니다. 기본값 `auto`에서는 Jev에 물은 사용자 프롬프트마다 실행 방식 기록이 남으므로, DAG를 쓰지 않는 프로젝트에서도 첫 프롬프트에 `.claude/dag/.gitignore`와 이 파일이 생깁니다. 기록에는 제안값, 선택값, 판단 주체(`jev`/`baseline`/`rule`), 확신도, 선택지별 확률, 규칙 버전, 기준 확신도, 지연 시간, 결과(`applied`, `low-confidence`, `timeout` 등), 입력 상태의 해시가 들어갑니다. 결과는 Jev의 답이 어떻게 처리됐는지, 판단 주체는 최종 값을 누가 정했는지를 뜻합니다. 그래서 최종 감사 규칙이 Jev의 `trivial`을 덮어쓰면 결과는 `applied`, 판단 주체는 `rule`로 남습니다. API 키와 도구 입력 전체는 저장하지 않습니다. `/dag decisions [id]`, 도구 액션 `decisions`, 패널의 Decisions 탭으로 봅니다. 노드 작업자의 도구 승인 기록에는 `runId`와 `nodeId`도 들어가고, 비대화형 세션에서 호출이 `ask`로 남았으면 그 원인을 적은 `note`도 붙습니다([결과 전달](#결과-전달)의 **비대화형 세션의 도구 허용** 문단).
 
 ## 세션과 인계
 

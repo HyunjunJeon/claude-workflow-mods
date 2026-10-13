@@ -45,14 +45,14 @@ test('routing batches only requested node keys and preserves definition data', (
     goal: 'Ship the fix',
     nodes: [
       { id: 'a', task: 'Fix A', proposedCategory: 'writing', dependsOn: [] },
-      { id: 'b', task: 'Check B', proposedCategory: 'quick', dependsOn: ['a'] },
+      { id: 'b', task: 'Check B', proposedCategory: 'trivial', dependsOn: ['a'] },
     ],
   })
   for (const question of Object.values(request.questions)) {
     expect(question.type).toBe('choice')
     expect(Object.keys(question.criteria).sort()).toEqual([
-      'architect', 'artistry', 'deep-high', 'deep-low', 'quick',
-      'ultrabrain', 'unspecified-high', 'unspecified-low', 'visual-engineering', 'writing',
+      'architect', 'creative', 'crux', 'debugging', 'frontend',
+      'hard', 'reasoning', 'standard', 'trivial', 'writing',
     ])
   }
   expect(JSON.stringify(original)).toBe(before)
@@ -87,12 +87,12 @@ test('choice parsing accepts only requested keys and includes confidence boundar
   const questions = routingRequest(run(), ['a', 'b']).questions
   const parsed = parseChoices(JSON.stringify({ answers: {
     a: { type: 'choice', choice: 'architect', confidence: 0 },
-    b: { type: 'choice', choice: 'quick', confidence: 1 },
-    extra: { type: 'choice', choice: 'quick', confidence: 1 },
+    b: { type: 'choice', choice: 'trivial', confidence: 1 },
+    extra: { type: 'choice', choice: 'trivial', confidence: 1 },
   } }), questions)
   expect([...parsed]).toEqual([
     ['a', { choice: 'architect', confidence: 0 }],
-    ['b', { choice: 'quick', confidence: 1 }],
+    ['b', { choice: 'trivial', confidence: 1 }],
   ])
 })
 
@@ -101,14 +101,14 @@ test('the model prompt carries the request state and questions and parses a vali
   const prompt = modelPrompt(request)
   expect(JSON.parse(prompt.prompt)).toEqual({ state: request.state, questions: request.questions })
   expect(prompt.maxTokens).toBeLessThanOrEqual(4_000)
-  const probabilities = { architect: 0.92, quick: 0.08 }
+  const probabilities = { architect: 0.92, trivial: 0.08 }
   const parsed = parseModelChoices(`\n${JSON.stringify({ answers: {
     a: { type: 'choice', choice: 'architect', confidence: 0.92, probabilities },
-    b: { type: 'choice', choice: 'quick', confidence: 1, probabilities: { quick: 1 } },
+    b: { type: 'choice', choice: 'trivial', confidence: 1, probabilities: { trivial: 1 } },
   } })}\n`, request.questions)
   expect([...parsed]).toEqual([
     ['a', { choice: 'architect', confidence: 0.92, probabilities }],
-    ['b', { choice: 'quick', confidence: 1, probabilities: { quick: 1 } }],
+    ['b', { choice: 'trivial', confidence: 1, probabilities: { trivial: 1 } }],
   ])
 })
 
@@ -167,17 +167,17 @@ for (const text of ['{', 'null', '[]', '{}', '{"answers":null}', '{"answers":[]}
 }
 
 const INVALID_ANSWERS: readonly unknown[] = [
-  null, [], 'quick', {},
-  { choice: 'quick', confidence: 1 },
-  { type: 'text', choice: 'quick', confidence: 1 },
+  null, [], 'trivial', {},
+  { choice: 'trivial', confidence: 1 },
+  { type: 'text', choice: 'trivial', confidence: 1 },
   { type: 'choice', choice: 'haiku', confidence: 1 },
   { type: 'choice', choice: 'toString', confidence: 1 },
   { type: 'choice', choice: 1, confidence: 1 },
-  { type: 'choice', choice: 'quick' },
-  { type: 'choice', choice: 'quick', confidence: '1' },
-  { type: 'choice', choice: 'quick', confidence: null },
-  { type: 'choice', choice: 'quick', confidence: -0.01 },
-  { type: 'choice', choice: 'quick', confidence: 1.01 },
+  { type: 'choice', choice: 'trivial' },
+  { type: 'choice', choice: 'trivial', confidence: '1' },
+  { type: 'choice', choice: 'trivial', confidence: null },
+  { type: 'choice', choice: 'trivial', confidence: -0.01 },
+  { type: 'choice', choice: 'trivial', confidence: 1.01 },
 ]
 
 INVALID_ANSWERS.forEach((answer, index) => {
@@ -302,7 +302,7 @@ test('the mode request asks one choice question between direct and dag and state
   // The session-model fallback can carry the question as it is.
   expect(modelPrompt(request).prompt).toContain('"mode"')
   expect(parseChoices(JSON.stringify({ answers: { mode: { type: 'choice', choice: 'dag', confidence: 0.9 } } }), request.questions).get('mode')?.choice).toBe('dag')
-  expect(parseChoices(JSON.stringify({ answers: { mode: { type: 'choice', choice: 'quick', confidence: 0.9 } } }), request.questions).size).toBe(0)
+  expect(parseChoices(JSON.stringify({ answers: { mode: { type: 'choice', choice: 'trivial', confidence: 0.9 } } }), request.questions).size).toBe(0)
 })
 
 test('the mode request masks secrets in the request and in earlier requests', () => {

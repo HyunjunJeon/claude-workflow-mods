@@ -16,7 +16,7 @@ goal: hooks/engine/lint.ts warns once per node about vacuous verify checks (rule
 nodes:
   - id: lint-rules
     label: Implement lint rules V1-V3
-    category: unspecified-low
+    category: standard
     writes:
       - hooks/engine/lint.ts
       - tests/lint.test.ts
@@ -148,7 +148,7 @@ nodes:
 
   - id: final-audit
     label: Final audit of the lint and its docs
-    category: unspecified-low
+    category: standard
     dependsOn:
       - lint-rules
       - readme-doc
@@ -193,7 +193,7 @@ nodes:
          - Collection: a node whose checks 1 and 3 are vacuous and check 2 is sound gives exactly ONE warning naming check 1 and check 3 and not check 2; two vacuous nodes give two warnings (one per node).
          - Warnings only: every FAIL above comes from a warning line, never from an error code such as verification_required or invalid_verification.
          - No false positives: bun eval/check-definition.ts eval/fixtures/valid-definition.yaml flows/improvement/p1-vacuous-verify.yaml prints OK for both. Also run it on every other file in flows/improvement/*.yaml that exists and record the result; a warning there is a finding to report (do NOT edit those files).
-      3. Read hooks/engine/lint.ts and tests/lint.test.ts. Confirm: every rule has a positive and a negative test (at least 6 test blocks), tests/policy.test.ts holds no V1-V3 rule tests (rg -n 'vacuous' tests/policy.test.ts finds nothing), and the pre-existing warnings (missing TASK or STOP WHEN, host-blocked report names, under-split producers, missing verification node, quick final audit) are still produced by the code.
+      3. Read hooks/engine/lint.ts and tests/lint.test.ts. Confirm: every rule has a positive and a negative test (at least 6 test blocks), tests/policy.test.ts holds no V1-V3 rule tests (rg -n 'vacuous' tests/policy.test.ts finds nothing), and the pre-existing warnings (missing TASK or STOP WHEN, host-blocked report names, under-split producers, missing verification node, trivial final audit) are still produced by the code.
       4. Docs: README.md '## 검증' and planning.md '## The `verify` contract' each state the warning-only behaviour, one warning per node with check numbers, the exact program and flag lists of V1-V3 as coded, the file-check-without-contains rule, what to write instead, and the sh -c limit, with no statement that contradicts the code. README.md still has all 18 '## ' headings and planning.md all 8 listed in rg -n '^## ' output (extra headings may exist).
       Report any mismatch between the code, the tests, the docs and the plan table as a failure. Do not fix anything.
 
@@ -205,7 +205,7 @@ nodes:
 
   - id: progress-log
     label: Record P1 in the plan
-    category: quick
+    category: trivial
     dependsOn:
       - final-audit
     writes:
