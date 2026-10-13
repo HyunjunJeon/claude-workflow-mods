@@ -1,0 +1,434 @@
+# Board P1 of 3: a whiteboard-style document the main conversation draws into the /dag pane.
+# Idea taken from github.com/devdotfast/whiteboard (block vocabulary and authoring order, not its desktop app).
+# Decisions (2026-10-13): Q1 a separate tool mcp__dag-workflow__board, not new dag actions (the dag description is capped
+# at 2048 chars); Q2 MVP blocks section, callout, table, code_peek, flow, sequence; Q3 the interview ledger moves to the
+# board (that wiring is P2).
+# Later runs: P2 the interview and pm skills draw on the board, the plan board shows in the approval area, the protocol
+# line names the board tool; P3 the result board on settle and chips into the prompt ($.prompt.fill).
+#
+# PREREQUISITE: `git status --short -- hooks tests README.md docs .claude-plugin` prints nothing. On 2026-10-13 uncommitted
+# session-learning work sat in hooks/register.ts, README.md, docs/reference.md, .claude-plugin/plugin.json,
+# tests/control-harness.ts, hooks/engine/learning.ts and tests/learning.test.ts; commit it first, or the commit node
+# sweeps it into the board commit.
+# Run it with:  /dag run flows/improvement/p4-board.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan (components -> waves):
+#   components: shared types, board engine + tool spec, flow layout, sequence layout, block renderers, retention,
+#               pane view, host wiring, docs; then the generated review pair and commit.
+#   wave 1: board-contract (the types every other node imports)
+#   wave 2: board-engine, flow-layout, sequence-layout, board-blocks, board-retention (five lanes, disjoint writes)
+#   wave 3: board-view (dispatches to the three renderer modules, so it waits for them)
+#   wave 4: board-host (wires the engine, view and retention into register.ts and policy.ts)
+#   wave 5: board-docs (documents what board-host reports)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: quick for mechanical lanes (contract, renderers, retention, view dispatch); unspecified-low for the engine
+# (validation rules and atomic edits), the flow layout (must leave DAG output byte-identical) and the sequence layout
+# (new layout algorithm); unspecified-high for board-host (integration across the 3000+ line register.ts); writing for docs.
+# Wave-2 nodes declare only file checks: five lanes edit tests/ at once, so a full `claude plugin test .` in their verify
+# could fail on a sibling's half-written file. Each worker still runs the suite itself; board-view, board-host and
+# review-spec run it on the whole result.
+# Expected lint warning: "one producer owns 3 files" on flow-layout. It is one slice (the layout plus the one optional
+# field graph-layout.ts must read to drop the DAG markers) and stays one node.
+key: improve-p4-board-1
+name: Board P1 - board tool and Board pane section
+goal: >
+  The plugin registers mcp__dag-workflow__board (actions create, edit, get, list, open) whose boards of section, callout,
+  table, code_peek, flow and sequence blocks persist in .claude/dag/boards/<session id>.json, follow the retention setting,
+  and render in a new Board section (hotkey b, /dag inspect board) of the /dag pane, with tests, README.md and
+  docs/reference.md updated, and the existing DAG graph output unchanged.
+review:
+  request: |
+    나는 오히려 이 whiteboard 가 처음에 인터뷰하고 계획 짤 때, 그리고 마지막에 결과를 사용자에게 전달할 때 유용하다고 생각했음.
+    그림 자체는 Mod 에 표시하는 게 좋을 것 같고 말이야.
+    Agreed decisions: Q1 a separate board tool (mcp__dag-workflow__board), not new dag actions; Q2 the MVP blocks are section, callout, table, code_peek, flow and sequence; Q3 the interview ledger moves to the board.
+    This run is P1 of 3 and covers only the board tool, the Board section of the /dag pane, persistence and retention, and the six block types. P2 (the interview and pm skills draw on the board, the plan board in the approval area) and P3 (the result board on settle, chips into the prompt) are later runs and out of scope here.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "feat(board): draw boards in the /dag pane"
+    paths:
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - hooks/engine/retention.ts
+      - hooks/engine/policy.ts
+      - hooks/ui/flow-layout.ts
+      - hooks/ui/sequence-layout.ts
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - hooks/ui/graph-layout.ts
+      - hooks/ui/graph-model.ts
+      - hooks/register.ts
+      - tests/board-engine.test.ts
+      - tests/flow-layout.test.ts
+      - tests/sequence-layout.test.ts
+      - tests/board-blocks.test.ts
+      - tests/board-view.test.ts
+      - tests/board-host.test.ts
+      - tests/retention.test.ts
+      - tests/policy.test.ts
+      - README.md
+      - docs/reference.md
+nodes:
+  - id: board-contract
+    label: Shared board types
+    category: quick
+    writes:
+      - hooks/engine/board-types.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board-types.ts
+        contains: "export type BoardEdit ="
+      - kind: file
+        path: hooks/engine/board-types.ts
+        contains: "export type BoardFile = {"
+      - kind: command
+        argv: [bunx, "-p", "typescript@5", tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Create hooks/engine/board-types.ts holding the shared types of the board feature, exactly as given below.
+      DELIVERABLE: hooks/engine/board-types.ts with exactly this content (two-space indent, no semicolons, single quotes, as the repository's code style requires):
+      ```ts
+      // A board is a document of blocks that the main conversation draws into the /dag pane's Board section: the interview
+      // ledger and the plan before a run, the result after it. The engine (hooks/engine/board.ts) and the layouts (hooks/ui/) share these types.
+
+      export type CalloutTone = 'info' | 'decision' | 'risk' | 'warning'
+      export type FlowNodeKind = 'process' | 'decision' | 'terminal'
+      export type SequenceStepKind = 'call' | 'return' | 'async' | 'note'
+
+      export type SectionBlock = { id: string; type: 'section'; title: string; text?: string }
+      export type CalloutBlock = { id: string; type: 'callout'; tone: CalloutTone; title?: string; text: string }
+      export type TableBlock = { id: string; type: 'table'; title?: string; columns: string[]; rows: string[][] }
+      // lines is the file's text when the block was drawn, so the board keeps showing what was discussed after the file changes.
+      export type CodePeekBlock = { id: string; type: 'code_peek'; title?: string; path: string; start: number; end: number; lines: string[]; note?: string }
+      export type FlowNode = { id: string; label: string; kind?: FlowNodeKind; note?: string }
+      export type FlowEdge = { from: string; to: string; label?: string }
+      export type FlowBlock = { id: string; type: 'flow'; title?: string; nodes: FlowNode[]; edges: FlowEdge[] }
+      export type SequenceParticipant = { id: string; label: string }
+      export type SequenceStep = { from: string; to: string; label: string; kind?: SequenceStepKind }
+      export type SequenceBlock = { id: string; type: 'sequence'; title?: string; participants: SequenceParticipant[]; steps: SequenceStep[] }
+
+      export type Block = SectionBlock | CalloutBlock | TableBlock | CodePeekBlock | FlowBlock | SequenceBlock
+      export type BlockType = Block['type']
+
+      // What the model sends: a block without its id, and a code peek without its lines, which the host reads from the file.
+      export type CodePeekInput = Omit<CodePeekBlock, 'id' | 'lines'>
+      export type BlockInput =
+        | Omit<SectionBlock, 'id'>
+        | Omit<CalloutBlock, 'id'>
+        | Omit<TableBlock, 'id'>
+        | CodePeekInput
+        | Omit<FlowBlock, 'id'>
+        | Omit<SequenceBlock, 'id'>
+
+      export type BoardEdit =
+        | { op: 'insert'; block: BlockInput; afterId?: string }
+        | { op: 'update'; id: string; changes: Record<string, unknown> }
+        | { op: 'replace'; id: string; block: BlockInput }
+        | { op: 'remove'; id: string }
+
+      // nextId only grows, so a removed block's id is never reused and an old reference cannot name a new block.
+      export type Board = {
+        boardId: string
+        sessionId: string
+        title: string
+        createdAt: number
+        updatedAt: number
+        nextId: number
+        blocks: Block[]
+      }
+
+      // One file per session, .claude/dag/boards/<sessionId>.json, so retention prunes boards the way it prunes context files.
+      export type BoardFile = { schemaVersion: 1; sessionId: string; boards: Board[] }
+      ```
+      In ## Output give the path and the list of exported type names.
+      SCOPE: Write ONLY hooks/engine/board-types.ts. Read AGENTS.md for the code style. Other nodes own every other file. Never commit, push, install or reload plugins.
+      VERIFY: Run `bunx -p typescript@5 tsc -p . --noEmit`: exit code 0.
+      STOP WHEN: the file holds the content above and the typecheck exits 0.
+
+  - id: board-engine
+    label: Board validation, atomic edits and the board tool spec
+    category: unspecified-low
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - tests/board-engine.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "export function applyEdits("
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "export function parseBoardFile("
+      - kind: file
+        path: hooks/engine/board-spec.ts
+        contains: "export const BOARD_TOOL_DESCRIPTION"
+      - kind: file
+        path: tests/board-engine.test.ts
+        contains: "cycle"
+    prompt: |
+      TASK: Implement the pure board engine in hooks/engine/board.ts and the board tool's description and input schema in hooks/engine/board-spec.ts, with tests in tests/board-engine.test.ts.
+      CONTEXT: A board is a document of blocks the main conversation draws into the /dag pane through the tool mcp__dag-workflow__board. The types live in hooks/engine/board-types.ts (read it first; do not edit it). hooks/engine/ is pure: no `$`, no clock, no I/O; the host (hooks/register.ts, another node) reads files and persists. Follow hooks/engine/AGENTS.md and the root AGENTS.md (no semicolons, single quotes, `.ts` import extensions, `fail`/`Result` from ./types.ts as in definition.ts).
+      DELIVERABLE:
+      (1) hooks/engine/board.ts exporting:
+        - `newBoard(input: { boardId: string; sessionId: string; title: string; now: number }): Result<Board>`: title trimmed, 1-80 characters; nextId 1; no blocks.
+        - `parseEdits(input: unknown): Result<BoardEdit[]>`: an array of 1-20 edits, each with a known `op` and the fields its op needs (error code `invalid_board_edit`, message prefixed `edits[i]: `).
+        - `type PeekRequest = { path: string; start: number; end: number }`, `peekKey(request: PeekRequest): string` returning `${path}#L${start}-L${end}`, and `peeksNeeded(board: Board, edits: BoardEdit[]): PeekRequest[]`: the code_peek ranges that an insert or replace brings in, or an update whose changes touch path, start or end (deduplicated by peekKey), so the host reads only those files.
+        - `applyEdits(board: Board, edits: BoardEdit[], context: { now: number; peeks: ReadonlyMap<string, string[]> }): Result<{ board: Board; inserted: string[] }>`. ATOMIC: work on a copy; any invalid edit returns the error and leaves the given board untouched. insert appends, or places after `afterId`, and assigns id `b${nextId}` then increments nextId; update shallow-merges `changes` into the block, refuses changes to `id`, `type` or `lines` (a code_peek's lines come only from the host's file read: an update of path, start or end takes them from `context.peeks`), then validates the merged block; replace keeps the id and validates the new block; remove drops the block. An id the board does not hold fails with code `unknown_block`. A code_peek block takes `lines` from `context.peeks` by peekKey; a missing entry fails with `invalid_board_edit` naming the range. updatedAt becomes `context.now`.
+        - Validation of every block (code `invalid_board_edit`, message `edits[i]: <field>: <reason>`): section title 1-80 chars, text at most 4000; callout tone one of the four, text 1-1000, title at most 80; table 1-6 columns, at most 30 rows, every row exactly as long as columns, cells at most 80; code_peek path passes `projectPath` from ./verification.ts (relative, no `..`, no `.claude` segment), integers 1 <= start <= end, end - start < 40, note at most 200; flow 1-24 nodes with ids matching /^[A-Za-z0-9_.-]{1,32}$/ and unique, labels 1-40, notes at most 80, at most 48 edges whose from and to name nodes, no self-edge, no duplicate edge, and NO CYCLE: a cycle fails with a message naming its path, e.g. `flow edges form a cycle a -> b -> a; draw a loop as a note`; sequence 2-8 participants with unique ids and labels 1-24, 1-40 steps whose from and to name participants, labels 1-60. A board holds at most 60 blocks; unknown fields on a block are refused.
+        - `boardForModel(board: Board): unknown`: the board as the `get` action returns it, each code_peek's `lines` replaced by `lineCount`.
+        - `parseBoardFile(text: string, sessionId: string): Result<BoardFile>`: parses the persisted JSON (schemaVersion 1, matching sessionId, every board and block re-validated); anything else fails with code `invalid_board_file`.
+      (2) hooks/engine/board-spec.ts exporting `BOARD_TOOL_DESCRIPTION` (at most 2048 characters: Claude Code passes the model only the first 2048) and `BOARD_INPUT_SCHEMA` (JSON schema object in the style of INPUT_SCHEMA in hooks/engine/tool-spec.ts). Actions: `create {title}` returns board_id; `edit {board_id, edits}`; `get {board_id}`; `list`; `open {board_id}` shows the board in the /dag pane without taking the keyboard. The description says, rules first: the board is shown to the user in the /dag pane's Board section (key b); use it when the user wants to see how something works, a flow, a call order or a data shape, and for the interview ledger, the plan and the result; write in the order what/why section, then one diagram (flow for branches and steps, sequence for who calls whom), then code_peek for the few lines that carry the mechanism; draw incrementally (a few blocks per edit) and call open once after the first edit; block ids b<n> are shown to the user, who may refer to them; read the board back with get before you finish; flow edges may not form a cycle; code_peek takes a project-relative path and at most 40 lines. Give each block's fields compactly.
+      (3) tests/board-engine.test.ts (import test and expect from 'claude-code/testing', never bun:test; see tests/AGENTS.md) covering, each with a passing and a refused case where it applies: insert of every block type; afterId placement; ids never reused after remove; update merges and re-validates and refuses a type change; replace keeps the id; atomicity (a valid edit followed by an invalid one leaves the board unchanged and the error names edits[1]); a flow cycle refused with a message containing `cycle`; an edge naming an unknown node; a table row of the wrong length; a code_peek of 41 lines; code_peek paths with `..` and with `.claude`; a code_peek whose peek is missing; peeksNeeded for insert, replace and an update of start; parseBoardFile round trip and a wrong sessionId; BOARD_TOOL_DESCRIPTION.length <= 2048.
+      In ## Output list every exported function with its signature, the error codes, the limits, and the description's character count; board-host and board-docs consume this list.
+      SCOPE: Write ONLY hooks/engine/board.ts, hooks/engine/board-spec.ts and tests/board-engine.test.ts. Read anything. hooks/engine/board-types.ts belongs to board-contract: if a type you need is missing, end with `DAG_NODE_STATUS: failed: missing-input: <type>` instead of editing it. hooks/register.ts, hooks/engine/policy.ts and hooks/engine/retention.ts belong to other nodes. Never commit, push, install or reload plugins.
+      VERIFY: Run `command claude plugin test .` (the `command` prefix bypasses a shell alias): exit 0 and 0 failing tests. Run `bunx -p typescript@5 tsc -p . --noEmit`: exit 0. Other nodes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+
+  - id: flow-layout
+    label: Flow diagram layout on the DAG graph layout
+    category: unspecified-low
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/flow-layout.ts
+      - hooks/ui/graph-layout.ts
+      - hooks/ui/graph-model.ts
+      - tests/flow-layout.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/flow-layout.ts
+        contains: "export function flowLines("
+      - kind: file
+        path: tests/flow-layout.test.ts
+        contains: "◇"
+      - kind: command
+        argv: [git, diff, "--exit-code", "--", tests/graph.test.ts, tests/views.test.ts]
+    prompt: |
+      TASK: Render a board's flow block as terminal lines in hooks/ui/flow-layout.ts by reusing the DAG graph layout, without changing the DAG output.
+      CONTEXT: FlowBlock is defined in hooks/engine/board-types.ts (read it; do not edit it); the engine guarantees edges are acyclic, name existing nodes and have no self-edges. hooks/ui/graph-layout.ts draws the /dag pane's DAG: graphLines(model, columns) lays nodes out in topological rows (layers come from model.edges; GraphNode.incoming is display text only) as 3-line boxes whose title line starts with a selection marker and a `[+]`/`[-]` fold marker, whose second line is `icon state activity`, and whose third line is `← incoming` or labels.startNode; graphFits(model, columns) says whether it fits. hooks/ui/ is pure: no `$`, no clock. Follow hooks/ui/AGENTS.md and the root AGENTS.md.
+      DELIVERABLE:
+      (1) hooks/ui/flow-layout.ts exporting `type FlowLabels = { sameFrontier: string; more: string }` and `flowLines(block: FlowBlock, columns: number, labels: FlowLabels): Line[]` (Line from ./text.ts). Adapt the block to a GraphModel and call graphLines: each flow node is a box whose title line is the label, whose second line is a kind glyph plus the note (◇ decision, □ process or no kind, ○ terminal), and whose third line lists incoming edges as `← <source label> (<edge label>), ...` (the label in parentheses only when the edge has one; a node without incoming edges shows an empty third line). When graphFits is false, fall back to a list: one line per node `<glyph> <label> — <note>` (without ` — ` when there is no note), then one line per edge `<from label> → <to label>` plus ` (<edge label>)` when present. Every line's width() (./text.ts, CJK counts 2) is at most columns.
+      (2) To drop the DAG-specific title prefix (selection marker and fold marker) in flow boxes, add at most ONE optional field to GraphModel or GraphNode in hooks/ui/graph-model.ts and read it in hooks/ui/graph-layout.ts. When the field is absent the DAG output stays byte-for-byte identical: tests/graph.test.ts and tests/views.test.ts must pass WITHOUT being edited.
+      (3) tests/flow-layout.test.ts (import test and expect from 'claude-code/testing'): a diamond start → check (decision) → yes / no → end at 110 columns shows every label, `◇`, `(yes)` and no `[+]` or `[-]`; the same block at 30 columns uses the list fallback with `→`; a Korean label such as '검증 단계' keeps every line within columns; a single node renders one box.
+      In ## Output give the exported names and signatures, the optional field you added (name, type, file) and the test names.
+      SCOPE: Write ONLY hooks/ui/flow-layout.ts, hooks/ui/graph-layout.ts, hooks/ui/graph-model.ts and tests/flow-layout.test.ts. Never edit tests/graph.test.ts, tests/views.test.ts or hooks/engine/board-types.ts. If the optional field cannot reach graph-layout.ts without editing another file, end with `DAG_NODE_STATUS: failed: missing-input: <file and change>` instead of editing it. Never commit, push, install or reload plugins.
+      VERIFY: `git diff --exit-code -- tests/graph.test.ts tests/views.test.ts` exits 0; `command claude plugin test .` exits 0 with 0 failing tests; `bunx -p typescript@5 tsc -p . --noEmit` exits 0. Other nodes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: the three commands exit 0 and the four test cases above exist.
+
+  - id: sequence-layout
+    label: Sequence diagram layout
+    category: unspecified-low
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/sequence-layout.ts
+      - tests/sequence-layout.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/sequence-layout.ts
+        contains: "export function sequenceLines("
+      - kind: file
+        path: tests/sequence-layout.test.ts
+        contains: "◀"
+    prompt: |
+      TASK: Render a board's sequence block as terminal lines in hooks/ui/sequence-layout.ts.
+      CONTEXT: SequenceBlock is defined in hooks/engine/board-types.ts (read it; do not edit it); the engine guarantees 2-8 participants with unique ids and 1-40 steps whose from and to name participants. hooks/ui/ is pure: no `$`, no clock. Use width, fit and ACCENT from hooks/ui/text.ts (width counts CJK as 2 cells). Follow hooks/ui/AGENTS.md and the root AGENTS.md.
+      DELIVERABLE:
+      (1) hooks/ui/sequence-layout.ts exporting `sequenceLines(block: SequenceBlock, columns: number): Line[]`. Lane width = floor(columns / participant count); lifeline x = lane start + floor(lane width / 2). Line 1: each participant label centered in its lane, fitted to lane width - 2, bold. Line 2: a dim `│` at every lifeline. Then per step, numbered from 1, two lines: (a) lifelines plus `<n>. <label>` written between the two lifelines (fitted to the space between them; for a note, beside its lifeline), (b) the arrow between the two lifelines: call `───▶` (solid, head at the target), return `◀╌╌╌` (dashed, head at the target), async `───▷`, note `[<label>]` on one line instead of two; a step from a participant to itself is one line `↺ <n>. <label>` beside its lifeline. Lifelines not crossed by an arrow stay drawn as dim `│`. If the lane width is below 10 cells, return the fallback list instead: the participant labels joined by `, ` on the first line, then one line per step `<n>. <from label> → <to label>: <label>` (⇠ for return, ⇢ for async, `<n>. <label> (note: <participant>)` for a note). Every line's width() is at most columns.
+      (2) tests/sequence-layout.test.ts (import test and expect from 'claude-code/testing'): three participants and four steps (call, return, async, self) at 90 columns contain every label, `▶`, `◀`, `▷`, `↺` and the step numbers, and the return arrow uses `╌`; a note step renders `[label]`; at 20 columns the fallback list appears with `→`; Korean labels keep every line within columns; arrows point left when from is right of to.
+      In ## Output give the exported name and signature and the test names.
+      SCOPE: Write ONLY hooks/ui/sequence-layout.ts and tests/sequence-layout.test.ts. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `bunx -p typescript@5 tsc -p . --noEmit` exits 0. Other nodes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and the test cases above exist.
+
+  - id: board-blocks
+    label: Renderers for section, callout, table and code_peek blocks
+    category: quick
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/board-blocks.ts
+      - tests/board-blocks.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/board-blocks.ts
+        contains: "export function tableLines("
+      - kind: file
+        path: hooks/ui/board-blocks.ts
+        contains: "export function codePeekLines("
+    prompt: |
+      TASK: Render the text blocks of a board (section, callout, table, code_peek) as terminal lines in hooks/ui/board-blocks.ts.
+      CONTEXT: The block types are in hooks/engine/board-types.ts (read it; do not edit it). hooks/ui/ is pure: no `$`, no clock. Use width, fit, clean and ACCENT from hooks/ui/text.ts (width counts CJK as 2 cells); if hooks/ui/inspector-model.ts already has a wrapping helper, reuse its approach. Follow hooks/ui/AGENTS.md and the root AGENTS.md.
+      DELIVERABLE:
+      (1) hooks/ui/board-blocks.ts exporting:
+        - `wrapText(text: string, columns: number): string[]`: breaks at spaces by cell width, hard-breaks a word wider than columns.
+        - `sectionLines(block: SectionBlock, columns: number): Line[]`: the title bold in ACCENT, then the text as light markdown: a line starting `#` or `##` becomes a bold line without the hashes; `- ` or `* ` becomes `• ` with a hanging indent on wrapped lines; `1. ` style numbers keep their number with a hanging indent; other lines wrap; runs of blank lines collapse to one.
+        - `type CalloutLabels = Record<CalloutTone, string>` and `calloutLines(block: CalloutBlock, columns: number, labels: CalloutLabels): Line[]`: every line starts with `▌ ` in the tone's color (info ACCENT, decision green, risk red, warning yellow); the first line is the tone label, then the title in bold when present; the text wraps to columns - 2.
+        - `tableLines(block: TableBlock, columns: number): Line[]`: the title bold when present; column widths from the widest cell, shrunk proportionally (at least 4 cells each) when the row would exceed columns; cells fitted with fit() (ellipsis on overflow); columns separated by ` │ `; the header row bold, then a `─` rule with `┼` under each separator.
+        - `codePeekLines(block: CodePeekBlock, columns: number): Line[]`: header `<path>:<start>-<end>` bold, followed by ` · <title>` when present; then each line with its right-aligned dim line number, a dim ` │ `, the text with tabs expanded to two spaces, fitted to the remaining columns; then the note as a dim line when present.
+        Every returned line's width() is at most columns.
+      (2) tests/board-blocks.test.ts (import test and expect from 'claude-code/testing'): markdown headings, bullets with hanging indent, numbered items and blank-line collapse; each callout tone's color; a table that fits and one that is shrunk with an ellipsis; a Korean cell keeps the row within columns; code_peek numbering from start, tab expansion and the note line; wrapText hard-breaking a long word.
+      In ## Output give every exported name and signature and the test names; board-view consumes them.
+      SCOPE: Write ONLY hooks/ui/board-blocks.ts and tests/board-blocks.test.ts. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `bunx -p typescript@5 tsc -p . --noEmit` exits 0. Other nodes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and the test cases above exist.
+
+  - id: board-retention
+    label: Prune old board files with the retention setting
+    category: quick
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/retention.ts
+      - tests/retention.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/retention.ts
+        contains: "boardFiles"
+      - kind: file
+        path: tests/retention.test.ts
+        contains: "boardFiles"
+    prompt: |
+      TASK: Make retentionPlan in hooks/engine/retention.ts also pick expired board files.
+      CONTEXT: Boards persist one file per session at .claude/dag/boards/<sessionId>.json (BoardFile in hooks/engine/board-types.ts), named exactly like the context and decision files that retentionPlan already prunes with its pickFiles rule (never the current session, never a live session, never a session that still owns a kept run, only files older than the cutoff).
+      DELIVERABLE: (1) hooks/engine/retention.ts: add `boardFiles: RetentionFile[]` to RetentionInput and `boardFiles: string[]` to RetentionPlan, filled by the same pickFiles rule; the empty plan carries `boardFiles: []`. Nothing else in the rule changes. (2) tests/retention.test.ts: extend the existing fixtures with boardFiles and add a test that an old board file of a closed session is picked while the current session's, a live session's and a recent one are kept. Existing tests keep their assertions; add the new field to their inputs only where the type requires it.
+      In ## Output give the two field names and the test name; board-host wires boardFiles into pruneArtifacts in hooks/register.ts.
+      SCOPE: Write ONLY hooks/engine/retention.ts and tests/retention.test.ts. hooks/register.ts belongs to board-host. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `bunx -p typescript@5 tsc -p . --noEmit` exits 0 (register.ts passes a RetentionInput literal to retentionPlan; if the new required field breaks that call, make the field optional in RetentionInput, defaulting to [], rather than editing register.ts). Other nodes add tests in parallel; if a failure is in a file you do not own, re-run once before reporting.
+      STOP WHEN: both commands exit 0 and the new test exists.
+
+  - id: board-view
+    label: Board section view model with pagination
+    category: quick
+    dependsOn:
+      - flow-layout
+      - sequence-layout
+      - board-blocks
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/board-model.ts
+      - tests/board-view.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/board-model.ts
+        contains: "export function buildBoardView("
+      - kind: file
+        path: hooks/ui/board-model.ts
+        contains: "보드"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, "-p", "typescript@5", tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Build the /dag pane's Board section view model in hooks/ui/board-model.ts.
+      CONTEXT: The pane already renders its Decisions, Context and Sessions sections through hooks/ui/inspector-client.ts from an InspectorModel `{ title, lines, actions }` (hooks/ui/inspector-model.ts, which paginates with actions `page:prev` and `page:next`); the Board section uses the same client and model shape. Types: hooks/engine/board-types.ts. The renderers come from the upstream nodes (their Outputs list the exact signatures): flowLines in hooks/ui/flow-layout.ts, sequenceLines in hooks/ui/sequence-layout.ts, sectionLines, calloutLines, tableLines and codePeekLines in hooks/ui/board-blocks.ts. Language is 'en' | 'ko' from hooks/ui/i18n.ts. hooks/ui/ is pure. Every UI string exists in both English and Korean (AGENTS.md).
+      DELIVERABLE:
+      (1) hooks/ui/board-model.ts exporting `type BoardViewInput = { boards: readonly Board[]; selectedBoardId?: string; columns: number; language: Language; page: number }`, `buildBoardView(input: BoardViewInput): InspectorModel` and `adjacentBoardId(boards: readonly Board[], selectedBoardId: string | undefined, step: 1 | -1): string | undefined`. The shown board is the selected one, else the most recently updated. Title: `<board title> (<index>/<count>)`, or with no boards a title `Board` / `보드` and one dim line `No board yet. The model draws one with the board tool.` / `아직 보드가 없습니다. 모델이 board 툴로 그립니다.`. Each block starts with a dim header line `[<id>] <type>` plus ` · <title>` when the block has one, then its renderer's lines, then a blank line. Pack whole blocks into pages of at most 60 lines; a block longer than a page gets a page of its own, cut with a dim `… <n> more lines` / `… <n>줄 더` line. A dim `page i/n` / `페이지 i/n` footer when there is more than one page. Actions: `board:prev` and `board:next` (labels `prev board`/`이전 보드`, `next board`/`다음 보드`) when there is more than one board; `page:prev` and `page:next` (same labels as inspector-model's) when there is more than one page and the move is possible. Localized labels for callout tones (info/정보, decision/결정, risk/위험, warning/주의) and for the flow layout (sameFrontier, more) live in this file in both languages. Every line is clipped to columns; columns <= 0 returns an empty model like buildInspector does.
+      (2) tests/board-view.test.ts (import test and expect from 'claude-code/testing'): the empty state in both languages; a board with one block of each of the six types shows each `[b<n>]` header; selection falls back to the latest updatedAt; adjacentBoardId wraps around; a board taller than 60 lines paginates and shows the page actions and footer; a block longer than a page is cut with the more-lines line.
+      In ## Output give the exported names and signatures, the action ids and the test names; board-host consumes them.
+      SCOPE: Write ONLY hooks/ui/board-model.ts and tests/board-view.test.ts. Do not edit the renderer files; if a renderer's signature differs from its node's Output, follow the file. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `bunx -p typescript@5 tsc -p . --noEmit` exits 0.
+      STOP WHEN: both commands exit 0 and the test cases above exist.
+
+  - id: board-host
+    label: Wire the board tool, persistence, retention and the Board pane section
+    category: unspecified-high
+    dependsOn:
+      - board-engine
+      - board-view
+      - board-retention
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/engine/policy.ts
+      - tests/policy.test.ts
+      - tests/board-host.test.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        contains: "BOARD_TOOL_DESCRIPTION"
+      - kind: file
+        path: hooks/register.ts
+        contains: "buildBoardView("
+      - kind: file
+        path: hooks/engine/policy.ts
+        contains: "mcp__dag-workflow__board"
+      - kind: file
+        path: tests/board-host.test.ts
+        contains: "mcp__dag-workflow__board"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: command
+        argv: [bunx, "-p", "typescript@5", tsc, "-p", ".", "--noEmit"]
+    prompt: |
+      TASK: Wire the board feature into the host: register and serve the tool mcp__dag-workflow__board, persist boards, prune them with retention, allow the tool in the main conversation, and add a Board section to the /dag pane.
+      CONTEXT: Read the root AGENTS.md first: every `$` call lives in hooks/register.ts, state mutations go through `serialized()`, engine/ and ui/ stay pure. The upstream Outputs give the exact signatures: board-engine (newBoard, parseEdits, peeksNeeded, peekKey, applyEdits, boardForModel, parseBoardFile, BOARD_TOOL_DESCRIPTION, BOARD_INPUT_SCHEMA, error codes), board-view (buildBoardView, adjacentBoardId, action ids board:prev/board:next/page:prev/page:next), board-retention (RetentionInput.boardFiles, RetentionPlan.boardFiles). Follow how hooks/register.ts already does the matching thing for the dag tool and the inspector sections; read before writing.
+      DELIVERABLE in hooks/register.ts:
+      (1) In the session.start hook, next to the dag tool's `$.tool.register(...)`, register `{ name: 'board', description: BOARD_TOOL_DESCRIPTION, inputSchema: BOARD_INPUT_SCHEMA }`, then load this session's boards from `${projectRoot}/.claude/dag/boards/${sessionId}.json` with parseBoardFile (a missing file means no boards; an unreadable or invalid file is logged with $.ui.log and treated as no boards, never thrown).
+      (2) `on('tool.call', { tool: 'mcp__dag-workflow__board' }, ...)` running `serialized(() => handleBoardTool($, e))`, with a `.catch` like the dag tool's. Actions: create {title} makes the board with id `board_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}` (the run-id pattern), selects it and returns {board_id}; edit {board_id, edits} runs parseEdits, peeksNeeded, reads each requested range from `${projectRoot}/${path}` with $.fs.read (lines start..end, 1-based; a missing file, or an end past the last line, is a tool error with code `invalid_board_edit` naming the path and, when the file exists, its line count; it names no edit index, because peeksNeeded deduplicates ranges across edits), applyEdits with the peeks and $.clock.now(), persists, selects the board, calls `$.ui.invalidate('ui.render')` and returns {board_id, blocks: [{id, type}], inserted}; get {board_id} returns boardForModel as JSON; list returns this session's boards as [{board_id, title, blocks, updatedAt}]; open {board_id} selects the board, switches the pane to the Board section at page 0 and opens the pane the way the model-driven openPane($, false) does (no keyboard focus; respects a pane the user closed). Errors use err(...) with the engine's codes; an unknown board_id is `unknown_board`. Persist with ensureDir on `${projectRoot}/.claude/dag/boards` and $.fs.write of `{ schemaVersion: 1, sessionId, boards }` (JSON, two-space indent), only after an edit or create succeeded.
+      (3) pruneArtifacts: pass `boardFiles` from the boards folder (as contextFiles is passed) and remove the planned board files the same way context files are removed.
+      (4) Pane: add `{ id: 'board', label: language === 'ko' ? '보드' : 'Board', key: 'b' }` to the section tabs in drawPane; extend the inspector view state to include 'board'; when it is 'board', render buildBoardView({ boards: this session's boards, selectedBoardId, columns: inspectorColumns, language, page: inspectorPage }) through the same inspector-client Client (and the same no-Client fallback) the other sections use; handle the actions board:prev/board:next (adjacentBoardId, page back to 0) and page:prev/page:next (inspectorPage) where inspector actions are handled. `/dag inspect board` selects the section like the other inspect choices; add `board` to that command's choices and to USAGE.
+      DELIVERABLE elsewhere: (5) hooks/engine/policy.ts: add 'mcp__dag-workflow__board' to MAIN_LOOP_TOOLS, so strict enforcement lets the main conversation draw; tests/policy.test.ts asserts the main conversation may call it under strict. (6) tests/board-host.test.ts on tests/control-harness.ts (see tests/AGENTS.md; do NOT edit control-harness.ts): create, then edit inserting a section, a flow and a code_peek of a file placed in the harness fs, then get shows lineCount, then the persisted /work/.claude/dag/boards/<session id>.json parses with parseBoardFile; an invalid edit returns an error and leaves the persisted file unchanged; a code_peek of a missing file returns an error naming the path; list returns the board; an unknown board_id returns unknown_board. If the harness can render the pane, add a test that the Board section shows `[b1]`; otherwise state in Output that pane rendering is covered by tests/board-view.test.ts only.
+      Do NOT change protocolFor or any skill text (P2 does that). In ## Output give: the actions and what each returns, the error codes, the persisted path and shape, the hotkey and command, the pane behaviour of open, and the plugin test pass count; board-docs documents exactly this.
+      SCOPE: Write ONLY hooks/register.ts, hooks/engine/policy.ts, tests/policy.test.ts and tests/board-host.test.ts. Every other file belongs to an upstream node: if one needs a change, end with `DAG_NODE_STATUS: failed: missing-input: <file and change>`. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exits 0 with 0 failing tests; `command claude plugin validate .` exits 0 (its existing ".catch" warnings are known); `bunx -p typescript@5 tsc -p . --noEmit` exits 0.
+      STOP WHEN: the three commands exit 0 and the tests above exist.
+
+  - id: board-docs
+    label: Document the board in README and the reference
+    category: writing
+    dependsOn:
+      - board-host
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: README.md
+        contains: "mcp__dag-workflow__board"
+      - kind: file
+        path: README.md
+        contains: "보드"
+      - kind: file
+        path: docs/reference.md
+        contains: "code_peek"
+      - kind: file
+        path: docs/reference.md
+        contains: ".claude/dag/boards/"
+      - kind: command
+        argv: [git, diff, "--check", "--", README.md, docs/reference.md]
+    prompt: |
+      TASK: Document the board feature in README.md (Korean) and docs/reference.md.
+      CONTEXT: board-host's Output lists exactly what was built: the tool mcp__dag-workflow__board and its actions, error codes, the persisted path .claude/dag/boards/<session id>.json, the Board section of the /dag pane (hotkey b, /dag inspect board), and the pane behaviour of open. board-host's Output in turn cites board-engine's limits; read hooks/engine/board.ts and hooks/engine/board-spec.ts for the exact limits and block fields rather than guessing. README.md stays in Korean (AGENTS.md); it was recently simplified, with detail moved to docs/, so read both files first and match their structure and tone.
+      DELIVERABLE: (1) README.md: a short Korean section on the board (what it is, that the model draws it with mcp__dag-workflow__board, that the user sees it in the /dag pane's 보드 section with b or /dag inspect board, the six block types in one line, and that boards are kept per session and pruned with the retention setting), plus `board` added wherever the README lists /dag inspect choices or pane hotkeys. Mention in one sentence that drawing on the board during the interview and showing the result board after a run come in later work. (2) docs/reference.md: a board reference section: each action with its inputs and result, each block type with its fields and limits, block ids b<n> that are never reused, the code_peek snapshot (the lines are read when the block is drawn), the flow no-cycle rule, the persisted file and retention, and the error codes.
+      In ## Output list the sections you added or changed in each file.
+      SCOPE: Write ONLY README.md and docs/reference.md. Never commit, push, install or reload plugins.
+      VERIFY: Compare every action, field, limit, hotkey and path you wrote with hooks/engine/board-spec.ts, hooks/engine/board.ts and hooks/register.ts; run `git diff --check -- README.md docs/reference.md`: exit 0.
+      STOP WHEN: both files describe the board and every statement matches the code.
