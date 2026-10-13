@@ -1,6 +1,17 @@
 import { expect, test } from 'claude-code/testing'
 import { addedLines, allowedPatterns, codeView, familiesOf, MAX_NOTED_HITS, MAX_SCAN_LINE, scanSlop, slopNote, type SlopHit } from '../hooks/engine/slop-scan.ts'
 
+test('real API substitution also follows explicit Korean requests and exclusions', () => {
+  const before = "export async function load() {\n  return fetch('/api/items')\n}"
+  const after = "export async function load() {\n  return { ok: true }\n}"
+  const hits = (request: string) => scanSlop('src/api.ts', before, after, new Set(), request).map(hit => hit.pattern)
+  expect(hits('실제 API를 연동해주세요')).toContain('requirement-substitution')
+  expect(hits('실제 API를 연동해주세요. 명령 실행과 DAG는 사용하지 마세요.')).toContain('requirement-substitution')
+  for (const request of ['실제 API 연동은 필요 없음', '실제 API를 호출하지 마세요', '실제 API 대신 mock을 사용하세요', '실제 API 연동 예제를 문서로 작성하세요']) {
+    expect(hits(request)).not.toContain('requirement-substitution')
+  }
+})
+
 // [file, new text, the patterns the scan reports]. Every pattern has at least one case it must report and one look-alike
 // it must leave alone, because a false hit reaches the model after every edit.
 const CASES: [string, string, string[]][] = [
@@ -124,6 +135,165 @@ test('a rule file allows patterns on anti-slop allow lines, in a list item or no
 
 test('a pattern the user skips is never reported', () => {
   expect(scanSlop('a.ts', '', 'const id = value as UserId', new Set(['unreasoned-assertion']))).toEqual([])
+})
+
+const TEST_BEFORE = "test('checks result', () => {\n  expect(load()).toBe(3)\n})"
+const TEST_WEAKENING: [string, string, string, string[]][] = [
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('test(', 'test.skip('), ['test-skip']],
+  ['a.spec.js', '', "it.skip('checks result', function () {\n  expect(load()).toBe(3)\n})", ['test-skip']],
+  ['a.test.tsx', '', "xtest('checks result', () => {})", ['test-skip']],
+  ['a.spec.mjs', '', "describe.skip('suite', () => {})", ['test-skip']],
+  ['a.test.cts', '', "test.todo('checks result')", ['test-skip']],
+  ['a.test.ts', '', "test.skipIf(true)('checks result', () => {})", ['test-skip']],
+  ['a.test.js', '', "test.runIf(false)('checks result', () => {})", ['test-skip']],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace(', ()', ', { skip: true }, ()'), ['test-skip']],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('  expect(load()).toBe(3)\n', ''), ['test-disabled']],
+  ['a.spec.ts', TEST_BEFORE, TEST_BEFORE.replace('  expect(load()).toBe(3)', '  return;\n  expect(load()).toBe(3)'), ['test-disabled']],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)'), ['test-tautology']],
+  ['a.spec.jsx', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(false).toBeFalsy()'), ['test-tautology']],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(42).toStrictEqual(42)'), ['test-tautology']],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'toHaveLength(3)'), TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)'), ['test-tautology']],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'not.toBe(0)'), TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)'), ['test-tautology']],
+  ['a.test.ts', "test('checks result', () => {\n  assert.equal(load(), 3)\n})", "test('checks result', () => {\n  assert.strictEqual(1, 1)\n})", ['test-tautology']],
+  ['a.test.ts', "test('checks result', () => {\n  assert.ok(load())\n})", "test('checks result', () => {\n  assert(true)\n})", ['test-tautology']],
+  ['a.ts', TEST_BEFORE, TEST_BEFORE.replace('test(', 'test.skip('), []],
+  ['a.test.py', '', "test.skip('checks result', () => {})", []],
+  ['a.test.ts', '', "test('new test', () => {\n  expect(true).toBe(true)\n})", []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'toBe(4)'), ['test-expectation-change']],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(false)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).not.toBe(true)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(ready).toBe(true)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'return expect(load()).toBe(3)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('checks result', 'renamed test'), []],
+  ['a.test.ts', TEST_BEFORE.replace('test(', 'test.skip('), TEST_BEFORE.replace('test(', 'test.skip(').replace('checks result', 'renamed test'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'checkResult(load())'), []],
+  ['a.test.ts', `${TEST_BEFORE}\n${TEST_BEFORE.replace('checks result', 'duplicate')}`, TEST_BEFORE, []],
+  ['a.test.ts', "test('checks result', () => {\n  expect(load()).toBe(3)\n  expect(size()).toBe(2)\n})", TEST_BEFORE, []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'const sample = "expect(true).toBe(true)"'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'const sample = /expect(true).toBe(true)/'), []],
+  ['a.test.ts', TEST_BEFORE, `${TEST_BEFORE}\n/* test.skip('example', () => {}) */`, []],
+  ['a.test.ts', TEST_BEFORE, `${TEST_BEFORE}\nconst sample = { skip: true, text: "test.skip('example')" }`, []],
+  ['a.test.ts', '', "test.skipIf(offline)('checks result', () => {})", []],
+  ['a.test.ts', '', "test('checks result', { skip: offline }, () => {})", []],
+  ['a.test.ts', '', "test('checks result', () => {})", []],
+  ['a.test.ts', TEST_BEFORE, `${TEST_BEFORE}\n// test.skip('example', () => {})`, []],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'toBe(3)\n  expect(true).toBe(true)'), TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)'), []],
+]
+
+test('test weakening reports precise replacements and ignores look-alikes', () => {
+  const wrong = TEST_WEAKENING.flatMap(([path, before, after, expected]) => {
+    const found = scanSlop(path, before, after).map(hit => hit.pattern)
+    return JSON.stringify(found) === JSON.stringify(expected) ? [] : [{ path, before, after, found, expected }]
+  })
+  expect(wrong).toEqual([])
+})
+
+test('deletion-only empty callbacks are scanned at their surviving declaration', () => {
+  const after = TEST_BEFORE.replace('  expect(load()).toBe(3)\n', '')
+  expect([...addedLines(TEST_BEFORE, after)]).toEqual([])
+  expect(scanSlop('a.test.ts', TEST_BEFORE, after).map(hit => [hit.line, hit.pattern])).toEqual([[1, 'test-disabled']])
+})
+
+test('test weakening uses existing pattern skips and bounds both comparison inputs', () => {
+  for (const [path, before, after, expected] of TEST_WEAKENING.filter(row => row[3].length > 0)) {
+    expect(scanSlop(path, before, after, new Set(expected))).toEqual([])
+  }
+  const before = `${' '.repeat(MAX_SCAN_LINE + 1)}\n${TEST_BEFORE}`
+  expect(scanSlop('a.test.ts', before, TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)'))).toEqual([])
+})
+
+const EXPECTATION_CHANGES: [string, string, string, string[]][] = [
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'toBe(4)'), ['test-expectation-change']],
+  ['a.spec.js', TEST_BEFORE.replace('test(', 'it('), TEST_BEFORE.replace('test(', 'it(').replace('toBe(3)', 'toBe(4)'), ['test-expectation-change']],
+  ['a.test.tsx', TEST_BEFORE.replace('toBe(3)', "toEqual('old')"), TEST_BEFORE.replace('toBe(3)', "toEqual('new')"), ['test-expectation-change']],
+  ['a.spec.mjs', TEST_BEFORE.replace('toBe(3)', 'resolves.toStrictEqual(null)'), TEST_BEFORE.replace('toBe(3)', 'resolves.toStrictEqual(false)'), ['test-expectation-change']],
+  ['a.test.cts', TEST_BEFORE.replace('toBe(3)', 'toBe("a b")'), TEST_BEFORE.replace('toBe(3)', 'toBe("ab")'), ['test-expectation-change']],
+  ['a.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('checks result', 'new contract').replace('toBe(3)', 'toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('load()', 'reload()').replace('toBe(3)', 'toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'toEqual(4)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'not.toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'toBe(limit)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'verify(load())'), []],
+  ['a.test.ts', `${TEST_BEFORE}\n${TEST_BEFORE}`, `${TEST_BEFORE}\n${TEST_BEFORE.replace('toBe(3)', 'toBe(4)')}`, []],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'toBe(3)\n  expect(load()).toBe(5)'), TEST_BEFORE.replace('toBe(3)', 'toBe(4)\n  expect(load()).toBe(5)'), []],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'toBe(3)\n  expect(load()).toBe(limit)'), TEST_BEFORE.replace('toBe(3)', 'toBe(4)\n  expect(load()).toBe(limit)'), []],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'toBe(3)\n  expect(size()).toBe(5)'), TEST_BEFORE.replace('toBe(3)', 'toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE.replace('expect(', 'check('), TEST_BEFORE.replace('expect(', 'check(').replace('toBe(3)', 'toBe(4)'), []],
+  ['a.test.ts', `const expect = check\n${TEST_BEFORE}`, `const expect = check\n${TEST_BEFORE.replace('toBe(3)', 'toBe(4)')}`, []],
+  ['a.test.ts', `import { check as expect } from 'check'\n${TEST_BEFORE}`, `import { check as expect } from 'check'\n${TEST_BEFORE.replace('toBe(3)', 'toBe(4)')}`, []],
+  ['a.test.ts', TEST_BEFORE.replace('expect(load()).toBe(3)', '// expect(load()).toBe(3)'), TEST_BEFORE.replace('expect(load()).toBe(3)', '// expect(load()).toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE.replace('expect(load()).toBe(3)', 'const text = "expect(load()).toBe(3)"'), TEST_BEFORE.replace('expect(load()).toBe(3)', 'const text = "expect(load()).toBe(4)"'), []],
+  ['a.test.ts', TEST_BEFORE.replace('load()', 'load("a")'), TEST_BEFORE.replace('load()', 'load("b")').replace('toBe(3)', 'toBe(4)'), []],
+  ['a.test.ts', TEST_BEFORE, TEST_BEFORE.replace('toBe(3)', 'toBe(3.0)'), []],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', "toBe('same')"), TEST_BEFORE.replace('toBe(3)', 'toBe("same")'), []],
+  ['a.test.ts', TEST_BEFORE.replace('toBe(3)', 'toBe("a")'), TEST_BEFORE.replace('toBe(3)', 'toBe("\\u0061")'), []],
+  ['a.test.ts', `const { expect } = helpers\n${TEST_BEFORE}`, `const { expect } = helpers\n${TEST_BEFORE.replace('toBe(3)', 'toBe(4)')}`, []],
+  ['a.test.ts', `describe('old suite', () => {\n${TEST_BEFORE}\n})`, `describe('new suite', () => {\n${TEST_BEFORE.replace('toBe(3)', 'toBe(4)')}\n})`, []],
+]
+
+test('expectation changes require unique unchanged named assertions with literal expectations', () => {
+  const wrong = EXPECTATION_CHANGES.flatMap(([path, before, after, expected]) => {
+    const found = scanSlop(path, before, after).map(hit => hit.pattern)
+    return JSON.stringify(found) === JSON.stringify(expected) ? [] : [{ path, before, after, found, expected }]
+  })
+  expect(wrong).toEqual([])
+})
+
+const LIVE_REQUEST = 'Implement a real API integration.'
+const LIVE_BEFORE = 'export async function load() {\n  return await fetch(url)\n}'
+const FIXED_AFTER = 'export async function load() {\n  return { ok: true, users: [] }\n}'
+const SUBSTITUTIONS: [string, string, string, string, string[]][] = [
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, LIVE_REQUEST, ['requirement-substitution']],
+  ['src/api.js', LIVE_BEFORE, FIXED_AFTER.replace('{ ok: true, users: [] }', 'Response.json({ ok: true })'), 'Use a live API.', ['requirement-substitution']],
+  ['src/api.mts', LIVE_BEFORE.replace('await fetch(url)', 'fetch(url)'), FIXED_AFTER.replace('{ ok: true, users: [] }', 'Promise.resolve("offline")'), LIVE_REQUEST, ['requirement-substitution']],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'TASK: Implement a real API integration, not a mock.', ['requirement-substitution']],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, '', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Implement the API integration.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Do not implement a real API integration.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Implement a real API integration without live calls.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'The docs mention a real API.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Implement real API documentation.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Implement a real-time API.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Implement a real API integration using mock responses.', []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER, 'Implement a real API integration; it is optional.', []],
+  ['src/api.test.ts', LIVE_BEFORE, FIXED_AFTER, LIVE_REQUEST, []],
+  ['tests/api.ts', LIVE_BEFORE, FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/__mocks__/api.js', LIVE_BEFORE, FIXED_AFTER, LIVE_REQUEST, []],
+  ['fixtures/api.ts', LIVE_BEFORE, FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.mock.ts', LIVE_BEFORE, FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', '', FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE, LIVE_BEFORE.replace('fetch(url)', 'fetch(otherUrl)'), LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER.replace('function load()', 'function cached()'), LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER.replace('{ ok: true, users: [] }', 'cache'), LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE, FIXED_AFTER.replace('{ ok: true, users: [] }', 'loadFixture()'), LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE.replace('fetch(url)', 'client.fetch(url)'), FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE.replace('return await fetch(url)', 'const text = "fetch(url)"\n  return text'), FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE.replace('return await fetch(url)', '// return await fetch(url)\n  return 3'), FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', `const fetch = fake\n${LIVE_BEFORE}`, `const fetch = fake\n${FIXED_AFTER}`, LIVE_REQUEST, []],
+  ['src/api.ts', `${LIVE_BEFORE}\n${LIVE_BEFORE}`, FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', LIVE_BEFORE.replace('return await fetch(url)', 'return { fetch: true }'), FIXED_AFTER, LIVE_REQUEST, []],
+  ['src/api.ts', `test('network fake', () => {\n${LIVE_BEFORE}\n})`, `test('network fake', () => {\n${FIXED_AFTER}\n})`, LIVE_REQUEST, []],
+  ['src/api.ts', `const { fetch } = fake\n${LIVE_BEFORE}`, `const { fetch } = fake\n${FIXED_AFTER}`, LIVE_REQUEST, []],
+]
+
+test('requirement substitution needs explicit live context and a recognized network replacement', () => {
+  const wrong = SUBSTITUTIONS.flatMap(([path, before, after, request, expected]) => {
+    const found = scanSlop(path, before, after, undefined, request).map(hit => hit.pattern)
+    return JSON.stringify(found) === JSON.stringify(expected) ? [] : [{ path, before, after, request, found, expected }]
+  })
+  expect(wrong).toEqual([])
+})
+
+test('advisory scans obey configured and repository pattern skips and comparison bounds', () => {
+  for (const [path, before, after, expected] of EXPECTATION_CHANGES.filter(row => row[3].length > 0)) {
+    expect(scanSlop(path, before, after, new Set(expected))).toEqual([])
+    expect(scanSlop(path, before, after, new Set(allowedPatterns('anti-slop allow: test-expectation-change')))).toEqual([])
+  }
+  expect(scanSlop('src/api.ts', LIVE_BEFORE, FIXED_AFTER, new Set(['requirement-substitution']), LIVE_REQUEST)).toEqual([])
+  expect(scanSlop('src/api.ts', LIVE_BEFORE, FIXED_AFTER, new Set(allowedPatterns('anti-slop allow: requirement-substitution')), LIVE_REQUEST)).toEqual([])
+  expect(scanSlop('src/api.ts', `${' '.repeat(MAX_SCAN_LINE + 1)}\n${LIVE_BEFORE}`, FIXED_AFTER, undefined, LIVE_REQUEST)).toEqual([])
+  expect(scanSlop('src/api.ts', LIVE_BEFORE, `${' '.repeat(MAX_SCAN_LINE + 1)}\n${FIXED_AFTER}`, undefined, LIVE_REQUEST)).toEqual([])
 })
 
 test('the code view blanks strings and comments and keeps every offset', () => {

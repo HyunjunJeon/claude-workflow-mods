@@ -96,7 +96,7 @@ test('a leading command builtin is skipped and the command after it is still che
 })
 
 test('the main conversation keeps read and orchestration tools only', async () => {
-  for (const tool of ['mcp__dag-workflow__dag', 'Read', 'LSP', 'WebFetch', 'AskUserQuestion', 'ExitPlanMode', 'TaskStop']) {
+  for (const tool of ['mcp__dag-workflow__dag', 'mcp__dag-workflow__board', 'Read', 'LSP', 'WebFetch', 'AskUserQuestion', 'ExitPlanMode', 'TaskStop']) {
     expect(mainLoopVerdict(tool, {}, NONE)).toEqual({ allowed: true })
   }
   for (const tool of ['Edit', 'Write', 'NotebookEdit', 'Agent', 'Workflow', 'TodoWrite', 'TaskCreate', 'mcp__github__create_issue']) {

@@ -1,5 +1,6 @@
 import { definitionHash, nodeFingerprint } from './definition.ts'
 import { extractOutput } from './node-prompt.ts'
+import { VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
 import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type Run, type RunStatus } from './types.ts'
 
@@ -424,6 +425,7 @@ export type RunSnapshot = {
   created_at: number
   updated_at: number
   awaiting_approval?: true
+  verification_guidance?: string
   nodes: NodeSnapshot[]
   edges: Edge[]
 }
@@ -438,6 +440,7 @@ export function snapshotOf(run: Run, answerChars = 2_000): RunSnapshot {
     session_id: run.sessionId,
     created_at: run.createdAt,
     updated_at: run.updatedAt,
+    ...(run.nodes.some(node => node.verification) ? { verification_guidance: VERIFICATION_GUIDANCE } : {}),
     ...(run.approval ? { awaiting_approval: true as const } : {}),
     nodes: run.nodes.map(n => ({
       id: n.id,

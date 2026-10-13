@@ -8,11 +8,12 @@ export const ROOT = '/work/.claude/dag'
 export const KEY = 'control-test-secret'
 const TOOL = 'mcp__dag-workflow__dag'
 
-export function harness(on: On, options: { home?: string } = {}) {
-  const clock = mock.clock(on, { now: 1_000 })
+export function harness(on: On, options: { home?: string; now?: number } = {}) {
+  const clock = mock.clock(on, { now: options.now ?? 1_000 })
   const files = new Map<string, string>()
   const store = new Map<string, unknown>()
   const spawns: EventOf['agent.spawn'][] = []
+  const completedTurns: EventOf['turn.complete'][] = []
   const processes: EventOf['process.run'][] = []
   const requests: JevRequest[] = []
   const reads: string[] = []
@@ -31,7 +32,7 @@ export function harness(on: On, options: { home?: string } = {}) {
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
   // permission: the Jev answer to a permission question; unset, the question gets the generic 'quick' answer.
-  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[] }
+  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
@@ -65,6 +66,13 @@ export function harness(on: On, options: { home?: string } = {}) {
         files.set(destination, text)
         files.delete(source)
       } else exitCode = 1
+    }
+    if (options.home && e.argv[0] === 'rm' && path) {
+      files.delete(path)
+      if (e.argv.includes('-rf')) {
+        for (const file of files.keys()) if (file.startsWith(path + '/')) files.delete(file)
+        locks.delete(path)
+      }
     }
     if (e.argv[0] === 'mkdir' && !e.argv.includes('-p') && path) {
       exitCode = locks.has(path) ? 1 : 0
@@ -106,15 +114,16 @@ export function harness(on: On, options: { home?: string } = {}) {
     return { value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } }
   })
   on('fs.write', ($, e) => {
-    const error = writeErrors.get(e.path)
+    const error = writeErrors.get(e.path) ?? writeErrors.get(e.path.replace(/\.[a-f0-9]+\.\d+\.tmp$/, ''))
     if (error !== undefined) throw new Error(error)
     files.set(e.path, e.text)
     return { value: undefined }
   })
   on('agent.list', () => ({ value: control.liveAgents }))
-  on('agent.spawn', ($, e) => {
+  on('agent.spawn', async ($, e) => {
     spawns.push(e)
     const agentId = `agent-${spawns.length}`
+    await control.beforeSpawn?.()
     return { model: e.model ?? 'sonnet', agentId, result: { status: 'async_launched', agentId } }
   })
   on('session.send', ($, e) => { sends.push(e); return { isDelivered: true } })
@@ -132,11 +141,11 @@ export function harness(on: On, options: { home?: string } = {}) {
     return { text: e.text }
   })
   on('skill.prompt', ($, e) => ({ text: e.text }))
-  on('turn.complete', () => ({ text: '' }))
+  on('turn.complete', ($, e) => { completedTurns.push(e); return { text: '' } })
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PermissionRequest', () => ({}))
-  return { clock, files, store, spawns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
+  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
 }
 
 // The manifest's default enforcement is auto, which asks Jev about every user prompt. These suites were written for

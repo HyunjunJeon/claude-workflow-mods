@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { MODE_CONFIDENCE, answerModeRequest, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, popupAnswer, routingParts, routingRequest } from '../hooks/engine/jev.ts'
+import { MODE_CONFIDENCE, answerModeRequest, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, popupAnswer, recoveryRequest, routingParts, routingRequest } from '../hooks/engine/jev.ts'
 import { hash } from '../hooks/engine/hash.ts'
 import { createRun } from '../hooks/engine/run.ts'
 
@@ -17,6 +17,23 @@ function run() {
   if (!parsed.ok) throw new Error(parsed.error.message)
   return createRun(parsed.value, { runId: 'r', sessionId: 's', now: 1 })
 }
+
+test('recovery carries observed failure hints without deciding their ownership', () => {
+  const original = run()
+  const node = original.nodes[0]
+  if (!node) throw new Error('Missing test node')
+  const request = recoveryRequest(original, {
+    ...node, state: 'failed', verification: {
+      status: 'failed', evidence: [{
+        check: { kind: 'command', argv: ['bun', 'test'] }, passed: false, outcome: 'failed', checkedAt: 1,
+        exitCode: 1, detail: "Error: Cannot find module './dist/cli'",
+      }],
+    },
+  })
+  expect(request.state).toMatchObject({ observedFailures: [{ check: 1, kind: 'project-input' }] })
+  expect(Object.keys(request.questions)).toEqual(['recovery'])
+  expect(original.nodes[0]?.verification).toBeUndefined()
+})
 
 test('routing batches only requested node keys and preserves definition data', () => {
   const original = run()

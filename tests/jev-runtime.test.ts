@@ -43,6 +43,7 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   const spawns: { prompt: string; model?: string; description: string }[] = []
   const order: string[] = []
   const control = {
+    sessionId: 'jev-session',
     reply: response({ a: choice('architect'), b: choice('quick'), c: choice('writing') }),
     failure: false,
     model: { isAnswered: false, reason: 'empty-reply', usage: USAGE } as ModelCompleteResult | Error,
@@ -65,7 +66,7 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   })
   on('session.start', () => ({ cwd: '/work' }))
   on('session.cwd', () => ({ value: '/work' }))
-  on('session.id', () => ({ value: 'jev-session' }))
+  on('session.id', () => ({ value: control.sessionId }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.list', () => ({ value: [] }))
   on('fs.exists', ($, e) => ({ value: files.has(e.path) || [...files.keys()].some(file => file.startsWith(e.path.replace(/\/$/, '') + '/')) }))
@@ -450,4 +451,87 @@ test('successful HTTP completion cancels its virtual deadline', async ($, on) =>
   expect((await pending).decision).toBe('allow')
   await h.clock.settle()
   expect(deadlines[0]?.aborted).toBe(true)
+})
+
+test('identical concurrent permission questions share HTTP while each keeps its own decision record', async ($, on) => {
+  const h = harness(on)
+  let release: (value: HttpResponse) => void = () => { throw new Error('Transport not started') }
+  h.transport(() => new Promise<HttpResponse>(resolve => { release = resolve }))
+  on('tool.check', () => ({ decision: 'ask' }))
+  await boot($)
+  const input = { tool: PROBE, input: { file_path: '/work/a.ts', content: 'a' } }
+  const first = $.tool.check(input)
+  const second = $.tool.check(input)
+  await h.clock.settle()
+  expect(h.requests).toHaveLength(1)
+  release(response({ permission: choice('allow', 1) }))
+  expect((await Promise.all([first, second])).map(result => result.decision)).toEqual(['allow', 'allow'])
+  const log = JSON.parse(h.files.get('/work/.claude/dag/decisions/jev-session.json') ?? '{}')
+  expect(log.records.filter((item: { kind: string }) => item.kind === 'permission')).toHaveLength(2)
+})
+
+test('different permission inputs never merge and resolved permission approvals are not cached', async ($, on) => {
+  const h = harness(on)
+  h.control.reply = response({ permission: choice('allow', 1) })
+  on('tool.check', () => ({ decision: 'ask' }))
+  await boot($)
+  await Promise.all([
+    $.tool.check({ tool: PROBE, input: { file_path: '/work/a.ts' } }),
+    $.tool.check({ tool: PROBE, input: { file_path: '/work/b.ts' } }),
+  ])
+  await $.tool.check({ tool: PROBE, input: { file_path: '/work/a.ts' } })
+  expect(h.requests).toHaveLength(3)
+})
+
+test('the call limit preserves ask and records why no further judgment ran', { options: { jev_max_calls: 1 } }, async ($, on) => {
+  const h = harness(on)
+  h.control.reply = response({ permission: choice('allow', 1) })
+  on('tool.check', () => ({ decision: 'ask', reason: 'baseline' }))
+  await boot($)
+  expect((await $.tool.check({ tool: PROBE, input: {} })).decision).toBe('allow')
+  expect(await $.tool.check({ tool: PROBE, input: {} })).toEqual({ decision: 'ask', reason: 'baseline' })
+  expect(h.requests).toHaveLength(1)
+  expect(h.models).toHaveLength(0)
+  const log = JSON.parse(h.files.get('/work/.claude/dag/decisions/jev-session.json') ?? '{}')
+  expect(log.records.at(-1)).toMatchObject({ source: 'baseline', selected: 'ask', outcome: 'disabled', note: expect.stringContaining('budget-exhausted') })
+})
+
+test('a failed HTTP attempt consumes the limit before model fallback', { options: { jev_max_calls: 1 } }, async ($, on) => {
+  const h = harness(on)
+  h.control.failure = true
+  h.control.model = modelReply('allow', 1)
+  on('tool.check', () => ({ decision: 'ask' }))
+  await boot($)
+  expect((await $.tool.check({ tool: PROBE, input: {} })).decision).toBe('ask')
+  expect(h.requests).toHaveLength(1)
+  expect(h.models).toHaveLength(0)
+})
+
+test('the model limit counts split routing calls and leaves remaining proposals unchanged', { options: { jev_max_calls: 1 } }, async ($, on) => {
+  const h = harness(on, null)
+  h.control.modelFor = prompt => {
+    const data = JSON.parse(prompt)
+    return { isAnswered: true, usage: USAGE, text: JSON.stringify({ answers: Object.fromEntries(Object.keys(data.questions).map(id => [id, { ...choice('architect', 1), probabilities: { architect: 1 } }])) }) }
+  }
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  const nodes = checkpoint(h, started.run_id).nodes
+  expect(h.models).toHaveLength(1)
+  expect(nodes[0]?.routing?.category).toBe('architect')
+  expect(nodes[1]?.routing?.category).toBe('writing')
+  expect(nodes[2]?.routing?.category).toBe('quick')
+})
+
+test('clear cannot replenish the same session budget while a new session starts a new budget', { options: { jev_max_calls: 1 } }, async ($, on) => {
+  const h = harness(on)
+  h.control.reply = response({ permission: choice('allow', 1) })
+  on('tool.check', () => ({ decision: 'ask' }))
+  await boot($)
+  await $.tool.check({ tool: PROBE, input: {} })
+  await $.classic.SessionStart({ source: 'clear' })
+  expect((await $.tool.check({ tool: PROBE, input: {} })).decision).toBe('ask')
+  h.control.sessionId = 'new-session'
+  await $.classic.SessionStart({ source: 'resume' })
+  expect((await $.tool.check({ tool: PROBE, input: {} })).decision).toBe('allow')
+  expect(h.requests).toHaveLength(2)
 })

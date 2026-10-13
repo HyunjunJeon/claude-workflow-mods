@@ -1,7 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 import { recoverNode } from '../hooks/engine/recovery.ts'
-import { createRun, markFinished, markRunning } from '../hooks/engine/run.ts'
+import { createRun, markFinished, markRunning, snapshotOf } from '../hooks/engine/run.ts'
 import type { Run } from '../hooks/engine/types.ts'
+import { VERIFICATION_GUIDANCE } from '../hooks/engine/check-eval.ts'
+import { buildNodePrompt } from '../hooks/engine/node-prompt.ts'
+import { recoveryRequest } from '../hooks/engine/jev.ts'
 
 function failedRun(): Run {
   let run = createRun({
@@ -25,6 +28,33 @@ test('automatic recovery requeues only the failed lane and escalates implementat
   expect(result.value.nodes[0]?.recovery).toMatchObject({ used: 1, model: 'opus', kind: 'implementation' })
   expect(result.value.nodes[2]).toEqual(before.nodes[2])
   expect(before.nodes[0]?.recovery).toBe(undefined)
+})
+
+test('recovery and snapshots deliver shared guidance and the previous check evidence', () => {
+  const run = failedRun()
+  const node = run.nodes[0]
+  const def = run.definition.nodes[0]
+  if (!node || !def) throw new Error('Missing fixture node')
+  const check = { kind: 'command' as const, argv: ['check'] }
+  def.verify = [check]
+  node.verification = {
+    status: 'failed', reportPath: '/evidence/a.json',
+    evidence: [{ check, outcome: 'unknown', passed: false, checkedAt: 2, exitCode: 0, detail: 'output truncated' }],
+  }
+  expect(snapshotOf(run)).toMatchObject({ verification_guidance: VERIFICATION_GUIDANCE })
+  expect(buildNodePrompt(run, def, node).includes(VERIFICATION_GUIDANCE)).toBe(true)
+  expect(recoveryRequest(run, node).questions.recovery?.instructions.includes(VERIFICATION_GUIDANCE)).toBe(true)
+  const recovered = recoverNode(run, 'a', { kind: 'transient', reason: 'retry', now: 3 })
+  if (!recovered.ok) throw new Error(recovered.error.code)
+  const recoveredNode = recovered.value.nodes[0]
+  if (!recoveredNode) throw new Error('Missing recovered node')
+  const prompt = recoveredNode.promptOverride ?? ''
+  expect(buildNodePrompt(recovered.value, def, recoveredNode).includes(VERIFICATION_GUIDANCE)).toBe(true)
+  const evidence = /<verification_evidence>\n([\s\S]*?)\n<\/verification_evidence>/.exec(prompt)?.[1]
+  expect(evidence === undefined ? undefined : JSON.parse(evidence)).toEqual({
+    attempt: 1, reportPath: '/evidence/a.json',
+    checks: [{ index: 1, outcome: 'unknown', exitCode: 0, detail: 'output truncated' }],
+  })
 })
 
 test('a node gets at most two automatic attempts even across repeated failures', () => {

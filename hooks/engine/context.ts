@@ -1,5 +1,5 @@
 import { hash, stableStringify } from './hash.ts'
-import { evidenceOutcome } from './check-eval.ts'
+import { evidenceOutcome, VERIFICATION_GUIDANCE } from './check-eval.ts'
 import type { Run } from './types.ts'
 
 export type ContextRecord = {
@@ -114,6 +114,7 @@ export function contextSummary(record: ContextRecord, runs: readonly Run[], sour
     sessionId: preview(record.sessionId, 120),
     updatedAt: record.updatedAt,
     objective: current ? { ...preview(current.text, 400), at: current.at, index: record.requests.length - 1 } : null,
+    ...(owned.some(run => run.nodes.some(node => node.verification)) ? { verification_guidance: VERIFICATION_GUIDANCE } : {}),
     entries: projected,
     omitted: { notes: record.notes.length, runs: owned.length, nodes: owned.reduce((n, run) => n + run.nodes.length, 0), requests: Math.max(0, record.requests.length - 1) },
   }

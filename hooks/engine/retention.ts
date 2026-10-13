@@ -20,6 +20,7 @@ export type RetentionInput = {
   runDirNames: string[]
   contextFiles: RetentionFile[]
   decisionFiles: RetentionFile[]
+  boardFiles: RetentionFile[]
   sessionRecords: SessionRecord[]
 }
 
@@ -28,6 +29,7 @@ export type RetentionPlan = {
   runDirs: string[]
   contextFiles: string[]
   decisionFiles: string[]
+  boardFiles: string[]
   sessionKeys: string[]
 }
 
@@ -42,7 +44,7 @@ function fileSessionId(name: string): string | undefined {
 
 export function retentionPlan(input: RetentionInput): RetentionPlan {
   const { runs, now, retentionDays, currentSession } = input
-  const empty: RetentionPlan = { runs: [], runDirs: [], contextFiles: [], decisionFiles: [], sessionKeys: [] }
+  const empty: RetentionPlan = { runs: [], runDirs: [], contextFiles: [], decisionFiles: [], boardFiles: [], sessionKeys: [] }
   if (!(retentionDays > 0)) return empty
   const cutoff = now - retentionDays * DAY_MS
   const expired = expiredRuns(runs, now, retentionDays, currentSession)
@@ -76,6 +78,7 @@ export function retentionPlan(input: RetentionInput): RetentionPlan {
     runs: expired, runDirs,
     contextFiles: pickFiles(input.contextFiles),
     decisionFiles: pickFiles(input.decisionFiles),
+    boardFiles: pickFiles(input.boardFiles),
     sessionKeys,
   }
 }

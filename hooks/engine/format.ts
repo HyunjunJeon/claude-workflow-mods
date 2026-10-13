@@ -1,5 +1,5 @@
 import { truncate } from './node-prompt.ts'
-import { evidenceOutcome } from './check-eval.ts'
+import { evidenceOutcome, VERIFICATION_GUIDANCE } from './check-eval.ts'
 import type { Preview, WriteConflict } from './preview.ts'
 import { snapshotOf } from './run.ts'
 import type { EngineError, Run } from './types.ts'
@@ -156,6 +156,7 @@ export function settleMessage(run: Run, toolName: string, asked: SettleAsks = ne
   return [
     `DAG run "${run.name}" (${run.runId}) settled: ${run.status}.`,
     ...(run.definition.goal ? [`Goal: ${run.definition.goal}`] : []),
+    ...(run.nodes.some(node => node.verification) ? [VERIFICATION_GUIDANCE] : []),
     'Node results (outputs as each node reported them):',
     ...nodes,
     ...(budget <= 0 ? ['(Some outputs were left out to keep this message short; read the full reports or the run snapshot.)'] : []),

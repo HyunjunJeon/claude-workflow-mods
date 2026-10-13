@@ -1,7 +1,7 @@
 import { expect, test, type Engine } from 'claude-code/testing'
 import { hash } from '../hooks/engine/hash.ts'
 import { applyLearningProposals, emptyLibrary, parseLearningLibrary, parseLearningSession, renderLearnedSkill, type LearningLibrary, type LearningSession } from '../hooks/engine/learning.ts'
-import { boot, command, harness } from './control-harness.ts'
+import { boot, checkpoint, command, harness, start } from './control-harness.ts'
 
 const HOME = '/home/learner'
 const ROOT = `${HOME}/.claude/dag-workflow/learning`
@@ -49,6 +49,13 @@ function seed(h: Harness, scope: 'project' | 'global' = 'project', projectRoot =
   const skill = seeded.skills[0]
   if (!skill) throw new Error('Missing seeded skill')
   h.files.set(PATH, renderLearnedSkill(skill))
+}
+
+function signal() {
+  const callbacks: { resolve?: () => void } = {}
+  const promise = new Promise<void>(resolve => { callbacks.resolve = resolve })
+  if (!callbacks.resolve) throw new Error('Signal resolver was not created')
+  return { promise, resolve: callbacks.resolve }
 }
 
 test('a non-DAG main turn learns and persists a reusable skill without recursive learning', async ($, on) => {
@@ -273,4 +280,222 @@ test('a discovered project-scoped Skill cannot be loaded from another project', 
   const reply = await $.tool.call({ tool: 'Skill', skill: SKILL })
   expect(typeof reply.deny).toBe('string')
   expect(library(h).skills[0]?.uses).toBe(0)
+})
+
+test('learning session write failures do not prevent DAG worker completion', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($)
+  const runId = await start($, { key: 'learning-save-failure', nodes: [{
+    id: 'work', prompt: 'Produce the result', verify: [{ kind: 'command', argv: ['check-control'] }],
+  }] })
+  h.writeErrors.set(`${ROOT}/sessions/${hash(h.control.sessionId)}.json`, 'Learning storage unavailable')
+  await complete($, 'DAG_NODE_STATUS: completed', 'agent-1')
+  expect(checkpoint(h, runId).status).toBe('completed')
+})
+
+test('a failed library publication is recoverable without treating the generated skill as unmanaged', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Subscribe before triggering work.')
+  const first = session(h).batch
+  if (!first) throw new Error('Missing first learner')
+  h.writeErrors.set(`${ROOT}/library.json`, 'Library storage unavailable')
+  await complete($, JSON.stringify({ skills: [proposal(h)] }), first.agentId)
+  h.writeErrors.clear()
+  await command($, 'learn')
+  const second = session(h).batch
+  if (!second) throw new Error('Missing retry learner')
+  await complete($, JSON.stringify({ skills: [proposal(h)] }), second.agentId)
+  expect(library(h).skills[0]?.id).toBe(SKILL)
+  expect(session(h).learnedThrough).toBeGreaterThan(0)
+})
+
+test('a long turn retains the user request after eighty tool calls', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  for (let i = 0; i < 80; i++) await $.tool.call({ tool: 'Read', file_path: `/work/file-${i}.ts` })
+  await complete($, 'The long task completed.')
+  expect(h.spawns.length).toBe(1)
+  expect(session(h).batch?.events.some(event => event.kind === 'user')).toBe(true)
+})
+
+test('the character bound retains the user request through large worker reports', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  for (let i = 0; i < 18; i++) await complete($, 'x'.repeat(5000), `ordinary-${i}`)
+  await complete($, 'The long task completed.')
+  expect(h.spawns.length).toBe(1)
+  expect(session(h).batch?.events.some(event => event.kind === 'user')).toBe(true)
+})
+
+test('the batch cursor does not consume a correction received while the learner starts', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  const entered = signal()
+  const released = signal()
+  h.control.beforeSpawn = async () => {
+    entered.resolve()
+    await released.promise
+  }
+  const finishing = complete($, 'The first task completed.')
+  await entered.promise
+  await ask($, 'New correction while the learner is starting.')
+  released.resolve()
+  await finishing
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  expect(batch.through).toBe(Math.max(...batch.events.map(event => Number(event.id.split(':').at(-1)))))
+  expect(session(h).events.some(event => Number(event.id.split(':').at(-1)) > batch.through)).toBe(true)
+})
+
+test('an ordinary agent started alongside learning keeps its normal tool access', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  const entered = signal()
+  const released = signal()
+  h.control.beforeSpawn = async () => {
+    entered.resolve()
+    await released.promise
+  }
+  const finishing = complete($, 'The first task completed.')
+  await entered.promise
+  h.control.beforeSpawn = undefined
+  const ordinary = await $.agent.spawn({
+    tool_use_id: 'ordinary-spawn', prompt: 'Ordinary work', description: 'Ordinary worker', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'sonnet', background: true, fork: false,
+  })
+  if (!ordinary.agentId) throw new Error('Missing ordinary worker')
+  const write = { tool: 'Write', file_path: '/work/ordinary.ts', content: 'export const value = 1', agentId: ordinary.agentId } as const
+  const reply = await $.tool.call(write)
+  released.resolve()
+  await finishing
+  expect(reply.deny).toBeUndefined()
+  expect(session(h).batch?.agentId).not.toBe(ordinary.agentId)
+})
+
+test('a learning completion reaches the underlying host lifecycle', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'The task completed.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  await complete($, '{"skills":[]}', batch.agentId)
+  expect(h.completedTurns.some(turn => turn.agentId === batch.agentId)).toBe(true)
+})
+
+test('automatic limits survive another session while a user command can learn manually', { options: { learning_max_daily_runs: 1 } }, async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Applied.')
+  const first = session(h).batch
+  if (!first) throw new Error('Missing first learner')
+  await complete($, '{"skills":[]}', first.agentId)
+  h.control.sessionId = 'second-session'
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await ask($)
+  await complete($, 'A second session completed.')
+  expect(h.spawns.length).toBe(1)
+  expect(library(h).usage?.runs).toBe(1)
+  await command($, 'learn')
+  expect(h.spawns.length).toBe(2)
+  expect(library(h).usage?.runs).toBe(1)
+})
+
+test('a plugin-origin learning command cannot bypass the shared daily limit', { options: { learning_max_daily_runs: 1 } }, async ($, on) => {
+  const h = harness(on, { home: HOME })
+  seed(h)
+  const existing = library(h)
+  h.files.set(`${ROOT}/library.json`, JSON.stringify({ ...existing, usage: { day: 0, runs: 1 } }))
+  await boot($, 'off')
+  await ask($)
+  await $.command.run({ command: 'dag', args: 'learn', origin: { kind: 'plugin', name: 'test' }, presentation: { isFullscreen: false, columns: 80 } })
+  expect(h.spawns.length).toBe(0)
+  expect(library(h).usage?.runs).toBe(1)
+})
+
+test('a restart completes a pending publication before exposing the skill', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  h.writeErrors.set(`${ROOT}/library.json`, 'Interrupted index write')
+  await complete($, JSON.stringify({ skills: [proposal(h)] }), batch.agentId)
+  expect(h.files.has(`${ROOT}/pending.json`)).toBe(true)
+  h.writeErrors.clear()
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(library(h).skills[0]?.id).toBe(SKILL)
+  expect(h.files.has(`${ROOT}/pending.json`)).toBe(false)
+  await ask($)
+  const block = h.submits.at(-1)?.context.find(text => text.includes('"kind":"learned-skills"'))
+  expect(block ? JSON.parse(block).skills[0].path : undefined).toBe(PATH)
+})
+
+test('publication recovery preserves a manual edit made after the failed write', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  h.writeErrors.set(`${ROOT}/library.json`, 'Interrupted index write')
+  await complete($, JSON.stringify({ skills: [proposal(h)] }), batch.agentId)
+  h.writeErrors.clear()
+  h.files.set(PATH, 'Manual edit after interrupted publication')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(h.files.get(PATH)).toBe('Manual edit after interrupted publication')
+  expect(h.files.has(`${ROOT}/pending.json`)).toBe(true)
+})
+
+test('retention removes old inactive evidence and archives but protects current sessions and running batches', async ($, on) => {
+  const h = harness(on, { home: HOME, now: 31 * 86_400_000 })
+  seed(h)
+  const seeded = library(h)
+  const old = seeded.skills[0]
+  if (!old) throw new Error('Missing seeded skill')
+  old.archived = true
+  h.files.delete(PATH)
+  h.files.set(`${ROOT}/archive/${SKILL}/SKILL.md`, renderLearnedSkill(old))
+  h.files.set(`${ROOT}/library.json`, JSON.stringify(seeded))
+  const saved = (id: string) => ({
+    schemaVersion: 1, events: [{ id: `${hash(id)}:1`, sessionId: id, projectRoot: '/work', kind: 'user', text: 'Previous request', at: 1 }],
+    nextId: 2, toolsSinceLearn: 0, learnedThrough: 1,
+  })
+  const inactive = `${ROOT}/sessions/${hash('inactive')}.json`
+  const running = `${ROOT}/sessions/${hash('running')}.json`
+  const current = `${ROOT}/sessions/${hash('source')}.json`
+  const activeState = saved('running')
+  h.files.set(inactive, JSON.stringify(saved('inactive')))
+  h.files.set(current, JSON.stringify(saved('source')))
+  h.files.set(running, JSON.stringify({ ...activeState, batch: { agentId: 'live-other-session', events: activeState.events, baseline: [], through: 1 } }))
+  await boot($, 'off')
+  expect(h.files.has(inactive)).toBe(false)
+  expect(h.files.has(current)).toBe(true)
+  expect(h.files.has(running)).toBe(true)
+  expect(h.files.has(`${ROOT}/archive/${SKILL}/SKILL.md`)).toBe(false)
+  expect(library(h).skills.length).toBe(0)
+})
+
+test('retention keeps manually changed archive files and active skills', async ($, on) => {
+  const h = harness(on, { home: HOME, now: 31 * 86_400_000 })
+  seed(h)
+  const seeded = library(h)
+  const active = seeded.skills[0]
+  if (!active) throw new Error('Missing seeded skill')
+  seeded.skills.push({ ...active, id: 'dag-learned-old-manual', archived: true })
+  const archived = `${ROOT}/archive/dag-learned-old-manual/SKILL.md`
+  h.files.set(archived, 'Manual archive revision')
+  h.files.set(`${ROOT}/library.json`, JSON.stringify(seeded))
+  await boot($, 'off')
+  expect(h.files.get(archived)).toBe('Manual archive revision')
+  expect(h.files.has(PATH)).toBe(true)
+  expect(library(h).skills.length).toBe(2)
 })

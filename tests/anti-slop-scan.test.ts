@@ -2,6 +2,94 @@ import { expect, test } from 'claude-code/testing'
 import { boot, harness } from './control-harness.ts'
 
 const FILE = '/work/src/a.ts'
+const TEST_FILE = '/work/src/a.test.ts'
+const TEST_BEFORE = "test('checks result', () => {\n  expect(load()).toBe(3)\n})"
+
+for (const [request, warned] of [
+  ['실제 API를 연동해주세요', true],
+  ['실제 API를 호출하지 마세요', false],
+] as const) {
+  test(`the existing scan uses the latest explicit API request with warning=${warned}`, async ($, on) => {
+    const h = harness(on)
+    await boot($, 'off')
+    await $.prompt.submit({ text: request, wait: false, origin: { kind: 'composer' } })
+    h.files.set(FILE, "export async function load() {\n  return fetch('/api/items')\n}")
+    const reply = await $.tool.call({ tool: 'Write', file_path: FILE, content: 'export async function load() {\n  return { ok: true }\n}' })
+    expect(reply.context?.some(text => text.includes('requirement-substitution')) ?? false).toBe(warned)
+    expect(reply.deny).toBeUndefined()
+  })
+}
+
+for (const [pattern, after] of [
+  ['test-skip', TEST_BEFORE.replace('test(', 'test.skip(')],
+  ['test-disabled', TEST_BEFORE.replace('  expect(load()).toBe(3)\n', '')],
+  ['test-tautology', TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)')],
+  ['test-expectation-change', TEST_BEFORE.replace('toBe(3)', 'toBe(4)')],
+] as const) {
+  test(`an Edit returns ${pattern} as context using full before and after files`, async ($, on) => {
+    const h = harness(on)
+    await boot($, 'off')
+    h.readOnce.set(TEST_FILE, TEST_BEFORE)
+    h.files.set(TEST_FILE, after)
+    const reply = await $.tool.call({ tool: 'Edit', file_path: TEST_FILE, old_string: TEST_BEFORE, new_string: after })
+    expect(reply.context).toEqual([expect.stringContaining(pattern)])
+  })
+}
+
+test('repository exceptions suppress expectation change candidates through the existing hook', async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.files.set('/work/AGENTS.md', 'anti-slop allow: test-expectation-change\n')
+  h.files.set(TEST_FILE, TEST_BEFORE)
+  const reply = await $.tool.call({ tool: 'Write', file_path: TEST_FILE, content: TEST_BEFORE.replace('toBe(3)', 'toBe(4)') })
+  expect(reply.context).toBeUndefined()
+})
+
+test('configured skips suppress expectation change candidates through the existing hook', { options: { anti_slop_skip: ['test-expectation-change'] } }, async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.files.set(TEST_FILE, TEST_BEFORE)
+  const reply = await $.tool.call({ tool: 'Write', file_path: TEST_FILE, content: TEST_BEFORE.replace('toBe(3)', 'toBe(4)') })
+  expect(reply.context).toBeUndefined()
+})
+
+test('a worker Write reports test weakening through the existing context path', async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.files.set(TEST_FILE, TEST_BEFORE)
+  const call = {
+    tool: 'Write', file_path: TEST_FILE,
+    content: TEST_BEFORE.replace('expect(load()).toBe(3)', 'expect(true).toBe(true)'), agentId: 'agent-1',
+  } as const
+  const reply = await $.tool.call(call)
+  expect(reply.context).toEqual([expect.stringContaining('test-tautology')])
+})
+
+test('test assertion consolidation leaves Edit context absent', async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.readOnce.set(TEST_FILE, TEST_BEFORE)
+  h.files.set(TEST_FILE, TEST_BEFORE.replace('expect(load()).toBe(3)', 'checkResult(load())'))
+  const reply = await $.tool.call({ tool: 'Edit', file_path: TEST_FILE, old_string: 'expect(load()).toBe(3)', new_string: 'checkResult(load())' })
+  expect(reply.context).toBeUndefined()
+})
+
+test('repository exceptions suppress test weakening through the existing hook', async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.files.set('/work/AGENTS.md', 'anti-slop allow: test-disabled\n')
+  h.files.set(TEST_FILE, TEST_BEFORE)
+  const reply = await $.tool.call({ tool: 'Write', file_path: TEST_FILE, content: TEST_BEFORE.replace('  expect(load()).toBe(3)\n', '') })
+  expect(reply.context).toBeUndefined()
+})
+
+test('configured pattern skips suppress test weakening through the existing hook', { options: { anti_slop_skip: ['test-skip'] } }, async ($, on) => {
+  const h = harness(on)
+  await boot($, 'off')
+  h.files.set(TEST_FILE, TEST_BEFORE)
+  const reply = await $.tool.call({ tool: 'Write', file_path: TEST_FILE, content: TEST_BEFORE.replace('test(', 'test.skip(') })
+  expect(reply.context).toBeUndefined()
+})
 
 test('an Edit in the main conversation that adds a pattern gets the hit back as context, placed in the file', async ($, on) => {
   const h = harness(on)

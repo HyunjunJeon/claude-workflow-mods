@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  applyLearningProposals, archiveUnusedSkills, buildLearningPrompt, eligibleSkills,
+  appendLearningEvent, applyLearningProposals, archiveUnusedSkills, buildLearningPrompt, eligibleSkills,
   emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary,
-  parseLearningProposals, parseLearningSession, recordSkillOpportunity, recordSkillUse,
+  parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch,
+  recordSkillOpportunity, recordSkillUse, reserveLearningUsage,
   renderLearnedSkill, type LearnedSkill, type LearningEvent, type LearningLibrary,
   type LearningProposal,
 } from '../hooks/engine/learning.ts'
@@ -276,4 +277,161 @@ test('active learning snapshots retain archived and cross-project collision reco
   const input = { ...emptyLearningSession(), events, nextId: 3,
     batch: { agentId: 'learner', events, baseline, through: 2 } }
   expect(value(parseLearningSession(JSON.stringify(input))).batch?.baseline).toEqual(baseline)
+})
+
+function learningEvent(n: number, kind: LearningEvent['kind'] = 'tool', text = 'result'): LearningEvent {
+  return { id: `s:${n}`, sessionId: 's', projectRoot: root, kind, text, at: n }
+}
+
+test('append preserves latest user through count eviction in actual sequence', () => {
+  const input = appendLearningEvent(emptyLearningSession(), learningEvent(1, 'user'))
+  let session = input
+  for (let n = 2; n <= 101; n++) session = appendLearningEvent(session, learningEvent(n))
+  expect(session.events.map(event => event.id)).toEqual(['s:1', ...Array.from({ length: 79 }, (_, i) => `s:${i + 23}`)])
+  expect(session.nextId).toBe(102)
+  expect(session.toolsSinceLearn).toBe(100)
+  expect(input.events.map(event => event.id)).toEqual(['s:1'])
+  const replaced = appendLearningEvent(session, learningEvent(102, 'user'))
+  expect(replaced.events[0]?.id).toBe('s:23')
+  expect(replaced.events.at(-1)?.id).toBe('s:102')
+  expect(replaced.toolsSinceLearn).toBe(100)
+  expect(value(parseLearningSession(JSON.stringify(replaced)))).toEqual(replaced)
+})
+
+test('append preserves latest user through 4000 character eviction', () => {
+  let session = appendLearningEvent(emptyLearningSession(), learningEvent(1, 'user', 'u'.repeat(4000)))
+  for (let n = 2; n <= 30; n++) session = appendLearningEvent(session, learningEvent(n, 'tool', 't'.repeat(4000)))
+  expect(session.events.map(event => event.id)).toEqual(['s:1', ...Array.from({ length: 14 }, (_, i) => `s:${i + 17}`)])
+  expect(session.events.reduce((sum, event) => sum + event.text.length, 0)).toBe(60_000)
+  expect(value(parseLearningSession(JSON.stringify(session)))).toEqual(session)
+})
+
+test('batch packs oldest contiguous pending prefix without advancing to future anchor', () => {
+  const pending = Array.from({ length: 8 }, (_, i) => learningEvent(i + 2, 'tool', '\\'.repeat(4000)))
+  const anchor = learningEvent(10, 'user', 'Correction')
+  const session = { ...emptyLearningSession(), events: [learningEvent(1), ...pending, anchor], nextId: 11, learnedThrough: 1 }
+  const batch = value(prepareLearningBatch(session, emptyLibrary(), root, 16_000))
+  expect(batch.events.map(event => event.id)).toEqual(['s:2', 's:10'])
+  expect(batch.through).toBe(2)
+  expect(batch.prompt.length <= 16_000).toBe(true)
+  expect(prepareLearningBatch(session, emptyLibrary(), root, batch.prompt.length - 1).ok).toBe(false)
+  expect(session.events.length).toBe(10)
+})
+
+test('consumed latest user remains context and numeric suffix drives pending cursor', () => {
+  const session = { ...emptyLearningSession(),
+    events: [learningEvent(1, 'user'), learningEvent(2), learningEvent(9), learningEvent(10)],
+    nextId: 11, learnedThrough: 2 }
+  const batch = value(prepareLearningBatch(session, emptyLibrary(), root, 16_000))
+  expect(batch.events.map(event => event.id)).toEqual(['s:1', 's:9', 's:10'])
+  expect(batch.through).toBe(10)
+  expect(prepareLearningBatch({ ...session, learnedThrough: 10 }, emptyLibrary(), root, 16_000).ok).toBe(false)
+  expect(prepareLearningBatch(session, emptyLibrary(), root, 0).ok).toBe(false)
+})
+
+test('batch sends only complete eligible bodies with exact editable allowlist and all baseline records', () => {
+  const input = library(
+    skill({ id: 'dag-learned-old', body: 'o'.repeat(2500), updatedAt: 2 }),
+    skill({ id: 'dag-learned-recent', body: 'r'.repeat(2500), updatedAt: 3 }),
+    skill({ id: 'dag-learned-large', body: 'l'.repeat(12_000), updatedAt: 4 }),
+    skill({ id: 'dag-learned-foreign', projectRoot: '/other' }),
+    skill({ id: 'dag-learned-archived', archived: true }),
+  )
+  const session = { ...emptyLearningSession(), events: [learningEvent(1, 'user')], nextId: 2 }
+  const batch = value(prepareLearningBatch(session, input, root, 16_000))
+  const data = JSON.parse(batch.prompt.split('\n').at(-1) ?? '')
+  expect(batch.editableIds).toEqual(['dag-learned-recent'])
+  expect(data.editableIds).toEqual(batch.editableIds)
+  expect(data.existing.map((entry: { id: string; body: string }) => [entry.id, entry.body]))
+    .toEqual([['dag-learned-recent', 'r'.repeat(2500)]])
+  expect(batch.baseline).toEqual(input.skills)
+  batch.baseline[0]?.history[0]?.evidence.push('changed')
+  expect(input.skills[0]?.history[0]?.evidence).toEqual(['old-event'])
+  expect(batch.prompt.length <= 16_000).toBe(true)
+})
+
+test('large libraries obey total prompt cap and retain complete baseline collisions', () => {
+  const input = library(...Array.from({ length: 500 }, (_, i) => skill({
+    id: `dag-learned-${i}`, body: '"'.repeat(3000), updatedAt: i + 2,
+  })))
+  const session = { ...emptyLearningSession(), nextId: 31,
+    events: [learningEvent(1, 'user'), ...Array.from({ length: 29 }, (_, i) => learningEvent(i + 2, 'tool', '\\'.repeat(2000)))] }
+  for (const maxChars of [16_000, 60_000, 120_000]) {
+    const batch = value(prepareLearningBatch(session, input, root, maxChars))
+    const data = JSON.parse(batch.prompt.split('\n').at(-1) ?? '')
+    expect(batch.prompt.length <= maxChars).toBe(true)
+    expect(batch.baseline.length).toBe(500)
+    expect(data.existing.map((entry: { id: string }) => entry.id)).toEqual(batch.editableIds)
+    for (const entry of data.existing) expect(entry.body).toBe('"'.repeat(3000))
+    expect(batch.events.length <= 80).toBe(true)
+    expect(batch.events.reduce((sum, event) => sum + event.text.length, 0) <= 60_000).toBe(true)
+    expect(batch.events.map(event => Number(event.id.split(':').at(-1))))
+      .toEqual(Array.from({ length: batch.through }, (_, i) => i + 1))
+  }
+})
+
+test('batch parser accepts legacy snapshots and validates optional editable ids strictly', () => {
+  const batch = { agentId: 'a', events, baseline: [skill()], through: 2 }
+  const session = { ...emptyLearningSession(), events, nextId: 3, batch }
+  expect(value(parseLearningSession(JSON.stringify(session)))).toEqual(session)
+  for (const editableIds of [[], ['dag-learned-signals']]) {
+    const input = { ...session, batch: { ...batch, editableIds } }
+    expect(value(parseLearningSession(JSON.stringify(input)))).toEqual(input)
+  }
+  for (const editableIds of [null, 'dag-learned-signals', [1], ['missing'], ['dag-learned-signals', 'dag-learned-signals']]) {
+    expect(parseLearningSession(JSON.stringify({ ...session, batch: { ...batch, editableIds } })).ok).toBe(false)
+  }
+})
+
+test('library usage parses strict nonnegative integers without changing schema version', () => {
+  const input = { ...emptyLibrary(), usage: { day: 3, runs: 2 } }
+  expect(value(parseLearningLibrary(JSON.stringify(input)))).toEqual(input)
+  for (const usage of [null, {}, { day: -1, runs: 0 }, { day: 0, runs: 0.5 },
+    { day: 0.5, runs: 0 }, { day: 0, runs: -1 }, { day: 0, runs: '1' },
+    { day: 0, runs: Number.MAX_SAFE_INTEGER + 1 }, { day: 0, runs: 1, extra: 1 }]) {
+    expect(parseLearningLibrary(JSON.stringify({ ...input, usage })).ok).toBe(false)
+  }
+})
+
+test('usage reservation counts attempts and resets exactly at UTC day boundary', () => {
+  const input = library(skill())
+  const first = value(reserveLearningUsage(input, 86_399_999, 2))
+  const second = value(reserveLearningUsage(first, 86_399_999, 2))
+  expect(first.usage).toEqual({ day: 0, runs: 1 })
+  expect(second.usage).toEqual({ day: 0, runs: 2 })
+  expect(reserveLearningUsage(second, 86_399_999, 2).ok).toBe(false)
+  expect(value(reserveLearningUsage(second, 86_400_000, 2)).usage).toEqual({ day: 1, runs: 1 })
+  expect(input.usage).toBe(undefined)
+  expect(first.usage?.runs).toBe(1)
+  expect(reserveLearningUsage(input, 0, 0).ok).toBe(false)
+  expect(reserveLearningUsage(input, -1, 2).ok).toBe(false)
+  expect(reserveLearningUsage(input, 0, 1.5).ok).toBe(false)
+  expect(recordSkillOpportunity(first, root, 20).usage).toEqual(first.usage)
+  expect(recordSkillUse(first, skill().id, root, 20).usage).toEqual(first.usage)
+  expect(archiveUnusedSkills(first, { projectRoot: root, minOpportunities: 1, maxSkills: 1, now: 20 }).usage).toEqual(first.usage)
+  expect(applyLearningProposals(first, [proposal()], context).usage).toEqual(first.usage)
+})
+
+test('learning transaction strictly round trips both library indexes without filepaths', () => {
+  const before = library(skill())
+  const after = { ...library(skill({ body: 'Updated.' })), usage: { day: 1, runs: 1 } }
+  const input = { schemaVersion: 1, before, after }
+  expect(value(parseLearningTransaction(JSON.stringify(input)))).toEqual(input)
+  for (const invalid of [
+    null, [], {}, { ...input, schemaVersion: 2 }, { schemaVersion: 1, before },
+    { ...input, path: '/skills' }, { ...input, before: { ...before, filepaths: [] } },
+    { ...input, after: { ...after, skills: [skill({ id: '../escape' })] } },
+    { ...input, before: { ...before, schemaVersion: 2 } },
+    { ...input, after: { ...after, usage: { day: 1, runs: -1 } } },
+  ]) expect(parseLearningTransaction(JSON.stringify(invalid)).ok).toBe(false)
+  expect(parseLearningTransaction('invalid JSON').ok).toBe(false)
+})
+
+test('a maximum-length complete skill body remains editable when the input budget has room', () => {
+  const existing = skill({ body: 'x'.repeat(12_000) })
+  const session = { ...emptyLearningSession(), events, nextId: 3 }
+  const prepared = value(prepareLearningBatch(session, library(existing), root, 60_000))
+  expect(prepared.editableIds).toEqual([existing.id])
+  const input = JSON.parse(prepared.prompt.split('\n').at(-1) ?? '')
+  expect(input.existing[0].body).toBe(existing.body)
 })

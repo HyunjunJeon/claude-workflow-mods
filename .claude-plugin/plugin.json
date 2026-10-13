@@ -2,7 +2,7 @@
   "name": "dag-workflow",
   "version": "0.1.0",
   "description": "Dependency-ordered DAG workflows of Claude Code subagents, with a live DAG pane",
-  "author": { "name": "jhj" },
+  "author": { "name": "HyunjunJeon", "email": "jeonhj920@gmail.com" },
   "types": "./types/index.d.ts",
   "userConfig": {
     "session_learning": {
@@ -35,6 +35,30 @@
       "min": 1,
       "max": 1000
     },
+    "learning_max_input_chars": {
+      "type": "number",
+      "title": "Maximum learning input characters",
+      "description": "Total background learning prompt size, including instructions, evidence and complete editable skill bodies",
+      "default": 60000,
+      "min": 16000,
+      "max": 120000
+    },
+    "learning_max_daily_runs": {
+      "type": "number",
+      "title": "Automatic learning attempts per UTC day",
+      "description": "Shared across all user sessions; reserves an attempt before automatic learning starts. A user-typed /dag learn bypasses this counter, not the input limit",
+      "default": 20,
+      "min": 1,
+      "max": 1000
+    },
+    "learning_retention_days": {
+      "type": "number",
+      "title": "Learning data retention days",
+      "description": "Remove old inactive session evidence and expired archived managed skills at startup or /dag learning prune; 0 keeps them, active skills and running batches are protected",
+      "default": 30,
+      "min": 0,
+      "max": 3650
+    },
     "auto_recovery": {
       "type": "boolean",
       "title": "Automatic node recovery",
@@ -46,6 +70,14 @@
       "title": "Jev automatic decisions",
       "description": "With TYPESAFE_API_KEY, classify DAG workers and resolve uncertain tool permissions; missing or uncertain decisions retain the existing flow",
       "default": true
+    },
+    "jev_max_calls": {
+      "type": "number",
+      "title": "Jev calls per loaded session",
+      "description": "Maximum combined HTTP and session-model decision calls, including failed calls and fallback parts; identical in-flight requests share a call. At the limit, permissions retain the host decision, routing retains the proposal, and automatic recovery stops",
+      "default": 100,
+      "min": 1,
+      "max": 1000
     },
     "jev_model_fallback": {
       "type": "boolean",
@@ -93,7 +125,7 @@
     "anti_slop_scan": {
       "type": "boolean",
       "title": "Anti-slop scan after edits",
-      "description": "After every Edit or Write, in the main conversation and in DAG nodes, scan the lines it added for anti-slop patterns and show each hit to the model; no model call",
+      "description": "After Edit or Write, scan added lines and precise TS/JS test changes, including advisory expectation replacements and explicit real-API substitutions; show candidates to the model with no model call",
       "default": true
     },
     "anti_slop_skip": {

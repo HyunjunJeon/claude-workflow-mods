@@ -535,3 +535,12 @@ test('a path the node was meant to build stays an ordinary failure that recovery
   expect(h.requests.filter(request => 'recovery' in request.questions)).toHaveLength(1)
   expect(h.spawns).toHaveLength(2)
 })
+
+test('a dependency hint reaches recovery without suppressing an in-scope retry', RECOVERING, async ($, on) => {
+  const h = harness(on)
+  const node = await failedOnce($, h, [{ kind: 'command', argv: ['report', '1', '', "Error: Cannot find module 'sqlite3'"] }])
+  const request = h.requests.find(request => 'recovery' in request.questions)
+  expect(request?.state).toMatchObject({ observedFailures: [{ check: 1, kind: 'dependency' }] })
+  expect(node?.recovery?.used).toBe(1)
+  expect(h.spawns).toHaveLength(2)
+})

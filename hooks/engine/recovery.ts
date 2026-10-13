@@ -3,6 +3,7 @@ import { isVerificationNode } from './lint.ts'
 import { isVerdictFailure } from './stages.ts'
 import { advance } from './run.ts'
 import { spawnTarget } from './node-prompt.ts'
+import { evidenceOutcome } from './check-eval.ts'
 import { fail, type RecoveryKind, type Result, type Run } from './types.ts'
 
 export const MAX_AUTO_RECOVERIES = 2
@@ -52,6 +53,17 @@ export function recoverNode(input: Run, nodeId: string, decision: { kind: Recove
         current.promptOverride ?? definition?.prompt ?? '',
         '',
         `[Recovery ${used + 1}/${MAX_AUTO_RECOVERIES}] ${decision.kind}: ${decision.reason}`,
+        ...(verification ? [
+          '<verification_evidence>',
+          JSON.stringify({
+            attempt: current.attempt,
+            reportPath: verification.reportPath,
+            checks: verification.evidence.map((item, index) => ({
+              index: index + 1, outcome: evidenceOutcome(item), exitCode: item.exitCode, detail: item.detail.slice(0, 240),
+            })),
+          }),
+          '</verification_evidence>',
+        ] : []),
         'Fix the observed failure within the original scope. Re-run the declared verification; do not broaden the task or claim success without evidence.',
       ].join('\n'),
       recovery: {

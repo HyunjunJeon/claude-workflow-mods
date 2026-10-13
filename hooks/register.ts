@@ -4,7 +4,8 @@ import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine,
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevRequest } from './engine/jev.ts'
+import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
+import { shareJevCall, type PendingJevCall } from './engine/jev-calls.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
@@ -42,10 +43,14 @@ import {
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
-import { applyLearningProposals, archiveUnusedSkills, buildLearningPrompt, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, type LearningEvent, type LearningLibrary } from './engine/learning.ts'
+import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
 import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
+import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, type PeekRequest } from './engine/board.ts'
+import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from './engine/board-spec.ts'
+import type { Board, BoardEdit, BoardFile } from './engine/board-types.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence, type VerificationOutcome } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { approvalPreview } from './ui/approval.ts'
@@ -53,14 +58,16 @@ import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
 import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
-import { buildInspector, type InspectorInput, type InspectorView } from './ui/inspector-model.ts'
+import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
+import { adjacentBoardId, buildBoardView } from './ui/board-model.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
 import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline] | learn | learning [status|on|off|prune]]'
+const BOARDS_SUBDIR = `${DAG_SUBDIR}/boards`
+const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions|board> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline] | learn | learning [status|on|off|prune]]'
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'auto', 'guide', 'off']
 type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
@@ -188,6 +195,9 @@ let learningEnabled = true
 let learningInterval = 20
 let learningMinOpportunities = 50
 let learningMaxSkills = 30
+let learningMaxInputChars = 60_000
+let learningDailyLimit = 20
+let learningRetentionDays = 30
 let learningRoot = ''
 let learnedSkillsDir = ''
 let learningSession = emptyLearningSession()
@@ -195,10 +205,11 @@ let learningLibrary = emptyLibrary()
 const learningAgents = new Set<string>()
 let learningTurnRequested = false
 let learningSpawning = false
+let learningSpawnName: string | undefined
 let learningWriteSequence = 0
 
-function learningSessionPath(): string {
-  return `${learningRoot}/sessions/${hash(sessionId)}.json`
+function learningSessionPath(id = sessionId): string {
+  return `${learningRoot}/sessions/${hash(id)}.json`
 }
 
 async function learningDirectory($: EngineInterface, path: string): Promise<void> {
@@ -215,9 +226,9 @@ async function learningWrite($: EngineInterface, path: string, text: string): Pr
   if (moved.exitCode !== 0) throw new Error(`could not save learning data: ${moved.stderr.trim()}`)
 }
 
-async function saveLearningSession($: EngineInterface): Promise<void> {
+async function saveLearningSession($: EngineInterface, id = sessionId): Promise<void> {
   if (!learningRoot) return
-  await learningWrite($, learningSessionPath(), JSON.stringify(learningSession) + '\n')
+  await learningWrite($, learningSessionPath(id), JSON.stringify(learningSession) + '\n')
 }
 
 async function readLearningLibrary($: EngineInterface): Promise<LearningLibrary> {
@@ -230,7 +241,7 @@ async function readLearningLibrary($: EngineInterface): Promise<LearningLibrary>
 
 // A directory lock protects read/modify/write across independent sessions, not just this module's queue.
 // Contention leaves the session's unlearned evidence intact for its next turn; no hook waits for another session.
-async function updateLearningLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary): Promise<void> {
+async function updateLearningLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary | Promise<LearningLibrary>): Promise<void> {
   const lock = `${learningRoot}/.lock`
   let acquired = await $.process.run(['mkdir', lock])
   if (acquired.exitCode !== 0 && await $.fs.exists(lock)) {
@@ -242,35 +253,120 @@ async function updateLearningLibrary($: EngineInterface, update: (library: Learn
   }
   if (acquired.exitCode !== 0) throw new Error('Learning library is busy; retained evidence for the next turn.')
   try {
-    const before = await readLearningLibrary($)
-    const after = update(before)
-    for (const skill of after.skills) {
-      const previous = before.skills.find(item => item.id === skill.id)
-      if (previous?.revision === skill.revision && previous.archived === skill.archived) continue
-      const path = `${learnedSkillsDir}/${skill.id}/SKILL.md`
-      if (await $.fs.exists(path)) {
-        const stat = await $.fs.stat(path)
-        if (stat.isLink || !previous || await $.fs.read(path) !== renderLearnedSkill(previous)) {
-          throw new Error(`Preserving an unmanaged or manually changed skill: ${path}`)
-        }
-      }
-      if (skill.archived) {
-        if (await $.fs.exists(path)) {
-          const folder = `${learningRoot}/archive/${skill.id}`
-          await learningDirectory($, folder)
-          const moved = await $.process.run(['mv', '-f', path, `${folder}/SKILL.md`])
-          if (moved.exitCode !== 0) throw new Error(`could not archive ${skill.id}`)
-        }
-      } else {
-        await learningDirectory($, `${learnedSkillsDir}/${skill.id}`)
-        await learningWrite($, path, renderLearnedSkill(skill))
-      }
+    const pending = `${learningRoot}/pending.json`
+    if (await $.fs.exists(pending)) {
+      const parsed = parseLearningTransaction(await $.fs.read(pending))
+      if (!parsed.ok) throw new Error(parsed.error.message)
+      await publishLearningTransaction($, parsed.value, true)
     }
-    await learningWrite($, `${learningRoot}/library.json`, JSON.stringify(after) + '\n')
-    learningLibrary = after
+    const before = await readLearningLibrary($)
+    const after = await update(before)
+    const changed = after.skills.some(skill => {
+      const previous = before.skills.find(item => item.id === skill.id)
+      return previous?.revision !== skill.revision || previous.archived !== skill.archived
+    })
+    if (changed) await publishLearningTransaction($, { schemaVersion: 1, before, after })
+    else {
+      await learningWrite($, `${learningRoot}/library.json`, JSON.stringify(after) + '\n')
+      learningLibrary = after
+    }
   } finally {
     const released = await $.process.run(['rmdir', lock])
     if (released.exitCode !== 0) $.ui.log('Could not release the session learning library lock.')
+  }
+}
+
+async function publishLearningTransaction($: EngineInterface, transaction: LearningTransaction, recovering = false): Promise<void> {
+  const current = stableStringify(await readLearningLibrary($))
+  if (current !== stableStringify(transaction.before) && current !== stableStringify(transaction.after)) {
+    throw new Error('Learning library changed outside the pending publication; preserving both records.')
+  }
+  const changed = transaction.after.skills.filter(skill => {
+    const previous = transaction.before.skills.find(item => item.id === skill.id)
+    return previous?.revision !== skill.revision || previous.archived !== skill.archived
+  })
+  // Validate every destination before publishing the first file. Recovery accepts only the exact before/after text,
+  // so a failed index write is distinguishable from an unmanaged file or a person's later edit.
+  for (const skill of changed) {
+    const previous = transaction.before.skills.find(item => item.id === skill.id)
+    const active = `${learnedSkillsDir}/${skill.id}/SKILL.md`
+    const archived = `${learningRoot}/archive/${skill.id}/SKILL.md`
+    for (const path of skill.archived ? [active, archived] : [active]) {
+      if (!await $.fs.exists(path)) continue
+      const stat = await $.fs.stat(path)
+      const text = await $.fs.read(path)
+      const beforeText = path === active && previous ? renderLearnedSkill(previous) : undefined
+      const afterText = recovering ? renderLearnedSkill(skill) : undefined
+      if (stat.isLink || stat.kind !== 'file' || (text !== beforeText && text !== afterText)) {
+        throw new Error(`Preserving an unmanaged or manually changed skill: ${path}`)
+      }
+    }
+  }
+  const pending = `${learningRoot}/pending.json`
+  if (!recovering) await learningWrite($, pending, JSON.stringify(transaction) + '\n')
+  for (const skill of changed) {
+    const path = `${learnedSkillsDir}/${skill.id}/SKILL.md`
+    if (skill.archived) {
+      if (await $.fs.exists(path)) {
+        const folder = `${learningRoot}/archive/${skill.id}`
+        await learningDirectory($, folder)
+        const moved = await $.process.run(['mv', '-f', path, `${folder}/SKILL.md`])
+        if (moved.exitCode !== 0) throw new Error(`could not archive ${skill.id}`)
+      }
+    } else {
+      await learningDirectory($, `${learnedSkillsDir}/${skill.id}`)
+      const wanted = renderLearnedSkill(skill)
+      if (!await $.fs.exists(path) || await $.fs.read(path) !== wanted) await learningWrite($, path, wanted)
+    }
+  }
+  await learningWrite($, `${learningRoot}/library.json`, JSON.stringify(transaction.after) + '\n')
+  learningLibrary = transaction.after
+  const removed = await $.process.run(['rm', '-f', pending])
+  if (removed.exitCode !== 0) throw new Error('Could not clear completed learning publication; it will be recovered next time.')
+}
+
+async function pruneLearningData($: EngineInterface): Promise<void> {
+  if (!learningRoot || learningRetentionDays === 0) return
+  const cutoff = (await $.clock.now()) - learningRetentionDays * 86_400_000
+  await updateLearningLibrary($, async library => {
+    const skills: LearningLibrary['skills'] = []
+    for (const skill of library.skills) {
+      if (!skill.archived || skill.updatedAt >= cutoff) {
+        skills.push(skill)
+        continue
+      }
+      const path = `${learningRoot}/archive/${skill.id}/SKILL.md`
+      if (await $.fs.exists(path)) {
+        const stat = await $.fs.stat(path)
+        if (stat.isLink || stat.kind !== 'file' || await $.fs.read(path) !== renderLearnedSkill(skill)) {
+          skills.push(skill)
+          $.ui.log(`Preserving a manually changed archived skill: ${path}`)
+          continue
+        }
+        const removed = await $.process.run(['rm', '-f', path])
+        if (removed.exitCode !== 0) {
+          skills.push(skill)
+          $.ui.log(`Could not remove expired archived skill: ${path}`)
+          continue
+        }
+      }
+      // An active file created at this name since archival is not ours to remove.
+      if (await $.fs.exists(`${learnedSkillsDir}/${skill.id}/SKILL.md`)) skills.push(skill)
+    }
+    return { ...library, skills }
+  })
+  for (const entry of await $.fs.list(`${learningRoot}/sessions`)) {
+    if (entry.kind !== 'file' || entry.isLink || !/^[a-f0-9]+\.json$/.test(entry.name) || entry.mtimeMs >= cutoff) continue
+    const path = `${learningRoot}/sessions/${entry.name}`
+    if (path === learningSessionPath()) continue
+    try {
+      const parsed = parseLearningSession(await $.fs.read(path))
+      if (!parsed.ok || parsed.value.batch || parsed.value.events.some(event => event.at >= cutoff)) continue
+      const removed = await $.process.run(['rm', '-f', path])
+      if (removed.exitCode !== 0) $.ui.log(`Could not remove expired learning session: ${path}`)
+    } catch (error) {
+      $.ui.log(`Could not inspect expired learning session ${path}: ${message(error)}`)
+    }
   }
 }
 
@@ -285,8 +381,9 @@ async function initializeLearning($: EngineInterface): Promise<void> {
   learnedSkillsDir = `${home.replace(/\/$/, '')}/.claude/skills`
   await learningDirectory($, `${learningRoot}/sessions`)
   await learningDirectory($, learnedSkillsDir)
-  learningLibrary = await readLearningLibrary($)
+  await updateLearningLibrary($, library => library)
   const path = learningSessionPath()
+  learningSession = emptyLearningSession()
   if (await $.fs.exists(path)) {
     const parsed = parseLearningSession(await $.fs.read(path))
     if (!parsed.ok) throw new Error(parsed.error.message)
@@ -300,6 +397,7 @@ async function initializeLearning($: EngineInterface): Promise<void> {
       }
     }
   }
+  await pruneLearningData($)
 }
 
 async function collectLearning($: EngineInterface, kind: LearningEvent['kind'], text: string, agentId?: string): Promise<void> {
@@ -307,29 +405,35 @@ async function collectLearning($: EngineInterface, kind: LearningEvent['kind'], 
   const at = await $.clock.now()
   const id = `${hash(sessionId)}:${learningSession.nextId}`
   const event: LearningEvent = { id, sessionId, projectRoot, kind, text: capText(text, 3_900).replace(/\0/g, '').slice(0, 4_000), at, ...(agentId ? { agentId } : {}) }
-  let events = [...learningSession.events, event].slice(-80)
-  while (events.reduce((size, item) => size + item.text.length, 0) > 60_000) events = events.slice(1)
-  learningSession = {
-    ...learningSession, events, nextId: learningSession.nextId + 1,
-    toolsSinceLearn: learningSession.toolsSinceLearn + (kind === 'tool' ? 1 : 0),
-  }
+  learningSession = appendLearningEvent(learningSession, event)
 }
 
-async function startLearning($: EngineInterface, force = false): Promise<string> {
+async function startLearning($: EngineInterface, force = false, manual = false): Promise<string> {
   if (!learningEnabled || !learningRoot) return 'Session learning is off or unavailable.'
   if (learningSession.batch || learningSpawning) return 'Session learning is already running.'
-  const pending = learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough)
-  if (pending.length === 0) return 'No new user-session experience to learn.'
-  const user = learningSession.events.findLast(event => event.kind === 'user')
-  if (!user) return 'No new user-session experience to learn.'
-  const events = pending.some(event => event.kind === 'user') ? pending : [user, ...pending.slice(-79)]
-  while (events.reduce((size, item) => size + item.text.length, 0) > 60_000) events.splice(1, 1)
   if (!force && learningSession.toolsSinceLearn < learningInterval) return 'Session learning will run after more tool calls.'
-  learningLibrary = await readLearningLibrary($)
+  if (!learningSession.events.some(event => event.kind === 'user')) return 'No new user-session experience to learn.'
+  if (!learningSession.events.some(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough)) return 'No new user-session experience to learn.'
+  const now = await $.clock.now()
+  let limit: string | undefined
+  await updateLearningLibrary($, library => {
+    if (manual) return library
+    const reserved = reserveLearningUsage(library, now, learningDailyLimit)
+    if (!reserved.ok) {
+      limit = reserved.error.message
+      return library
+    }
+    return reserved.value
+  })
+  if (limit) return limit
+  const prepared = prepareLearningBatch(learningSession, learningLibrary, projectRoot, learningMaxInputChars)
+  if (!prepared.ok) return prepared.error.message
+  const snapshot = prepared.value
   learningSpawning = true
+  learningSpawnName = `dag-learning-${hash(sessionId)}-${++learningWriteSequence}`
   try {
     const spawned = await $.agent.spawn({
-      prompt: buildLearningPrompt(events, eligibleSkills(learningLibrary, projectRoot)),
+      prompt: snapshot.prompt, name: learningSpawnName,
       description: 'Learn reusable skills from this user session',
       subagentType: 'general-purpose', model: 'sonnet',
     })
@@ -337,12 +441,13 @@ async function startLearning($: EngineInterface, force = false): Promise<string>
     learningAgents.add(spawned.agentId)
     learningSession = {
       ...learningSession,
-      batch: { agentId: spawned.agentId, events, baseline: learningLibrary.skills, through: learningSession.nextId - 1 },
+      batch: { agentId: spawned.agentId, events: snapshot.events, baseline: snapshot.baseline, through: snapshot.through, editableIds: snapshot.editableIds },
     }
     await saveLearningSession($)
     return 'Session learning started in the background.'
   } finally {
     learningSpawning = false
+    learningSpawnName = undefined
   }
 }
 
@@ -354,6 +459,10 @@ async function finishLearning($: EngineInterface, end: AgentEnd): Promise<void> 
     const answer = end.answer || await recoverReport($, end.agentId)
     const parsed = parseLearningProposals(answer, batch.events, batch.baseline)
     if (!parsed.ok) throw new Error(parsed.error.message)
+    if (batch.editableIds && parsed.value.some(proposal => [proposal.id, ...proposal.replaces]
+      .some(id => batch.baseline.some(skill => skill.id === id) && !batch.editableIds?.includes(id)))) {
+      throw new Error('A proposed update needs the complete existing skill body; retained evidence for relearning.')
+    }
     const now = await $.clock.now()
     await updateLearningLibrary($, library => {
       for (const proposal of parsed.value) {
@@ -407,6 +516,13 @@ const transcriptErrors = new Set<string>()
 const toolContexts = new Map<string, JevContext>()
 // Node workers' calls in flight (tool_use_id -> agent) and the workers waiting for a permission answer, in memory only.
 const openCalls = new Map<string, { agentId: string; tool: string }>()
+// One last failed check per execution subject, bounded and never persisted. Epochs discard comparisons across possible
+// writes and overlapping calls. An unlinked background launch suspends observation until clear or a new session: its
+// completion is not proven by an unrelated tool result or progress message.
+const repeatedChecks = new Map<string, RepeatedCheck>()
+const repeatCalls = new Set<string>()
+let repeatEpoch = 0
+let repeatSuspended = false
 const waiting = new Map<string, { tool: string; toolUseId?: string; since: number }>()
 // Node workers that started work which runs on after its tool call returns (a background command or subagent, or a Monitor),
 // by agent id: each attempt spawns its own agent, so this is per attempt. In memory only, like openCalls: after a reload
@@ -420,6 +536,9 @@ const backgroundWaits = new Map<string, { answer: string; timer: Timer }>()
 const askedTools = new Map<string, Map<string, { attempt: number; tools: string[] }>>()
 let userRequest = ''
 let jevEnabled = true
+let jevMaxCalls = 100
+let jevCallsUsed = 0
+let jevLimitNoted = false
 let jevConfidence = 0.9
 // Session-model routing answers measured 0.60-0.97 confident with every choice correct, so they apply from a lower bar.
 let jevModelRoutingConfidence = 0.8
@@ -442,10 +561,14 @@ let metadataWrites: Promise<unknown> = Promise.resolve()
 let decisionSequence = 0
 let sessionClosed = false
 let autoRecovery = true
-let inspectorView: 'dag' | InspectorView = 'dag'
+let inspectorView: 'dag' | 'board' | InspectorView = 'dag'
 let inspectorPage = 0
 let inspectorColumns = FALLBACK_GRAPH_COLUMNS
 let selectedDecisionId: string | undefined
+// This session's boards in creation order, which is the Board section's order, and the one it shows; unset, it shows the
+// board updated last.
+let boards: Board[] = []
+let selectedBoardId: string | undefined
 let language: 'en' | 'ko' = 'en'
 let pinnedStatus: string | undefined
 const settleToasts = new Set<string>()
@@ -454,16 +577,23 @@ const failureToasts = new Map<string, Set<string>>()
 const ATTENTION_TOAST_MS = 12_000
 let lastPaneAgentId: string | undefined
 
-type JevOutcome = Exclude<DecisionOutcome, 'applied' | 'low-confidence' | 'ask' | 'existing-decision'> | 'answered'
+const pendingJevCalls = new Map<string, PendingJevCall>()
 
-type JevEvaluation = {
-  choices: ReadonlyMap<string, JevChoice>
-  outcome: JevOutcome
-  latencyMs: number
-  backend?: 'http' | 'model'
-  // Per question, when the questions were asked in separate requests.
-  outcomes?: ReadonlyMap<string, JevOutcome>
-  latencies?: ReadonlyMap<string, number>
+// Count physical requests, including failed HTTP calls and every fallback part. In-flight joiners cost nothing.
+function takeJevCall($: EngineInterface): boolean {
+  if (jevCallsUsed < jevMaxCalls) {
+    jevCallsUsed++
+    return true
+  }
+  if (!jevLimitNoted) {
+    jevLimitNoted = true
+    $.ui.log(`Jev call limit reached (${jevMaxCalls}); keeping baseline decisions for this session.`)
+  }
+  return false
+}
+
+function jevLimit(): JevEvaluation {
+  return { choices: new Map(), outcome: 'disabled', latencyMs: 0, note: 'budget-exhausted: session Jev call limit reached' }
 }
 
 function serialized<T>(job: () => Promise<T>): Promise<T> {
@@ -531,11 +661,18 @@ function waitingTools(): Map<string, string> {
 async function evaluateJev($: EngineInterface, request: JevRequest, signal?: AbortSignal, modelParts: readonly JevRequest[] = [request]): Promise<JevEvaluation> {
   if (!jevEnabled) return { choices: new Map(), outcome: 'disabled', latencyMs: 0 }
   if (!jevApiKey && !jevModelFallback) return { choices: new Map(), outcome: 'missing-key', latencyMs: 0 }
+  const key = stableStringify({ sessionId, projectRoot, userRequest, request, modelParts })
+  return shareJevCall(pendingJevCalls, key, sharedSignal => evaluateJevShared($, request, modelParts, sharedSignal), signal)
+}
+
+async function evaluateJevShared($: EngineInterface, request: JevRequest, modelParts: readonly JevRequest[], signal: AbortSignal): Promise<JevEvaluation> {
   const startedAt = await $.clock.now()
+  if (signal.aborted) return { choices: new Map(), outcome: 'timeout', latencyMs: 0 }
   if (jevApiKey) {
     const http = await evaluateJevHttp($, request, jevApiKey, startedAt)
     if (!jevModelFallback || (http.outcome !== 'http-error' && http.outcome !== 'timeout' && http.outcome !== 'transport-error')) return http
   }
+  if (signal.aborted) return { choices: new Map(), outcome: 'timeout', latencyMs: 0 }
   return evaluateJevModel($, modelParts, startedAt, signal)
 }
 
@@ -560,10 +697,13 @@ async function evaluateJevModel($: EngineInterface, parts: readonly JevRequest[]
     }
   })
   const outcome = choices.size ? 'answered' : results.find(result => result.outcome !== 'answered')?.outcome ?? 'invalid-response'
-  return { choices, outcome, latencyMs: Math.max(0, ...latencies.values()), backend: 'model', outcomes, latencies }
+  const limitNote = results.find(result => result.note?.startsWith('budget-exhausted'))?.note
+  return { choices, outcome, latencyMs: Math.max(0, ...latencies.values()), backend: 'model', outcomes, latencies, ...(limitNote ? { note: limitNote } : {}) }
 }
 
 async function completeJevPart($: EngineInterface, request: JevRequest, startedAt: number, signal?: AbortSignal): Promise<ModelPart> {
+  if (signal?.aborted) return { choices: new Map(), outcome: 'timeout', latencyMs: 0 }
+  if (!takeJevCall($)) return jevLimit()
   const ask = modelPrompt(request)
   try {
     const reply = await $.model.complete(
@@ -584,6 +724,7 @@ async function completeJevPart($: EngineInterface, request: JevRequest, startedA
 }
 
 async function evaluateJevHttp($: EngineInterface, request: JevRequest, apiKey: string, startedAt: number): Promise<JevEvaluation> {
+  if (!takeJevCall($)) return jevLimit()
   debug($, `Jev request started (${Object.keys(request.questions).length} question(s))`)
   let timeout: ReturnType<EngineInterface['clock']['after']> | undefined
   const deadline = new Promise<undefined>(resolve => {
@@ -652,7 +793,8 @@ async function persistDecisions($: EngineInterface, records: DecisionRecord[]): 
 }
 
 function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: JevEvaluation, threshold = jevConfidence): DecisionRecord {
-  return { ...input, ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold }
+  const note = [input.note, evaluation.note].filter(Boolean).join('; ')
+  return { ...input, ...(note ? { note } : {}), ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold }
 }
 
 async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Run> {
@@ -990,6 +1132,7 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
   if (!(retentionDays > 0)) return
   const contextDir = `${projectRoot}/${DAG_SUBDIR}/context`
   const decisionsDir = `${projectRoot}/${DAG_SUBDIR}/decisions`
+  const boardsDir = `${projectRoot}/${BOARDS_SUBDIR}`
   const prefix = `dag-session:${hash(projectRoot)}:`
   const files = (entries: Awaited<ReturnType<typeof listIfPresent>>): RetentionFile[] =>
     entries.filter(entry => entry.kind === 'file').map(entry => ({ name: entry.name, mtimeMs: entry.mtimeMs }))
@@ -1011,6 +1154,7 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
     runDirNames: runEntries.filter(entry => entry.kind !== 'file' && !checkpoints.has(`${entry.name}.json`)).map(entry => entry.name),
     contextFiles: files(await listIfPresent($, contextDir)),
     decisionFiles: files(await listIfPresent($, decisionsDir)),
+    boardFiles: files(await listIfPresent($, boardsDir)),
     sessionRecords,
   })
   for (const run of plan.runs) {
@@ -1024,7 +1168,7 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
     if (SAFE_RUN_DIR.test(name)) await removePath($, '-rf', `${runsDir}/${name}`)
     else debug($, `skipped pruning run directory with unsafe name ${JSON.stringify(name)}`)
   }
-  for (const [dir, names] of [[contextDir, plan.contextFiles], [decisionsDir, plan.decisionFiles]] as const) {
+  for (const [dir, names] of [[contextDir, plan.contextFiles], [decisionsDir, plan.decisionFiles], [boardsDir, plan.boardFiles]] as const) {
     for (const name of names) {
       if (SAFE_FILE.test(name) && !name.includes('..')) await removePath($, '-f', `${dir}/${name}`)
     }
@@ -1993,6 +2137,109 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
 }
 
+function boardsPath(): string {
+  return `${projectRoot}/${BOARDS_SUBDIR}/${sessionId}.json`
+}
+
+// A missing file is a session without boards. A file that cannot be read or parsed is logged and left on disk: the
+// session starts without boards, and its first create writes the file again.
+async function loadBoards($: EngineInterface): Promise<void> {
+  boards = []
+  selectedBoardId = undefined
+  if (!projectRoot || !sessionId) return
+  const path = boardsPath()
+  try {
+    if (!(await $.fs.exists(path))) return
+    const parsed = parseBoardFile(await $.fs.read(path), sessionId)
+    if (parsed.ok) boards = parsed.value.boards
+    else $.ui.log(`could not load ${path}: ${parsed.error.message}`)
+  } catch (error) {
+    $.ui.log(`could not read ${path}: ${message(error)}`)
+  }
+}
+
+// Memory takes the new list only once the file holds it, so a failed write changes neither.
+async function saveBoards($: EngineInterface, next: Board[]): Promise<void> {
+  const file: BoardFile = { schemaVersion: 1, sessionId, boards: next }
+  await ensureDir($, `${projectRoot}/${BOARDS_SUBDIR}`)
+  await $.fs.write(boardsPath(), JSON.stringify(file, null, 2) + '\n')
+  boards = next
+}
+
+// Lines start..end (1-based) of a project file for a code_peek. peeksNeeded merges a range several edits ask for, so a
+// refusal names the path and no edit index.
+async function readPeek($: EngineInterface, request: PeekRequest): Promise<Result<string[]>> {
+  let text: string
+  try {
+    text = await $.fs.read(`${projectRoot}/${request.path}`)
+  } catch (error) {
+    return fail('invalid_board_edit', `code_peek ${request.path}: cannot read the file (${message(error)})`)
+  }
+  const lines = text.split(/\r?\n/)
+  // A final newline ends the last line; it does not start another.
+  if (lines.at(-1) === '') lines.pop()
+  if (request.end > lines.length) {
+    return fail('invalid_board_edit', `code_peek ${request.path}: lines ${request.start}-${request.end} reach past the end of the file, which has ${lines.length} lines`)
+  }
+  return { ok: true, value: lines.slice(request.start - 1, request.end) }
+}
+
+async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): Promise<ToolReply> {
+  const peeks = new Map<string, string[]>()
+  for (const request of peeksNeeded(board, edits)) {
+    const lines = await readPeek($, request)
+    if (!lines.ok) return err(lines.error)
+    peeks.set(peekKey(request), lines.value)
+  }
+  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks })
+  if (!applied.ok) return err(applied.error)
+  const edited = applied.value.board
+  await saveBoards($, boards.map(candidate => (candidate.boardId === edited.boardId ? edited : candidate)))
+  selectedBoardId = edited.boardId
+  $.ui.invalidate('ui.render')
+  return ok({ board_id: edited.boardId, blocks: edited.blocks.map(block => ({ id: block.id, type: block.type })), inserted: applied.value.inserted })
+}
+
+// The pane opens as for a run the model starts: without the keyboard, and not over the person's own close. The reply
+// says when the board is not on screen, so the model does not point the person at a pane they cannot see.
+async function openBoard($: EngineInterface, board: Board): Promise<ToolReply> {
+  selectedBoardId = board.boardId
+  inspectorView = 'board'
+  inspectorPage = 0
+  selectedDecisionId = undefined
+  await openPane($, false)
+  $.ui.invalidate('ui.render')
+  if (!paneSurface) return ok({ board_id: board.boardId, shown: false, hint: 'This surface draws no /dag pane, so the board is saved but not on screen.' })
+  if (paneClosedByUser) return ok({ board_id: board.boardId, shown: false, hint: 'The user closed the /dag pane, so it stays closed; they can show the board with /dag inspect board.' })
+  return ok({ board_id: board.boardId, shown: true })
+}
+
+// The board tool (engine/board-spec.ts): the main conversation draws boards that the pane's Board section shows.
+async function handleBoardTool($: EngineInterface, input: ToolInput): Promise<ToolReply> {
+  if (input.action === 'list') {
+    return ok({ boards: boards.map(board => ({ board_id: board.boardId, title: board.title, blocks: board.blocks.length, updatedAt: board.updatedAt })) })
+  }
+  if (input.action === 'create') {
+    const now = await $.clock.now()
+    const boardId = `board_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    const created = newBoard({ boardId, sessionId, title: typeof input.title === 'string' ? input.title : '', now })
+    if (!created.ok) return err(created.error)
+    await saveBoards($, [...boards, created.value])
+    selectedBoardId = boardId
+    $.ui.invalidate('ui.render')
+    return ok({ board_id: boardId })
+  }
+  if (input.action !== 'edit' && input.action !== 'get' && input.action !== 'open') {
+    return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
+  }
+  const board = boards.find(candidate => candidate.boardId === input.board_id)
+  if (!board) return err({ code: 'unknown_board', message: `No board "${String(input.board_id)}" in this session; use the list action to see boards.` })
+  if (input.action === 'get') return ok(boardForModel(board))
+  if (input.action === 'open') return openBoard($, board)
+  const edits = parseEdits(input.edits)
+  return edits.ok ? editBoard($, board, edits.value) : err(edits.error)
+}
+
 async function notifyHandoff($: EngineInterface, run: Run): Promise<void> {
   if (!run.handoff) return
   const sent = await $.session.send({
@@ -2144,7 +2391,7 @@ async function commandFilePath($: EngineInterface, given: string): Promise<strin
 // `fromComposer` is whether the person typed the command in the prompt, the only origin that may approve a held run.
 async function runCommand($: EngineInterface, args: string, fromComposer = false): Promise<{ text?: string }> {
   const [verb = 'open', ...rest] = splitArgs(args)
-  if (verb === 'learn') return { text: await startLearning($, true) }
+  if (verb === 'learn') return { text: await startLearning($, true, fromComposer) }
   if (verb === 'learning') {
     const action = rest[0] ?? 'status'
     if (action === 'on' || action === 'off') {
@@ -2158,13 +2405,14 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
       if (!fromComposer) return { text: USER_ONLY }
       const now = await $.clock.now()
       await updateLearningLibrary($, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learningMinOpportunities, maxSkills: learningMaxSkills, now }))
+      await pruneLearningData($)
     } else if (action !== 'status') return { text: 'Usage: /dag learning [status|on|off|prune]' }
     learningLibrary = await readLearningLibrary($)
-    return { text: JSON.stringify({ enabled: learningEnabled, running: learningSession.batch?.agentId, pendingEvents: learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough).length, root: learningRoot, skills: learningLibrary.skills }, null, 2) }
+    return { text: JSON.stringify({ enabled: learningEnabled, running: learningSession.batch?.agentId, pendingEvents: learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough).length, root: learningRoot, usage: learningLibrary.usage, maxDailyRuns: learningDailyLimit, maxInputChars: learningMaxInputChars, retentionDays: learningRetentionDays, skills: learningLibrary.skills }, null, 2) }
   }
   if (verb === 'inspect') {
     const choice = rest[0]
-    if (choice !== 'dag' && choice !== 'decisions' && choice !== 'context' && choice !== 'sessions') return { text: USAGE }
+    if (choice !== 'dag' && choice !== 'decisions' && choice !== 'context' && choice !== 'sessions' && choice !== 'board') return { text: USAGE }
     inspectorView = choice
     inspectorPage = 0
     selectedDecisionId = undefined
@@ -2474,7 +2722,10 @@ function moveRun(step: 1 | -1): void {
 async function inspectorAction($: EngineInterface, action: string): Promise<void> {
   if (action === 'page:prev') inspectorPage = Math.max(0, inspectorPage - 1)
   else if (action === 'page:next') inspectorPage += 1
-  else if (action === 'decision:back') selectedDecisionId = undefined
+  else if (action === 'board:prev' || action === 'board:next') {
+    selectedBoardId = adjacentBoardId(boards, selectedBoardId, action === 'board:next' ? 1 : -1)
+    inspectorPage = 0
+  } else if (action === 'decision:back') selectedDecisionId = undefined
   else if (action.startsWith('decision:')) selectedDecisionId = action.slice('decision:'.length)
   else {
     let reply: { text: string } | undefined
@@ -2557,6 +2808,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     { id: 'decisions' as const, label: language === 'ko' ? '판단' : 'Decisions', key: 'j' },
     { id: 'context' as const, label: language === 'ko' ? '컨텍스트' : 'Context', key: 'x' },
     { id: 'sessions' as const, label: language === 'ko' ? '세션' : 'Sessions', key: 's' },
+    { id: 'board' as const, label: language === 'ko' ? '보드' : 'Board', key: 'b' },
   ]
   const sectionTabs = Box({
     flexDirection: 'column',
@@ -2570,16 +2822,17 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     })),
   })
   if (inspectorView !== 'dag') {
-    const input: InspectorInput = {
-      view: inspectorView, columns: inspectorColumns, language,
-      decisions: decisionRecords, context: workflowContext, contextPath: contextPath(),
-      runs: [...runs.values()], sessions: peerSessions, projectRoot, sessionId, now,
-      ...(shownRun() ? { selectedRunId: shownRun()?.runId } : {}),
-      ...(selectedDecisionId ? { selectedDecisionId } : {}),
-      page: inspectorPage,
-      waiting: waitingTools(),
-    }
-    const inspection = buildInspector(input)
+    const inspection = inspectorView === 'board'
+      ? buildBoardView({ boards, selectedBoardId, columns: inspectorColumns, language, page: inspectorPage })
+      : buildInspector({
+        view: inspectorView, columns: inspectorColumns, language,
+        decisions: decisionRecords, context: workflowContext, contextPath: contextPath(),
+        runs: [...runs.values()], sessions: peerSessions, projectRoot, sessionId, now,
+        ...(shownRun() ? { selectedRunId: shownRun()?.runId } : {}),
+        ...(selectedDecisionId ? { selectedDecisionId } : {}),
+        page: inspectorPage,
+        waiting: waitingTools(),
+      })
     const body = Client
       ? Client({ key: 'inspector', module: './ui/inspector-client.ts', props: inspection, width: '100%', height: inspection.lines.length + inspection.actions.length + 3 })
       : Box({
@@ -2713,6 +2966,8 @@ export function register(on: On, options: PluginOptions) {
   language = options.language === 'ko' ? 'ko' : 'en'
   autoRecovery = options.auto_recovery !== false
   jevEnabled = options.jev_enabled !== false
+  const jevLimitOption = options.jev_max_calls
+  if (typeof jevLimitOption === 'number' && Number.isInteger(jevLimitOption) && jevLimitOption >= 1 && jevLimitOption <= 1000) jevMaxCalls = jevLimitOption
   jevModelFallback = options.jev_model_fallback !== false
   if (typeof options.jev_confidence === 'number' && Number.isFinite(options.jev_confidence) && options.jev_confidence >= 0 && options.jev_confidence <= 1) jevConfidence = options.jev_confidence
   const modelRouting = options.jev_model_routing_confidence
@@ -2732,12 +2987,25 @@ export function register(on: On, options: PluginOptions) {
     ['learning_interval', (value: number) => { learningInterval = value }],
     ['learning_min_opportunities', (value: number) => { learningMinOpportunities = value }],
     ['learning_max_skills', (value: number) => { learningMaxSkills = value }],
+    ['learning_max_daily_runs', (value: number) => { learningDailyLimit = value }],
   ] as const) {
     const value = options[key]
     if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 1000) set(value)
   }
+  const maxInput = options.learning_max_input_chars
+  if (typeof maxInput === 'number' && Number.isInteger(maxInput) && maxInput >= 16_000 && maxInput <= 120_000) learningMaxInputChars = maxInput
+  const learningDays = options.learning_retention_days
+  if (typeof learningDays === 'number' && Number.isInteger(learningDays) && learningDays >= 0 && learningDays <= 3650) learningRetentionDays = learningDays
 
   on('session.start', async ($, e, next) => {
+    for (const pending of pendingJevCalls.values()) pending.controller.abort()
+    pendingJevCalls.clear()
+    jevCallsUsed = 0
+    jevLimitNoted = false
+    repeatedChecks.clear()
+    repeatCalls.clear()
+    repeatEpoch++
+    repeatSuspended = false
     interactive = e.isInteractive
     paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
@@ -2758,11 +3026,14 @@ export function register(on: On, options: PluginOptions) {
     }
     sessionId = await $.session.id()
     await $.tool.register({ name: 'dag', description: TOOL_DESCRIPTION, inputSchema: INPUT_SCHEMA })
+    await $.tool.register({ name: 'board', description: BOARD_TOOL_DESCRIPTION, inputSchema: BOARD_INPUT_SCHEMA })
     try {
       await loadRuns($)
     } catch (error) {
       $.ui.log(`could not load DAG checkpoints: ${message(error)}`)
     }
+    // After loadRuns, which sets projectRoot.
+    await loadBoards($)
     try {
       await pruneArtifacts($)
     } catch (error) {
@@ -2834,16 +3105,30 @@ export function register(on: On, options: PluginOptions) {
     }
     const previous = sessionId
     sessionId = await $.session.id()
+    if (previous !== sessionId) {
+      jevCallsUsed = 0
+      jevLimitNoted = false
+    }
+    if (e.source === 'clear' || previous !== sessionId) {
+      for (const pending of pendingJevCalls.values()) pending.controller.abort()
+      pendingJevCalls.clear()
+      repeatedChecks.clear()
+      repeatEpoch++
+      repeatSuspended = false
+    }
     // A cleared or switched conversation holds no block yet; prompt.context records one again if it re-renders.
     if (e.source === 'clear' || previous !== sessionId) forgetDelivered()
     if (previous && previous !== sessionId) {
       if (learningRoot) {
-        const currentId = sessionId
-        sessionId = previous
-        await saveLearningSession($)
-        sessionId = currentId
-        learningSession = emptyLearningSession()
-        await initializeLearning($)
+        try {
+          await saveLearningSession($, previous)
+          learningSession = emptyLearningSession()
+          learningTurnRequested = false
+          await initializeLearning($)
+        } catch (error) {
+          learningRoot = ''
+          $.ui.log(`could not switch session learning: ${message(error)}`)
+        }
       }
       await serialized(async () => {
         for (const run of [...runs.values()]) {
@@ -2851,6 +3136,8 @@ export function register(on: On, options: PluginOptions) {
         }
       })
       await loadMetadata($)
+      // A board belongs to the conversation that drew it, and its file is checked against that session id.
+      await serialized(() => loadBoards($))
       if (e.source !== 'clear') await restorePlanningFromContext($)
       if (e.source === 'clear' && workflowContext.requests.length === 0) {
         workflowContext = { ...previousContext, sessionId, updatedAt: await $.clock.now() }
@@ -2864,8 +3151,16 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('session.end', async ($, e, next) => {
+    for (const pending of pendingJevCalls.values()) pending.controller.abort()
+    pendingJevCalls.clear()
+    repeatedChecks.clear()
+    repeatEpoch++
     sessionClosed = true
-    if (learningRoot) await saveLearningSession($)
+    try {
+      if (learningRoot) await saveLearningSession($)
+    } catch (error) {
+      $.ui.log(`could not save session learning at exit: ${message(error)}`)
+    }
     try {
       await refreshSessions($, true)
     } catch (error) {
@@ -2994,7 +3289,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('agent.spawn', async ($, e, next) => {
     if (e.parentAgentId && learningAgents.has(e.parentAgentId)) return { deny: 'Session learning returns proposals without spawning agents.' }
-    if (learningSpawning) {
+    if (learningSpawning && e.name === learningSpawnName) {
       const result = await next({ ...e, background: true })
       if (result.agentId) learningAgents.add(result.agentId)
       return result
@@ -3060,8 +3355,45 @@ export function register(on: On, options: PluginOptions) {
         return { deny: 'This learned skill is archived or belongs to another project.' }
       }
     }
+    const subject = agentId ?? sessionId
+    const observe = next.origin.plugin === 'engine'
+    const checkCommand = observe && e.tool === 'Bash' && !e.run_in_background && verificationCommand(e.command)
+      ? e.command.trim().replace(/\s+/g, ' ') : undefined
+    const readOnlyTool = ['Read', 'Glob', 'Grep'].includes(e.tool)
+    const overlaps = repeatCalls.size > 0
+    if (observe && !readOnlyTool && checkCommand === undefined) {
+      repeatedChecks.clear()
+      repeatEpoch++
+      if (startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) repeatSuspended = true
+    }
+    if (observe && !readOnlyTool) {
+      if (overlaps) {
+        repeatedChecks.clear()
+        repeatEpoch++
+      }
+      repeatCalls.add(e.tool_use_id)
+    }
+    const epoch = overlaps ? -1 : repeatEpoch
     const track = async <T extends ToolCallResult>(reply: T): Promise<T> => {
+      let repeatWarning = false
+      if (observe && !readOnlyTool && checkCommand === undefined) {
+        repeatedChecks.clear()
+        repeatEpoch++
+      }
       if (reply.deny === undefined && next.origin.plugin === 'engine') {
+        if (checkCommand !== undefined && epoch === repeatEpoch && !repeatSuspended) {
+          const failure = failedCheckFingerprint(reply)
+          if (failure) {
+            const observed = repeatCheck(repeatedChecks.get(subject), hash(`${checkCommand}\0${failure}`))
+            if (!repeatedChecks.has(subject) && repeatedChecks.size >= 64) repeatedChecks.clear()
+            repeatedChecks.set(subject, observed.record)
+            repeatWarning = observed.warn
+          } else {
+            repeatedChecks.clear()
+            repeatEpoch++
+            if (reply.result !== null && typeof reply.result === 'object' && 'backgroundTaskId' in reply.result) repeatSuspended = true
+          }
+        }
         await collectLearning($, 'tool', JSON.stringify({ input: boundInput(e), outcome: boundInput(reply) }), agentId)
         try {
           await observeLearnedSkill($, e.tool, e as Readonly<Record<string, unknown>>)
@@ -3069,7 +3401,7 @@ export function register(on: On, options: PluginOptions) {
           $.ui.log(`could not record learned-skill use: ${message(error)}`)
         }
       }
-      return reply
+      return repeatWarning && reply.deny === undefined ? { ...reply, context: [...(reply.context ?? []), REPEAT_CHECK_NOTE] } : reply
     }
     const call = async () => track(await next(e))
     if (agentId) seenAgent($, agentId, 'tool.call')
@@ -3121,6 +3453,7 @@ export function register(on: On, options: PluginOptions) {
         if (activity.get(agentId)?.phase === 'tool') activity.set(agentId, stepStarted(Date.now()))
       }
     } finally {
+      repeatCalls.delete(e.tool_use_id)
       toolContexts.delete(e.tool_use_id)
       openCalls.delete(e.tool_use_id)
       if (agentId) clearWaiting($, agentId, { toolUseId: e.tool_use_id, tool: e.tool })
@@ -3142,6 +3475,7 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId) repeatedChecks.delete(e.agentId)
     if (e.agentId && learningAgents.has(e.agentId)) {
       const agentId = e.agentId
       try {
@@ -3149,13 +3483,19 @@ export function register(on: On, options: PluginOptions) {
       } catch (error) {
         $.ui.log(`session learning did not save proposals: ${message(error)}`)
       }
-      return { text: '' }
+      // Let the host finish the agent/query lifecycle; only hide the learning report from the conversation.
+      const result = await next(e)
+      return { ...result, text: '' }
     }
     if (learningEnabled && learningRoot) {
-      await serialized(async () => {
-        await collectLearning($, 'assistant', `${e.reason}: ${e.answer ?? ''}`, e.agentId)
-        await saveLearningSession($)
-      })
+      try {
+        await serialized(async () => {
+          await collectLearning($, 'assistant', `${e.reason}: ${e.answer ?? ''}`, e.agentId)
+          await saveLearningSession($)
+        })
+      } catch (error) {
+        $.ui.log(`could not persist session learning; continuing turn completion: ${message(error)}`)
+      }
     }
     if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
@@ -3202,6 +3542,12 @@ export function register(on: On, options: PluginOptions) {
     return serialized(() => handleTool($, e))
   }).catch(async ($, e, next) => {
     return err({ code: `hook_${next.error.kind}`, message: `The dag tool failed: ${next.error.message}` })
+  })
+
+  on('tool.call', { tool: 'mcp__dag-workflow__board' }, async ($, e) => {
+    return serialized(() => handleBoardTool($, e))
+  }).catch(async ($, e, next) => {
+    return err({ code: `hook_${next.error.kind}`, message: `The board tool failed: ${next.error.message}` })
   })
 
   on('command.run', { command: 'dag-ping' }, async () => {
@@ -3278,12 +3624,13 @@ export function register(on: On, options: PluginOptions) {
     if (e.tool !== 'Edit' && e.tool !== 'Write') return next(e)
     if (RULE_FILES.some(name => e.file_path === `${projectRoot}/${name}`)) repositoryAllows = undefined
     if (!antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
+    const request = userRequest
     const before = await readOrEmpty($, e.file_path)
     const reply = await next(e)
     if (reply.deny !== undefined || reply.isError) return reply
     try {
       const after = e.tool === 'Write' ? e.content : await readOrEmpty($, e.file_path)
-      const hits = scanSlop(e.file_path, before, after, await slopSkips($))
+      const hits = scanSlop(e.file_path, before, after, await slopSkips($), request)
       if (hits.length === 0) return reply
       const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
       return { ...reply, context: [...(reply.context ?? []), slopNote(shown, hits)] }

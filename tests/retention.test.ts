@@ -20,7 +20,7 @@ function record(sessionId: string, overrides: Partial<SessionRecord> = {}): Sess
 function plan(overrides: Partial<RetentionInput> = {}) {
   return retentionPlan({
     runs: [], now, retentionDays: 30, currentSession: 'cur',
-    runDirNames: [], contextFiles: [], decisionFiles: [], sessionRecords: [], ...overrides,
+    runDirNames: [], contextFiles: [], decisionFiles: [], boardFiles: [], sessionRecords: [], ...overrides,
   })
 }
 
@@ -33,34 +33,39 @@ test('expired run returns its json run and directory', () => {
 
 test('current session files are kept', () => {
   const files = [{ name: 'cur.json', mtimeMs: old }]
-  const result = plan({ contextFiles: files, decisionFiles: files })
+  const result = plan({ contextFiles: files, decisionFiles: files, boardFiles: files })
   expect(result.contextFiles).toEqual([])
   expect(result.decisionFiles).toEqual([])
+  expect(result.boardFiles).toEqual([])
 })
 
 test('files referenced by a kept run are kept', () => {
   const fresh = makeRun('dag_new', 'other', now)
   const files = [{ name: 'other.json', mtimeMs: old }]
-  const result = plan({ runs: [fresh], contextFiles: files, decisionFiles: files })
+  const result = plan({ runs: [fresh], contextFiles: files, decisionFiles: files, boardFiles: files })
   expect(result.contextFiles).toEqual([])
   expect(result.decisionFiles).toEqual([])
+  expect(result.boardFiles).toEqual([])
 })
 
 test('fresh files are kept and old unreferenced files are returned', () => {
   const result = plan({
     contextFiles: [{ name: 'fresh.json', mtimeMs: now - DAY }, { name: 'stale.json', mtimeMs: old }],
     decisionFiles: [{ name: 'fresh.json', mtimeMs: now - DAY }, { name: 'stale.json', mtimeMs: old }],
+    boardFiles: [{ name: 'fresh.json', mtimeMs: now - DAY }, { name: 'stale.json', mtimeMs: old }],
   })
   expect(result.contextFiles).toEqual(['stale.json'])
   expect(result.decisionFiles).toEqual(['stale.json'])
+  expect(result.boardFiles).toEqual(['stale.json'])
 })
 
 test('an active peer session keeps its files and record', () => {
   const peer = record('peer', { status: 'active', updatedAt: now - 1000 })
   const files = [{ name: 'peer.json', mtimeMs: old }]
-  const result = plan({ sessionRecords: [peer], contextFiles: files, decisionFiles: files })
+  const result = plan({ sessionRecords: [peer], contextFiles: files, decisionFiles: files, boardFiles: files })
   expect(result.contextFiles).toEqual([])
   expect(result.decisionFiles).toEqual([])
+  expect(result.boardFiles).toEqual([])
   expect(result.sessionKeys).toEqual([])
 })
 
@@ -69,17 +74,18 @@ test('retentionDays 0 keeps everything', () => {
   const files = [{ name: 'stale.json', mtimeMs: old }]
   const result = plan({
     retentionDays: 0, runs: [run], runDirNames: ['dag_old', 'dag_orphan'],
-    contextFiles: files, decisionFiles: files, sessionRecords: [record('stale')],
+    contextFiles: files, decisionFiles: files, boardFiles: files, sessionRecords: [record('stale')],
   })
-  expect(result).toEqual({ runs: [], runDirs: [], contextFiles: [], decisionFiles: [], sessionKeys: [] })
+  expect(result).toEqual({ runs: [], runDirs: [], contextFiles: [], decisionFiles: [], boardFiles: [], sessionKeys: [] })
 })
 
 test('unsafe file names are ignored', () => {
   const names = ['../x.json', 'a..b.json', 'a/b.json', 'x.txt', '.json', 'sp ace.json']
   const files = names.map(name => ({ name, mtimeMs: old }))
-  const result = plan({ contextFiles: files, decisionFiles: files })
+  const result = plan({ contextFiles: files, decisionFiles: files, boardFiles: files })
   expect(result.contextFiles).toEqual([])
   expect(result.decisionFiles).toEqual([])
+  expect(result.boardFiles).toEqual([])
 })
 
 test('orphan run directories are returned unless a kept run owns them', () => {
@@ -93,4 +99,21 @@ test('closed old session keys are returned but never the current session', () =>
     sessionRecords: [record('gone'), record('cur'), record('recent', { updatedAt: now - DAY })],
   })
   expect(result.sessionKeys).toEqual(['gone'])
+})
+
+test('an old board file of a closed session is picked while current, live, kept-run and recent ones stay', () => {
+  const peer = record('peer', { status: 'active', updatedAt: now - 1000 })
+  const owner = makeRun('dag_new', 'owner', now)
+  const result = plan({
+    runs: [owner],
+    sessionRecords: [record('gone'), peer],
+    boardFiles: [
+      { name: 'gone.json', mtimeMs: old },
+      { name: 'cur.json', mtimeMs: old },
+      { name: 'peer.json', mtimeMs: old },
+      { name: 'owner.json', mtimeMs: old },
+      { name: 'recent.json', mtimeMs: now - DAY },
+    ],
+  })
+  expect(result.boardFiles).toEqual(['gone.json'])
 })

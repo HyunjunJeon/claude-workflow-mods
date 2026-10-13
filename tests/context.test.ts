@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { addNote, contextDigest, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from '../hooks/engine/context.ts'
 import type { Run } from '../hooks/engine/types.ts'
+import { VERIFICATION_GUIDANCE } from '../hooks/engine/check-eval.ts'
 
 function run(runId: string, status: Run['status'], sessionId = 'session'): Run {
   return {
@@ -131,6 +132,7 @@ test('restoration preserves unavailable check outcomes from current checkpoints'
   const summary = JSON.parse(contextSummary(emptyContext('/project', 'session', 0), [current], '/context.json'))
   const node = summary.entries.find((entry: { kind: string }) => entry.kind === 'node')
   expect(node.verification.evidence.map((item: { outcome: string }) => item.outcome)).toEqual(['not_run', 'unknown'])
+  expect(summary.verification_guidance).toBe(VERIFICATION_GUIDANCE)
 })
 
 test('restoration remains bounded with escaped text and signals omitted raw sources', () => {

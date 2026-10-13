@@ -1,6 +1,6 @@
 import type { NodeOutcome } from './run.ts'
 import type { NodeDef, NodeRun, Run } from './types.ts'
-import { CHECK_DEFECT } from './check-eval.ts'
+import { CHECK_DEFECT, VERIFICATION_GUIDANCE } from './check-eval.ts'
 
 export const STATUS_PREFIX = 'DAG_NODE_STATUS:'
 export const UPSTREAM_OUTPUT_CHARS = 4_000
@@ -75,7 +75,7 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
     '',
     ...skills,
     ...(def.writes ? [`Declared write scopes (project-relative): ${def.writes.length ? def.writes.join(', ') : '(read-only)'}.`, ''] : []),
-    ...(def.verify ? [`Completion is gated by these plugin-run checks: ${JSON.stringify(def.verify)}.`, 'Your success claim does not bypass a failing check.', ''] : []),
+    ...(def.verify ? [`Completion is gated by these plugin-run checks: ${JSON.stringify(def.verify)}.`, 'Your success claim does not bypass a failing check.', VERIFICATION_GUIDANCE, ''] : []),
     ...upstreamBlock(upstream),
     '<task>',
     task,

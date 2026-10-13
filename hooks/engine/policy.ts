@@ -18,6 +18,8 @@ export function gatesPlanning(level: Enforcement): boolean {
 }
 
 export const DAG_TOOL = 'mcp__dag-workflow__dag'
+// The board only draws into this plugin's own pane and reads project files the main conversation may Read anyway.
+export const BOARD_TOOL = 'mcp__dag-workflow__board'
 export const PLANNING_SKILL = 'dag-workflow:planning'
 
 // Only this plugin's skill or its bare name opens the strict gate; `planning` is short enough that another plugin's `x:planning` must not.
@@ -36,6 +38,7 @@ export function planningRequired(): EngineError {
 
 export const MAIN_LOOP_TOOLS: ReadonlySet<string> = new Set([
   DAG_TOOL,
+  BOARD_TOOL,
   'Read',
   'LSP',
   'WebFetch',

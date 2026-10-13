@@ -12,7 +12,7 @@ Generated code is prone to it because each piece looks reasonable on its own.
 
 ## How it is enforced
 
-1. **Scan.** After every Edit or Write, in the main conversation and in DAG nodes, the plugin scans the added lines for the patterns marked `scan:` below and shows each hit after the tool's result. It sees shapes, not meaning.
+1. **Scan.** After every Edit or Write, in the main conversation and in DAG nodes, the plugin scans the added lines for the patterns marked `scan:` below and shows each hit after the tool's result. Test weakening also compares before and after, including deletion-only empty callbacks. It sees shapes, not meaning.
 2. **Writing.** A node that writes code checks its own diff against the whole list before reporting (see Writing code).
 3. **Review.** review-standards applies the list. A hard pattern the diff proves fails the standards verdict (see Reviewing).
 
@@ -20,10 +20,12 @@ Generated code is prone to it because each piece looks reasonable on its own.
 
 - **Hard**: removing or simplifying the code provably changes no behavior, or the code discards evidence the program had. Sections 1 to 4.
 - **Judgment**: readability (section 5), plus three hard patterns marked "judgment at review", because deciding that they apply takes reading, not proof. Fix these when writing. At review they never fail the verdict.
+- **Advisory candidates**: `test-expectation-change` and `requirement-substitution` ask for requirement and verification evidence. They are not hard violations or proof of cheating. A valid requirement change or equivalent verification can justify the edit; neither candidate forces rollback or automatically fails a verdict.
 
 ## Scope
 
 - Only lines the change adds or edits count. Code outside the change is never a finding and never a reason to edit.
+- Test weakening also counts a changed test whose assertion-bearing callback becomes empty through deletion alone.
 - **Never change behavior.** Every fix keeps what the code does for every input, including edge values (`''`, `0`, `false`, an empty list) and data read from disk or the host. A fix that would change behavior is not a fix; leave the code and name the pattern.
 - **The repository overrides.** A documented repository rule (CLAUDE.md, AGENTS.md, CONTRIBUTING and similar) that endorses a pattern suppresses it. A line `anti-slop allow: <pattern ids>` in the root CLAUDE.md, AGENTS.md or CONTRIBUTING.md turns those patterns off in the scan too. Surrounding code that already uses a pattern is not an exemption.
 - What a formatter, linter or compiler already enforces in the repository is not a finding.
@@ -53,6 +55,7 @@ Generated code is prone to it because each piece looks reasonable on its own.
 
 ## 3. Tests (hard)
 
+- **Weakening a test.** Restore executable tests and meaningful assertions rather than adding unconditional skips, emptying an assertion-bearing callback, adding a bare leading return, or replacing a meaningful assertion with one that passes on constant inputs. scan: `test-skip`, `test-disabled`, `test-tautology`. The scan is restricted to `.test`/`.spec` TS/JS paths, literal titles and inline block callbacks on statement lines. It recognizes unconditional `skip`/`todo`, `x` test forms, `skipIf(true)`/`runIf(false)` and literal `skip: true` options; tautologies use equal numeric/boolean/null/undefined literals in `expect` equality matchers or Node `assert` equality calls, and literal true/false truth assertions. Replacements require a unique unchanged test title. Fewer assertions alone, consolidation, renamed tests, existing skips, dynamic conditions and example text are not evidence; other forms need review.
 - **Patching modules.** `vi.mock`, `jest.mock`, `Mockito.mockStatic`, `mockConstruction`, PowerMock, or `mock.patch("<project module>")` replace the project's own code behind the test's back, so the test proves wiring no reader can see. Pass the dependency in and hand the test a fake at that seam, as the Mocking section of `dag-workflow:testing` describes. Exempt: the clock, randomness and environment variables through a fixture the test framework provides. scan: `module-mock` (JS, TS and Java)
 
 ## 4. JavaScript and TypeScript forms (hard)
@@ -78,14 +81,20 @@ Left out on purpose: formatting (indentation, spacing, wrapping, import order) b
 ## Writing code
 
 Treat each scan note after an Edit or Write as a review comment: fix the hit, or keep the code and name the exemption or repository rule in `## Output`.
+For advisory candidates, explain the requirement and verification evidence instead of assuming the edit must be reversed.
 Before you report, read your own diff (`git diff` plus any new files) against sections 1 to 5, including what no scan can see.
-Fix every hit in the lines you added or edited, hard or judgment, and leave neighbouring code alone.
+Fix hard or judgment hits in the lines you added or edited, and leave neighbouring code alone.
 Do not trade one pattern for another: replacing `as User` with `as unknown as User`, or silencing a check with a disable comment, is still a hit.
 Reuse logic the change or the repository already has instead of writing it again.
 
 ## Reviewing
 
 In a review-standards node, this skill is a rule source: list `dag-workflow:anti-slop` under `## Rule sources`.
+Advisory candidates belong under `## Judgment calls`, never automatically under rule breaches:
+
+- `test-expectation-change`: a unique same-named `.test`/`.spec` TS/JS test keeps the actual expression and matcher but changes a literal expected decimal number, boolean, null, undefined or unescaped single/double-quoted string. Equivalent quote styles and decimal spellings do not count as changed values. The narrow scan recognizes direct `expect` assertions, not aliases, duplicate names or assertion identities, renames (including enclosing suites), consolidation, changed actual expressions or matchers, or comments/string examples. There is no assertion-count rule. Check whether the requirement changed or equivalent verification supports the new expectation.
+- `requirement-substitution`: only supplied explicit requests to implement/connect/integrate/use/build/add a real/live API enable this candidate. In production TS/JS paths, the scan recognizes an unchanged unique named function with a single direct `return [await] fetch(...)` replaced by a fixed literal response, optionally wrapped in `Promise.resolve` or `Response.json`. Fixed responses are scalars, empty arrays or flat objects with scalar/empty-array values. It excludes test/mock/fixture paths, shadowed fetch, absent/negated/optional/mock requirements, generic mocks, data mentioning fetch, SDK calls, arrow functions and arbitrary implementation rewrites. This is evidence to check against the live requirement, not a generic mock ban.
+
 A hard pattern from sections 1 to 4 is a breach under `## Rule breaches` only when the diff proves it.
 Quote the added line as file:line, name the pattern, and give the proof in a few words: for dead weight, why removing it changes no behavior; for thrown-away evidence, the type the code had.
 Write each breach as `anti-slop: <pattern> - <file:line> - <proof>; <fix>`.

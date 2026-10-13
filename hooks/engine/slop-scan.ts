@@ -330,15 +330,236 @@ function lineAt(starts: readonly number[], offset: number): number {
   return low + 1
 }
 
+type TestCall = {
+  readonly key: string
+  readonly start: number
+  readonly end: number
+  readonly skipped: boolean
+  readonly body: string
+  readonly bodyStart: number
+}
+
+// Delimiters in strings and comments are already blanked. No parser dependency or evaluation of test code.
+function closing(code: string, start: number, open: string, close: string): number {
+  let depth = 0
+  for (let at = start; at < code.length; at += 1) {
+    if (code[at] === open) depth += 1
+    if (code[at] === close && --depth === 0) return at
+  }
+  return -1
+}
+
+// Deliberately narrow: literal titles and inline block callbacks on statement lines. Aliases, dynamic titles,
+// parameterized tests and arbitrary control flow need review, not a heuristic warning after every edit.
+function testCalls(scan: Scan): TestCall[] {
+  const calls: TestCall[] = []
+  const header = /^[ \t]*(test|it|describe|xtest|xit|xdescribe)(\s*\.\s*(?:skip|todo|only)|\s*\.\s*(?:skipIf\s*\(\s*true\s*\)|runIf\s*\(\s*false\s*\)))?\s*\(\s*(['"])[^'"\n]*\3/gm
+  for (const match of scan.code.matchAll(header)) {
+    const start = match.index + match[0].search(/\S/)
+    const titleEnd = match.index + match[0].length
+    const titleOpen = match.index + match[0].indexOf(match[3] ?? '')
+    const rest = scan.code.slice(titleEnd)
+    const callback = /^\s*,\s*(?:\{([^{}]*)\}\s*,\s*)?(?:async\s+)?(?:(?:\([^()]*\)|[\w$]+)\s*=>|function(?:\s+[\w$]+)?\s*\([^()]*\))\s*\{/.exec(rest)
+    const skipped = /^x/.test(match[1] ?? '') || /skip|todo|runIf/.test(match[2] ?? '') || /\bskip\s*:\s*true\b/.test(callback?.[1] ?? '')
+    if (!callback && !/^\s*\)/.test(rest)) continue
+    const bodyStart = callback ? titleEnd + callback[0].length : titleEnd
+    const bodyEnd = callback ? closing(scan.code, bodyStart - 1, '{', '}') : titleEnd
+    if (bodyEnd < 0 || (callback && !/^\s*\)/.test(scan.code.slice(bodyEnd + 1)))) continue
+    calls.push({
+      key: `${(match[1] ?? '').replace(/^x/, '')}:${scan.raw.slice(titleOpen, titleEnd)}`,
+      start, end: bodyEnd, skipped,
+      body: callback ? scan.code.slice(bodyStart, bodyEnd) : '',
+      bodyStart,
+    })
+  }
+  return calls
+}
+
+type TestAssertion = {
+  readonly text: string
+  readonly start: number
+  readonly tautology: boolean
+  readonly identity?: string
+  readonly expected?: string
+}
+
+// Raw offsets preserve string values without making comments or string contents executable syntax.
+const EXPECTED_LITERAL = /^(?:true|false|null|undefined|-?\d+(?:\.\d+)?|'[^'\\\n]*'|"[^"\\\n]*")$/
+const ADVISORY = 'advisory candidate only: check the explicit requirement and verification evidence; a valid requirement change or equivalent verification can justify this edit'
+
+function testAssertions(body: string, raw = body): TestAssertion[] {
+  const assertions: TestAssertion[] = []
+  for (const match of body.matchAll(/^[ \t]*(?:(?:await|return)[ \t]+)?expect\s*\(/gm)) {
+    const open = match.index + match[0].length - 1
+    const end = closing(body, open, '(', ')')
+    if (end < 0) continue
+    const matcher = /^\s*((?:\.\s*(?:not|resolves|rejects)\s*)*)\.\s*(to[A-Z]\w*)\s*\(/.exec(body.slice(end + 1))
+    if (!matcher) continue
+    const argumentStart = end + 1 + matcher[0].length
+    const argumentEnd = closing(body, argumentStart - 1, '(', ')')
+    if (argumentEnd < 0) continue
+    const actual = body.slice(open + 1, end).trim()
+    const expected = body.slice(argumentStart, argumentEnd).trim()
+    const literal = /^(?:true|false|null|undefined|-?\d+(?:\.\d+)?)$/.test(actual)
+    const tautology = literal && !matcher[1] && (
+      (['toBe', 'toEqual', 'toStrictEqual'].includes(matcher[2] ?? '') && actual === expected) ||
+      (matcher[2] === 'toBeTruthy' && actual === 'true' && !expected) ||
+      (matcher[2] === 'toBeFalsy' && actual === 'false' && !expected)
+    )
+    const rawExpected = raw.slice(argumentStart, argumentEnd).trim()
+    const rawActual = raw.slice(open + 1, end).trim()
+    assertions.push({
+      text: body.slice(match.index, argumentEnd + 1).replace(/\s+/g, ''), start: match.index, tautology,
+      ...(rawActual && !/\/\/|\/\*/.test(raw.slice(open, argumentEnd + 1))
+        ? { identity: `${rawActual}:${matcher[0].replace(/\s+/g, '')}` } : {}),
+      ...(EXPECTED_LITERAL.test(rawExpected) ? {
+          expected: /^['"]/.test(rawExpected) ? `string:${rawExpected.slice(1, -1)}`
+            : /^-?\d/.test(rawExpected) ? `number:${Object.is(Number(rawExpected), -0) ? '-0' : Number(rawExpected)}` : rawExpected,
+        } : {}),
+    })
+  }
+  for (const match of body.matchAll(/^[ \t]*(?:return[ \t]+)?assert(?:\.(ok|equal|strictEqual|deepEqual|deepStrictEqual))?\s*\(/gm)) {
+    const open = match.index + match[0].length - 1
+    const end = closing(body, open, '(', ')')
+    if (end < 0) continue
+    const argumentsText = body.slice(open + 1, end).trim()
+    const equality = /^(true|false|null|undefined|-?\d+(?:\.\d+)?)\s*,\s*(true|false|null|undefined|-?\d+(?:\.\d+)?)$/.exec(argumentsText)
+    const tautology = match[1] && match[1] !== 'ok'
+      ? equality !== null && equality[1] === equality[2]
+      : argumentsText === 'true'
+    assertions.push({ text: body.slice(match.index, end + 1).replace(/\s+/g, ''), start: match.index, tautology })
+  }
+  return assertions
+}
+
+function testWeakening(before: Scan, after: Scan, added: ReadonlySet<number>, skip: ReadonlySet<string>): SlopHit[] {
+  const old = testCalls(before)
+  const current = testCalls(after)
+  const hits: SlopHit[] = []
+  for (const call of current) {
+    // Duplicate titles cannot identify a replacement precisely.
+    const previous = old.filter(candidate => candidate.key === call.key)
+    const prior = previous.length === 1 && current.filter(candidate => candidate.key === call.key).length === 1 ? previous[0] : undefined
+    const line = lineAt(after.starts, call.start)
+    const touched = [...added].some(addedLine => addedLine >= line && addedLine <= lineAt(after.starts, call.end))
+    const report = (pattern: string, at: number) => {
+      if (skip.has(pattern)) return
+      const hitLine = lineAt(after.starts, at)
+      hits.push({ line: hitLine, pattern, text: lineText(after, hitLine).trim().slice(0, 120), fix: 'restore the executable test and its meaningful assertions, or name the documented exemption' })
+    }
+    const kind = call.key.slice(0, call.key.indexOf(':') + 1)
+    const addedSkip = current.filter(candidate => candidate.skipped && candidate.key.startsWith(kind)).length >
+      old.filter(candidate => candidate.skipped && candidate.key.startsWith(kind)).length
+    if (call.skipped && touched && !prior?.skipped && addedSkip) report('test-skip', call.start)
+    if (!prior || call.skipped || prior.skipped || /^describe:/.test(call.key)) continue
+    const previousAssertions = testAssertions(prior.body, before.raw.slice(prior.bodyStart, prior.end))
+    const assertions = testAssertions(call.body, after.raw.slice(call.bodyStart, call.end))
+    // Local aliases/shadows and duplicate assertion identities cannot identify a changed contract safely.
+    const shadowed = /(?:\b(?:const|let|var|function|class|import)\s+(?:expect|test|it)\b|\b(?:const|let|var)\s*[\[{][^;=\n]*\b(?:expect|test|it)\b|\bas\s+(?:expect|test|it)\b|\b(?:expect|test|it)\s*=>|\([^()\n]*\b(?:expect|test|it)\b[^()\n]*\)\s*(?:=>|\{))/
+    const sameAssertions = previousAssertions.every(assertion => assertion.identity
+      ? assertions.some(next => next.identity === assertion.identity)
+      : assertions.some(next => next.text === assertion.text)) &&
+      assertions.every(assertion => assertion.identity
+        ? previousAssertions.some(previous => previous.identity === assertion.identity)
+        : previousAssertions.some(previous => previous.text === assertion.text))
+    const oldScope = old.filter(candidate => candidate.start < prior.start && candidate.end > prior.end).map(candidate => candidate.key)
+    const scope = current.filter(candidate => candidate.start < call.start && candidate.end > call.end).map(candidate => candidate.key)
+    if (sameAssertions && JSON.stringify(oldScope) === JSON.stringify(scope) && !shadowed.test(before.code) && !shadowed.test(after.code)) {
+      for (const assertion of assertions) {
+        if (!assertion.identity || assertion.tautology) continue
+        const candidates = previousAssertions.filter(oldAssertion => oldAssertion.identity === assertion.identity)
+        if (candidates.length !== 1 || assertions.filter(next => next.identity === assertion.identity).length !== 1) continue
+        const candidate = candidates[0]
+        const at = call.bodyStart + assertion.start
+        if (candidate?.expected !== undefined && assertion.expected !== undefined && candidate.expected !== assertion.expected &&
+          added.has(lineAt(after.starts, at)) && !skip.has('test-expectation-change')) {
+          const hitLine = lineAt(after.starts, at)
+          hits.push({ line: hitLine, pattern: 'test-expectation-change', text: lineText(after, hitLine).trim().slice(0, 120), fix: ADVISORY })
+        }
+      }
+    }
+    if (previousAssertions.some(assertion => !assertion.tautology) && prior.body.trim() && (
+      !call.body.trim() || (/^\s*return[ \t]*(?:;|(?=\n|$))/.test(call.body) && !/^\s*return\b/.test(prior.body))
+    )) report('test-disabled', call.start)
+    // Count reductions are not evidence. Require a removed meaningful assertion in this same named test
+    // and a newly written assertion whose literal inputs prove it cannot fail.
+    if (previousAssertions.some(assertion => !assertion.tautology && !assertions.some(next => next.text === assertion.text))) {
+      for (const assertion of assertions) {
+        const at = call.bodyStart + assertion.start
+        if (assertion.tautology && added.has(lineAt(after.starts, at)) && !previousAssertions.some(oldAssertion => oldAssertion.text === assertion.text)) report('test-tautology', at)
+      }
+    }
+  }
+  return hits
+}
+
+// Only direct, single-return named functions: no inferred SDK calls, data mentioning fetch, or file-wide counts.
+function requirementSubstitution(before: Scan, after: Scan, added: ReadonlySet<number>, request: string): SlopHit[] {
+  if (request.length > MAX_SCAN_CHARS) return []
+  const realApi = /(?:^|[.!?\n]\s*)\s*(?:TASK:\s*)?(?:please\s+)?(?:implement|connect|integrate|use|build|add)\b[^.!?\n]*\b(?:real|live)\s+(?:\w+\s+){0,2}api\b/i.test(request) ||
+    /(?:실제|실)\s*API(?:를|와|에|로)?[^.!?\n]*(?:연동|연결|호출|사용|구현)/i.test(request)
+  if (/\b(?:docs?|documentation|example|demo|tutorial)\b/i.test(request) ||
+    /(?:문서|예제|데모|튜토리얼)/.test(request) ||
+    /(?:실제\s*API|실\s*API|API|연동|호출)[^.!?\n]*(?:하지\s*(?:마|않)|안\s*(?:하|해|할)|필요\s*없|불필요|대신\s*(?:mock|가짜|모의)|제외)|(?:가짜|모의|mock)[^.!?\n]*(?:사용|쓰|대체)/i.test(request) ||
+    /(?:\b(?:no|not|never|without|avoid|optional)\b|n't\b)[^.!?\n]*\b(?:real|live|api|integration|calls)\b|\b(?:api|integration)\b[^.!?\n]*\b(?:optional|not required)\b|\b(?:use|using|with|return)\s+(?:a\s+)?(?:fake|mock|stub)\b/i.test(request) ||
+    !realApi) return []
+  const shadow = /(?:\b(?:const|let|var|function|class)\s+fetch\b|\b(?:const|let|var)\s*[\[{][^;=\n]*\bfetch\b|\bimport\b[^\n]*\bfetch\b|\bas\s+fetch\b|\bfetch\s*=>|\([^()\n]*\bfetch\b[^()\n]*\)\s*(?:=>|\{))/
+  if (shadow.test(before.code) || shadow.test(after.code)) return []
+  const functions = (scan: Scan) => {
+    const calls: { readonly header: string; readonly body: string; readonly code: string; readonly start: number }[] = []
+    for (const match of scan.code.matchAll(/^[ \t]*(?:export\s+)?(?:async\s+)?function\s+[\w$]+\s*\([^(){}\n]*\)\s*(?::[^{}\n]+)?\s*\{/gm)) {
+      // A function inside a test, mock factory or other scope is not a production entry point.
+      if (!balanced(scan.code.slice(0, match.index))) continue
+      const start = match.index + match[0].length
+      const end = closing(scan.code, start - 1, '{', '}')
+      if (end < 0) continue
+      calls.push({ header: scan.raw.slice(match.index, start).trim(), body: scan.raw.slice(start, end).trim(), code: scan.code.slice(start, end).trim(), start })
+    }
+    return calls
+  }
+  const old = functions(before)
+  const current = functions(after)
+  const scalar = String.raw`(?:true|false|null|-?\d+(?:\.\d+)?|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|\[\s*\])`
+  const property = `(?:[\\w$]+|'[^'\\n]*'|"[^"\\n]*")\\s*:\\s*${scalar}`
+  const fixed = new RegExp(`^(?:${scalar}|\\{\\s*(?:${property}(?:\\s*,\\s*${property})*\\s*,?)?\\s*\\})$`)
+  const hits: SlopHit[] = []
+  for (const call of current) {
+    const previous = old.filter(candidate => candidate.header === call.header)
+    const prior = previous.length === 1 && current.filter(candidate => candidate.header === call.header).length === 1 ? previous[0] : undefined
+    if (!prior || !/^return\s+(?:await\s+)?fetch\s*\(/.test(prior.code)) continue
+    const open = prior.code.indexOf('(', prior.code.indexOf('fetch'))
+    const end = closing(prior.code, open, '(', ')')
+    if (end < 0 || !/^\s*;?$/.test(prior.code.slice(end + 1))) continue
+    const returned = /^return\s+([\s\S]*?);?$/.exec(call.body)?.[1]?.trim()
+    if (!returned) continue
+    const value = /^(?:Promise\.resolve|Response\.json)\(([\s\S]*)\)$/.exec(returned)?.[1]?.trim() ?? returned
+    if (!fixed.test(value)) continue
+    const line = lineAt(after.starts, call.start)
+    if (![...added].some(at => at >= line && at <= lineAt(after.starts, call.start + call.body.length))) continue
+    hits.push({ line, pattern: 'requirement-substitution', text: lineText(after, line).trim().slice(0, 120), fix: ADVISORY })
+  }
+  return hits
+}
+
 // The pattern hits among the lines `after` adds to `before`, one per line and pattern, in line order. A file whose
 // extension names no known language yields none. `skip` holds pattern ids the user turned off.
-export function scanSlop(path: string, before: string, after: string, skip: ReadonlySet<string> = new Set()): SlopHit[] {
+export function scanSlop(path: string, before: string, after: string, skip: ReadonlySet<string> = new Set(), request = ''): SlopHit[] {
   const families = familiesOf(path)
   if (families.length === 0 || after.length > MAX_SCAN_CHARS || after.split('\n').some(line => line.length > MAX_SCAN_LINE)) return []
   const added = addedLines(before, after)
-  if (added.size === 0) return []
+  const testFile = /\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/i.test(path)
+  if (added.size === 0 && !testFile) return []
   const scan: Scan = { raw: after, code: codeView(after, families), lines: after.split('\n'), starts: lineStarts(after) }
   const found = new Map<string, SlopHit>()
+  if (before.length <= MAX_SCAN_CHARS && !before.split('\n').some(line => line.length > MAX_SCAN_LINE)) {
+    const previous: Scan = { raw: before, code: codeView(before, families), lines: before.split('\n'), starts: lineStarts(before) }
+    if (testFile) {
+      for (const hit of testWeakening(previous, scan, added, skip)) found.set(`${hit.line}:${hit.pattern}`, hit)
+    } else if (families.includes('js') && !/(?:^|[/\\])(?:tests?|__tests__|__mocks__|fixtures?|mocks?)(?:[/\\]|$)|\.(?:mock|fixture)\.[^.]+$/i.test(path) &&
+      !skip.has('requirement-substitution')) {
+      for (const hit of requirementSubstitution(previous, scan, added, request)) found.set(`${hit.line}:${hit.pattern}`, hit)
+    }
+  }
   for (const rule of RULES) {
     if (skip.has(rule.pattern) || !rule.in.some(family => families.includes(family))) continue
     for (const match of (rule.view === 'raw' ? scan.raw : scan.code).matchAll(rule.regex)) {
@@ -363,6 +584,6 @@ export function slopNote(path: string, hits: readonly SlopHit[]): string {
     `[anti-slop] The lines just written match ${hits.length} pattern${hits.length === 1 ? '' : 's'} from the dag-workflow:anti-slop skill:`,
     ...hits.slice(0, MAX_NOTED_HITS).map(hit => `- ${path}:${hit.line} ${hit.pattern}: \`${hit.text}\` - ${hit.fix}`),
     ...(hits.length > MAX_NOTED_HITS ? [`- and ${hits.length - MAX_NOTED_HITS} more`] : []),
-    'Fix each one now, unless a documented repository rule or an exemption in the skill allows it; then name that rule or exemption. This scan sees pattern shapes only; the skill covers what needs judgment.',
+    'test-expectation-change and requirement-substitution are advisory candidates, not proof of cheating or hard rule violations. A valid requirement change or equivalent verification can justify them; explain the evidence, without automatic rollback or a failed verdict. Fix other hits unless a documented repository rule or skill exemption allows them. This scan sees shapes only.',
   ].join('\n')
 }

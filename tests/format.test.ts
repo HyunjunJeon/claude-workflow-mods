@@ -3,6 +3,7 @@ import { parseDefinition } from '../hooks/engine/definition.ts'
 import { settleMessage } from '../hooks/engine/format.ts'
 import { createRun, markFinished, markRunning } from '../hooks/engine/run.ts'
 import type { Run } from '../hooks/engine/types.ts'
+import { VERIFICATION_GUIDANCE } from '../hooks/engine/check-eval.ts'
 
 const HINT = (tools: string) => `; needed approval this non-interactive session cannot give: ${tools} (allow them up front with --allowedTools)`
 
@@ -75,4 +76,5 @@ test('settle reports check outcome counts including unclassified legacy failures
   }
   const counts = /checks: passed=(\d+), failed=(\d+), not_run=(\d+), unknown=(\d+)/.exec(settleMessage(run, 'dag'))
   expect(counts?.slice(1).map(Number)).toEqual([1, 1, 1, 2])
+  expect(settleMessage(run, 'dag').includes(VERIFICATION_GUIDANCE)).toBe(true)
 })

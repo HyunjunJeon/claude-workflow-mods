@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { evidenceOutcome, exitProblem, isCheckDefect, missingProgram, textProblem } from '../hooks/engine/check-eval.ts'
+import { evidenceOutcome, exitProblem, isCheckDefect, missingProgram, observedFailures, textProblem } from '../hooks/engine/check-eval.ts'
 import type { VerificationCheck, VerificationEvidence } from '../hooks/engine/types.ts'
 import { parseChecks } from '../hooks/engine/verification.ts'
 
@@ -159,4 +159,37 @@ test('missingProgram names a bare program the host could not start or a shell co
   expect(missingProgram(evidence(sh, 'bash: rg: command not found', 1))).toBeUndefined()
   expect(missingProgram({ ...evidence(sh, 'bash: rg: command not found', 127), passed: true })).toBeUndefined()
   expect([isCheckDefect('check-defect: rg'), isCheckDefect('  Check-Defect - x'), isCheckDefect('implementation'), isCheckDefect(undefined)]).toEqual([true, true, false, false])
+})
+
+test('observed command failures distinguish project inputs from dependency and environment hints', () => {
+  const details = [
+    "Error: Cannot find module './dist/cli'",
+    "Error: Cannot find module 'sqlite3'",
+    "ModuleNotFoundError: No module named 'requests'",
+    'Error: connect ECONNREFUSED 127.0.0.1:5432',
+    'Error: listen EADDRINUSE: address already in use',
+    'EACCES: permission denied',
+  ]
+  const items: VerificationEvidence[] = details.map(detail => ({
+    check: { kind: 'command', argv: ['bun', 'test'] }, outcome: 'failed', passed: false, checkedAt: 0,
+    exitCode: 1, detail: `exit code 1 is not accepted\n["bun","test"] exited 1\n${detail}`,
+  }))
+  expect(observedFailures(items).map(item => [item.check, item.kind])).toEqual([
+    [1, 'project-input'], [2, 'dependency'], [3, 'dependency'], [4, 'service-unavailable'], [5, 'port-conflict'], [6, 'permission'],
+  ])
+})
+
+test('failure hints exclude claims, successful checks, timeouts and expectation text', () => {
+  const item: VerificationEvidence = {
+    check: { kind: 'command', argv: ['bun', 'test'] }, outcome: 'failed', passed: false, checkedAt: 0,
+    exitCode: 1, detail: 'stdout: contains "ECONNREFUSED" not found\n["bun","test"] exited 1\nAssertion failed',
+  }
+  expect(observedFailures([
+    item,
+    { ...item, detail: 'Timed out after 30000 ms' },
+    { ...item, detail: 'ECONNREFUSED', exitCode: 0 },
+    { ...item, detail: 'ECONNREFUSED', passed: true, outcome: 'passed' },
+    { ...item, detail: 'ECONNREFUSED', outcome: 'unknown' },
+    { ...item, detail: 'ECONNREFUSED', check: { kind: 'file', path: 'result.txt' } },
+  ])).toEqual([])
 })
