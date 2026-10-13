@@ -67,6 +67,8 @@ End with `DAG_NODE_STATUS: failed: clarification: <which interface should be tes
 State the mode in `## Output`.
 For mixed changes, supply the evidence for each applicable mode.
 
+When changing existing tests or check policy, record the affected behavior or control, why the task requires the change, and the replacement proof in `## Output`. Do not delete tests, add skip/todo/only, weaken assertions or mocks, narrow discovery, or relax lint/type/security/verify or permission settings merely to make a run pass. A changed requirement can make an assertion stale, but the new assertion must still detect the relevant defect. Removing a prose-only assertion or moving equivalent coverage is not itself a loss of proof.
+
 | Mode | Required procedure and evidence |
 | --- | --- |
 | **New behavior or bug fix: red before green** | Write the failing test first. Confirm failure for the requested behavior, not a typo, import error or broken fixture. Record the command and failure output. Implement only enough code to pass. Record the passing result. Do not anticipate future tests or add speculative features. |

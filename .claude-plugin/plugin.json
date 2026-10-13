@@ -5,6 +5,36 @@
   "author": { "name": "jhj" },
   "types": "./types/index.d.ts",
   "userConfig": {
+    "session_learning": {
+      "type": "boolean",
+      "title": "Learn skills across user sessions",
+      "description": "Learn reusable skills from user turns and tool outcomes across the whole session, including work outside DAGs; background Sonnet usage is billed to your Claude plan",
+      "default": true
+    },
+    "learning_interval": {
+      "type": "number",
+      "title": "Tool calls between background learning",
+      "description": "Start learning at a worker turn boundary after this many tool calls; a completed user-requested main turn also flushes pending experience",
+      "default": 20,
+      "min": 1,
+      "max": 1000
+    },
+    "learning_min_opportunities": {
+      "type": "number",
+      "title": "Unused skill exposure limit",
+      "description": "Archive managed skills after this many eligible user prompts without a successful Skill or Read call",
+      "default": 50,
+      "min": 1,
+      "max": 1000
+    },
+    "learning_max_skills": {
+      "type": "number",
+      "title": "Managed skills per project",
+      "description": "Target active learned-skill capacity per project; skills with no eligible exposure remain protected",
+      "default": 30,
+      "min": 1,
+      "max": 1000
+    },
     "auto_recovery": {
       "type": "boolean",
       "title": "Automatic node recovery",

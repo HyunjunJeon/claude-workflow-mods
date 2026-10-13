@@ -17,12 +17,16 @@ const PROGRAMS: Plugin = {
   name: 'check-runtime-programs',
   register(on) {
     on('fs.stat', ($, e, next) => next({ ...e, path: e.path.startsWith('/') ? `/${e.path.split('/').filter(part => part !== '' && part !== '.').join('/')}` : e.path }))
-    on('fs.read', ($, e, next) => next({ ...e, path: e.path.startsWith('/') ? `/${e.path.split('/').filter(part => part !== '' && part !== '.').join('/')}` : e.path }))
+    on('fs.read', ($, e, next) => {
+      if (e.path === '/work/unreadable.txt') return { deny: 'EACCES' }
+      return next({ ...e, path: e.path.startsWith('/') ? `/${e.path.split('/').filter(part => part !== '' && part !== '.').join('/')}` : e.path })
+    })
     on('process.run', ($, e, next) => {
       if (e.argv[0] === 'report' || e.argv[0] === 'report-cut') {
         return { value: { exitCode: Number(e.argv[1]), stdout: e.argv[2] ?? '', stderr: e.argv[3] ?? '', isStdoutTruncated: e.argv[0] === 'report-cut', isStderrTruncated: false } }
       }
       if (e.argv[0] === 'missing-program') return { deny: 'spawn missing-program ENOENT' }
+      if (e.argv[0] === 'timed-out-program') return { deny: 'process exceeded timeoutMs' }
       return next(e)
     })
     on('fs.list', ($, e, next) => {
@@ -102,6 +106,7 @@ test('a missing path fails an absent check instead of passing it', SETTINGS, asy
   const h = harness(on)
   const verification = await verdict($, h, [{ kind: 'file', path: 'nowhere/report.txt', absent: 'TODO' }])
   expect(verification.status).toBe('failed')
+  expect(verification.evidence[0]).toMatchObject({ outcome: 'failed', passed: false })
   expect(verification.evidence[0]?.detail).toContain('missing or unreadable')
   expect(verification.evidence[0]?.detail).toContain('nowhere/report.txt')
 })
@@ -399,6 +404,7 @@ test('a program that cannot start fails even when expect.exit lists its code', S
   const verification = await verdict($, h, [{ kind: 'command', argv: ['missing-program'], expect: { exit: [0, 1, 126, 127] } }])
   expect(verification.status).toBe('failed')
   expect(verification.evidence[0]?.passed).toBe(false)
+  expect(verification.evidence[0]).toMatchObject({ outcome: 'not_run', passed: false })
   expect(verification.evidence[0]?.detail).toContain('Verification could not run')
   expect(verification.evidence[0]?.exitCode).toBeUndefined()
 })
@@ -410,8 +416,69 @@ test('an expectation on output that the host cut cannot be judged and fails', SE
     { kind: 'command', argv: ['report-cut', '0', 'PASS'] },
   ])
   expect(verification.evidence.map(item => item.passed)).toEqual([false, true])
+  expect(verification.evidence).toMatchObject([{ outcome: 'unknown' }, { outcome: 'passed' }])
   expect(verification.evidence[0]?.detail).toContain('cut at 4 MiB')
 })
+
+test('verification persists distinct outcomes and blocks dependents when any check is unavailable', SETTINGS, async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/unreadable.txt', 'PASS')
+  await boot($)
+  const runId = await start($, {
+    key: 'check-outcomes',
+    nodes: [
+      { id: 'a', prompt: 'Produce the artifact', verify: [
+        { kind: 'command', argv: ['report', '0'] },
+        { kind: 'command', argv: ['report', '1'] },
+        { kind: 'command', argv: ['missing-program'] },
+        { kind: 'command', argv: ['report-cut', '0', 'PASS'], expect: { stdout: { equals: 'PASS' } } },
+        { kind: 'file', path: 'unreadable.txt', contains: 'PASS' },
+        { kind: 'command', argv: ['report-cut', '1', 'PASS'], expect: { stdout: { equals: 'PASS' } } },
+      ] },
+      { id: 'b', prompt: 'Consume a', dependsOn: ['a'], verify: [{ kind: 'command', argv: ['report', '0'] }] },
+    ],
+  })
+  await finish($, h)
+  const run = checkpoint(h, runId)
+  const verification = run.nodes[0]?.verification
+  expect(verification).toMatchObject({
+    status: 'failed',
+    evidence: [
+      { outcome: 'passed', passed: true }, { outcome: 'failed', passed: false },
+      { outcome: 'not_run', passed: false }, { outcome: 'unknown', passed: false },
+      { outcome: 'unknown', passed: false }, { outcome: 'failed', passed: false },
+    ],
+  })
+  if (!verification?.reportPath) throw new Error('Missing separate verification evidence')
+  expect(JSON.parse(h.files.get(verification.reportPath) ?? 'null')).toEqual({
+    status: verification.status, evidence: verification.evidence,
+  })
+  expect(run.nodes[1]?.state).toBe('skipped')
+  expect(h.spawns).toHaveLength(1)
+})
+
+for (const [argv, outcome] of [
+  [['missing-program'], 'not_run'],
+  [['timed-out-program'], 'not_run'],
+  [['report-cut', '0', 'PASS'], 'unknown'],
+] as const) {
+  test(`${argv[0]} alone blocks completion and downstream work as ${outcome}`, SETTINGS, async ($, on) => {
+    const h = harness(on)
+    await boot($)
+    const runId = await start($, {
+      key: 'unavailable-check',
+      nodes: [
+        { id: 'a', prompt: 'Produce a', verify: [{ kind: 'command', argv: [...argv], expect: { stdout: { equals: 'PASS' } } }] },
+        { id: 'b', prompt: 'Consume a', dependsOn: ['a'], verify: [{ kind: 'command', argv: ['report', '0'] }] },
+      ],
+    })
+    await finish($, h)
+    const run = checkpoint(h, runId)
+    expect(run.nodes[0]).toMatchObject({ state: 'failed', verification: { status: 'failed', evidence: [{ outcome, passed: false }] } })
+    expect(run.nodes[1]?.state).toBe('skipped')
+    expect(h.spawns).toHaveLength(1)
+  })
+}
 
 test('the evidence file records the failed condition of each failed check', SETTINGS, async ($, on) => {
   const h = harness(on)

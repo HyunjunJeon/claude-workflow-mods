@@ -1,5 +1,5 @@
 import { mock, type Engine, type Plugin } from 'claude-code/testing'
-import type { EventOf, On } from 'claude-code'
+import type { AgentInfo, EventOf, On } from 'claude-code'
 import type { Run } from '../hooks/engine/types.ts'
 import type { JevRequest } from '../hooks/engine/jev.ts'
 import type { Enforcement } from '../hooks/engine/policy.ts'
@@ -8,7 +8,7 @@ export const ROOT = '/work/.claude/dag'
 export const KEY = 'control-test-secret'
 const TOOL = 'mcp__dag-workflow__dag'
 
-export function harness(on: On) {
+export function harness(on: On, options: { home?: string } = {}) {
   const clock = mock.clock(on, { now: 1_000 })
   const files = new Map<string, string>()
   const store = new Map<string, unknown>()
@@ -31,11 +31,11 @@ export function harness(on: On) {
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
   // permission: the Jev answer to a permission question; unset, the question gets the generic 'quick' answer.
-  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined }
+  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[] }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
-  on('env.get', ($, e) => ({ value: e.name === 'TYPESAFE_API_KEY' ? KEY : undefined }))
+  on('env.get', ($, e) => ({ value: e.name === 'TYPESAFE_API_KEY' ? KEY : e.name === 'HOME' ? options.home : undefined }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => { store.set(e.key, e.value); return { value: undefined } })
   on('store.keys', () => ({ value: [...store.keys()] }))
@@ -56,6 +56,16 @@ export function harness(on: On) {
     let exitCode = e.argv[0] === 'check-control' ? control.exitCode : 0
     const path = e.argv.at(-1)
     if (e.argv[0] === 'sleep') return { deny: 'No wall-clock waits in tests' }
+    if (options.home && e.argv[0] === 'mkdir' && e.argv.includes('-p') && path?.startsWith(options.home + '/')) locks.add(path)
+    if (options.home && e.argv[0] === 'mv') {
+      const source = e.argv.at(-2)
+      const destination = e.argv.at(-1)
+      const text = source ? files.get(source) : undefined
+      if (source && destination && text !== undefined) {
+        files.set(destination, text)
+        files.delete(source)
+      } else exitCode = 1
+    }
     if (e.argv[0] === 'mkdir' && !e.argv.includes('-p') && path) {
       exitCode = locks.has(path) ? 1 : 0
       if (!exitCode) locks.add(path)
@@ -101,7 +111,7 @@ export function harness(on: On) {
     files.set(e.path, e.text)
     return { value: undefined }
   })
-  on('agent.list', () => ({ value: [] }))
+  on('agent.list', () => ({ value: control.liveAgents }))
   on('agent.spawn', ($, e) => {
     spawns.push(e)
     const agentId = `agent-${spawns.length}`

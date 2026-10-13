@@ -58,3 +58,21 @@ test('two nodes that needed approval each get their own tools in first-seen orde
     `- c: failed (verification failed); verification: unrecorded${HINT('Bash, Write')}`,
   ])
 })
+
+test('settle reports check outcome counts including unclassified legacy failures', () => {
+  const run = settled()
+  const current = run.nodes[0]
+  if (!current) throw new Error('Missing fixture node')
+  current.verification = {
+    status: 'failed',
+    evidence: [
+      { check: { kind: 'command', argv: ['test'] }, passed: true, checkedAt: 1, detail: '' },
+      ...(['failed', 'not_run', 'unknown'] as const).map(outcome => ({
+        check: { kind: 'file' as const, path: 'a.txt' }, outcome, passed: false, checkedAt: 1, detail: '',
+      })),
+      { check: { kind: 'file', path: 'b.txt' }, passed: false, checkedAt: 1, detail: '' },
+    ],
+  }
+  const counts = /checks: passed=(\d+), failed=(\d+), not_run=(\d+), unknown=(\d+)/.exec(settleMessage(run, 'dag'))
+  expect(counts?.slice(1).map(Number)).toEqual([1, 1, 1, 2])
+})

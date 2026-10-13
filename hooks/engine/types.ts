@@ -36,9 +36,13 @@ export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandEx
 
 export type VerificationCheck = FileCheck | CommandCheck
 
+export type VerificationOutcome = 'passed' | 'failed' | 'not_run' | 'unknown'
+
 export type VerificationEvidence = {
   check: VerificationCheck
   passed: boolean
+  // Absent in older checkpoints. New checks always record an outcome; only passed may complete a node.
+  outcome?: VerificationOutcome
   checkedAt: number
   exitCode?: number
   detail: string

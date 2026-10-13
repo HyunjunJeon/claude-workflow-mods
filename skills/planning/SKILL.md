@@ -113,7 +113,7 @@ Optional extras are `agent`, `label`, `task_summary`, `description` and `load_sk
 - `dag-workflow:anti-slop` for every node that writes or changes code, next to `testing` or `debugging`.
 - `dag-workflow:debugging` for diagnosis and fix nodes.
 - `dag-workflow:review-standards` for the review-standards node; a generated review-standards node also loads `anti-slop`.
-- `dag-workflow:secure-coding` for an implementation node that must meet secure-coding guides; name the guides (`kisa`, `owasp`) in its prompt.
+- `dag-workflow:secure-coding` for an implementation node that must meet secure-coding guides; name the guides (`kisa`, `owasp`, `agent`) in its prompt.
 - `dag-workflow:testing` for nodes that write code and tests.
 
 `dependsOn` controls order and passes data.

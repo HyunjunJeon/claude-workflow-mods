@@ -22,6 +22,7 @@ const REVIEW_FIELDS = new Set(['request', 'notes', 'category', 'rules', 'securit
 export const SECURITY_GUIDES: Record<string, string> = {
   kisa: 'KISA / Ministry of the Interior and Safety software security guide, implementation-phase weaknesses',
   owasp: 'OWASP Top 10 and the CWE Top 25',
+  agent: 'Agent trust boundaries: prompts, model-controlled tools, reusable learning and completion evidence',
 }
 
 // The lenses review.security fans out into, in node order. Each lens node reads the chosen guides but applies only the rows
@@ -191,6 +192,8 @@ function reviewSpecPrompt(definition: Definition, review: ReviewStage, nodes: No
     '## Request sentences - every sentence of the request and the goal, quoted, one per line.',
     '## Findings - three groups, each `none` when empty: (a) missing or partial implementation; (b) unrequested behavior (scope creep); (c) implemented but wrong-looking behavior. Each finding quotes its request sentence and cites its evidence as file:line. For (b) quote the nearest sentence it exceeds, or state that no sentence covers it.',
     '## Real check - rerun every command check the nodes declared, from the project root, and record each command, its exit code and the decisive output. Each must meet its expectation; one that does not is a (c) finding.',
+    'In ## Real check, also audit proof and policy changes against the pinned HEAD: test deletion, added skip/todo/only, weakened assertions or mocks that hide behavior, narrower test discovery, and relaxed lint/type/security/verify or permission settings. For each, cite file:line, the lost behavior or control, the task-supported reason and replacement evidence; write `none` if none changed.',
+    'Do not reject legitimate test updates for changed requirements, equivalent coverage, or removal of a prose-only assertion. Accept a change only when the requested behavior and applicable controls are still proved; a claimed reason or a green suite alone is not proof. Missing proof or an unrelated policy bypass is a (c) finding under ## Findings, with the affected path, and fails the spec verdict.',
     ...(checks.length > 0 ? checks : ['- (the nodes declared no command checks: write `none declared` and judge (c) from the files)']),
     '## Safe-but-wrong audit - answer every item of this block:',
     SAFE_BUT_WRONG_AUDIT,

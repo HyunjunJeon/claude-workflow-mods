@@ -1,4 +1,9 @@
-import type { CommandExpect, TextExpect, VerificationEvidence } from './types.ts'
+import type { CommandExpect, TextExpect, VerificationEvidence, VerificationOutcome } from './types.ts'
+
+// Older false values combine wrong results with unavailable checks; do not invent a classification for them.
+export function evidenceOutcome(item: VerificationEvidence): VerificationOutcome {
+  return item.outcome ?? (item.passed ? 'passed' : 'unknown')
+}
 
 // A problem quotes at most this many characters of any one text, so a large stdout or file cannot flood the report.
 const QUOTE_LIMIT = 120

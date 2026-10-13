@@ -1,9 +1,19 @@
 import { expect, test } from 'claude-code/testing'
-import { exitProblem, isCheckDefect, missingProgram, textProblem } from '../hooks/engine/check-eval.ts'
+import { evidenceOutcome, exitProblem, isCheckDefect, missingProgram, textProblem } from '../hooks/engine/check-eval.ts'
 import type { VerificationCheck, VerificationEvidence } from '../hooks/engine/types.ts'
 import { parseChecks } from '../hooks/engine/verification.ts'
 
 const report = 'building\nok 1 parse\nok 2 lint\n\nPASS 2 of 2\n'
+
+test('legacy failures remain unknown while explicit outcomes survive serialization', () => {
+  const item: VerificationEvidence = { check: { kind: 'command', argv: ['test'] }, passed: false, checkedAt: 1, detail: '' }
+  expect(evidenceOutcome(item)).toBe('unknown')
+  expect(evidenceOutcome({ ...item, passed: true })).toBe('passed')
+  for (const outcome of ['passed', 'failed', 'not_run', 'unknown'] as const) {
+    const saved: VerificationEvidence = JSON.parse(JSON.stringify({ ...item, passed: outcome === 'passed', outcome }))
+    expect(evidenceOutcome(saved)).toBe(outcome)
+  }
+})
 
 test('a text expectation with every field holding has no problem', () => {
   expect(textProblem(report, {}, 'stdout')).toBeUndefined()

@@ -458,6 +458,22 @@ const LENS_IDS = LENSES.map(lens => `security-${lens}`)
 const SECURITY_NOTES = `${CLI_FOLDER}/review-security-notes.md`
 const VERIFY_FOLDER = `${CLI_FOLDER}/security-verify`
 
+test('the agent guide uses existing security lenses, candidate parsing and verifier gates', () => {
+  const definition = parse({ review: { request: REQUEST, security: ['agent'] }, commit: COMMITS })
+  expect(definition.review?.security).toEqual(['agent'])
+  expect(INPUT_SCHEMA.properties.definition.properties.review.properties.security.items.enum).toContain('agent')
+  expect(node(definition, 'review-security').dependsOn).toEqual(LENS_IDS)
+  const parsed = parseCandidates('## Candidates\n```json\n[{"items":["agent AIA-01"],"file":"src/cli.ts","line":4,"claim":"tool output overrides the task","missing_control":"no data boundary"}]\n```', ['agent'])
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  const verifiers = verifierNodes(definition, 'security-injection', parsed.value)
+  if (!verifiers.ok) throw new Error(verifiers.error.message)
+  expect(verifiers.value.map(current => current.id)).toEqual(['security-verify-injection-1'])
+  expect(verifiers.value[0]?.verify).toEqual([
+    { kind: 'file', path: `${VERIFY_FOLDER}/injection/security-verify-injection-1-notes.md`, matches: '^(Candidate verdict: CONFIRMED|Candidate verdict: REFUTED)$' },
+    { kind: 'file', path: `${VERIFY_FOLDER}/injection/security-verify-injection-1-notes.md`, contains: '## Evidence' },
+  ])
+})
+
 test('security adds seven lens nodes on the user nodes and review-security on the lenses, and the commit waits on all three reviewers', () => {
   expect(Object.keys(SECURITY_LENSES)).toEqual(LENSES)
   const definition = parse({ review: { request: REQUEST, security: ['kisa'] }, commit: COMMITS })
@@ -534,8 +550,8 @@ test('amend that adds security runs the new security nodes and the commit, and l
 test('security refuses anything but a nonempty list of known guide ids', () => {
   for (const security of [[], ['iso27001'], ['kisa', 'cert'], 'kisa', [''], [1]]) {
     const parsed = parseDefinition({ key: 'k', goal: 'g', nodes: USER_NODES, review: { request: REQUEST, security } })
-    expect({ security, message: parsed.ok ? undefined : parsed.error.message })
-      .toEqual({ security, message: 'definition.review.security must list secure-coding guide ids from: kisa, owasp; leave it out for no security review.' })
+    expect({ security, code: parsed.ok ? undefined : parsed.error.code })
+      .toEqual({ security, code: 'invalid_definition' })
   }
 })
 

@@ -1,4 +1,5 @@
 import { hash, stableStringify } from './hash.ts'
+import { evidenceOutcome } from './check-eval.ts'
 import type { Run } from './types.ts'
 
 export type ContextRecord = {
@@ -148,7 +149,7 @@ export function contextSummary(record: ContextRecord, runs: readonly Run[], sour
         verification: node.verification ? {
           status: node.verification.status,
           evidence: node.verification.evidence.map(evidence => ({
-            kind: evidence.check.kind, passed: evidence.passed, checkedAt: evidence.checkedAt,
+            kind: evidence.check.kind, passed: evidence.passed, outcome: evidenceOutcome(evidence), checkedAt: evidence.checkedAt,
             exitCode: evidence.exitCode,
           })),
           report: node.verification.reportPath ? preview(node.verification.reportPath) : null,

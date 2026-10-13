@@ -1,4 +1,5 @@
 import { truncate } from './node-prompt.ts'
+import { evidenceOutcome } from './check-eval.ts'
 import type { Preview, WriteConflict } from './preview.ts'
 import { snapshotOf } from './run.ts'
 import type { EngineError, Run } from './types.ts'
@@ -143,7 +144,10 @@ function reviewFixLines(run: Run): string[] {
 export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map()): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {
-    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}${approvalHint(asked.get(n.id))}`
+    const outcomes = { passed: 0, failed: 0, not_run: 0, unknown: 0 }
+    for (const item of n.verification?.evidence ?? []) outcomes[evidenceOutcome(item)]++
+    const checks = n.verification ? `; checks: ${Object.entries(outcomes).map(([key, count]) => `${key}=${count}`).join(', ')}` : ''
+    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${checks}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}${approvalHint(asked.get(n.id))}`
     if (!n.output || budget <= 0) return head
     const excerpt = truncate(n.output, Math.min(SETTLE_OUTPUT_CHARS, budget))
     budget -= excerpt.length

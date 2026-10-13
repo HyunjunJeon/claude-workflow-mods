@@ -43,8 +43,10 @@ import {
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { parseYaml } from './engine/yaml.ts'
+import { applyLearningProposals, archiveUnusedSkills, buildLearningPrompt, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, type LearningEvent, type LearningLibrary } from './engine/learning.ts'
+import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence } from './engine/types.ts'
+import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence, type VerificationOutcome } from './engine/types.ts'
 import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
@@ -58,7 +60,7 @@ import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks,
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline]]'
+const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline] | learn | learning [status|on|off|prune]]'
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'auto', 'guide', 'off']
 type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
@@ -182,6 +184,214 @@ let mainTurnBusy = false
 let deferStarts = false
 const pendingStarts: string[] = []
 let extraAllowed: ReadonlySet<string> = new Set()
+let learningEnabled = true
+let learningInterval = 20
+let learningMinOpportunities = 50
+let learningMaxSkills = 30
+let learningRoot = ''
+let learnedSkillsDir = ''
+let learningSession = emptyLearningSession()
+let learningLibrary = emptyLibrary()
+const learningAgents = new Set<string>()
+let learningTurnRequested = false
+let learningSpawning = false
+let learningWriteSequence = 0
+
+function learningSessionPath(): string {
+  return `${learningRoot}/sessions/${hash(sessionId)}.json`
+}
+
+async function learningDirectory($: EngineInterface, path: string): Promise<void> {
+  const made = await $.process.run(['mkdir', '-p', path])
+  if (made.exitCode !== 0) throw new Error(`cannot create learning directory: ${made.stderr.trim()}`)
+  const stat = await $.fs.stat(path)
+  if (stat.kind !== 'dir' || stat.isLink) throw new Error(`learning directory is not a plain directory: ${path}`)
+}
+
+async function learningWrite($: EngineInterface, path: string, text: string): Promise<void> {
+  const temp = `${path}.${hash(sessionId)}.${++learningWriteSequence}.tmp`
+  await $.fs.write(temp, text)
+  const moved = await $.process.run(['mv', '-f', temp, path])
+  if (moved.exitCode !== 0) throw new Error(`could not save learning data: ${moved.stderr.trim()}`)
+}
+
+async function saveLearningSession($: EngineInterface): Promise<void> {
+  if (!learningRoot) return
+  await learningWrite($, learningSessionPath(), JSON.stringify(learningSession) + '\n')
+}
+
+async function readLearningLibrary($: EngineInterface): Promise<LearningLibrary> {
+  const path = `${learningRoot}/library.json`
+  if (!await $.fs.exists(path)) return emptyLibrary()
+  const parsed = parseLearningLibrary(await $.fs.read(path))
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  return parsed.value
+}
+
+// A directory lock protects read/modify/write across independent sessions, not just this module's queue.
+// Contention leaves the session's unlearned evidence intact for its next turn; no hook waits for another session.
+async function updateLearningLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary): Promise<void> {
+  const lock = `${learningRoot}/.lock`
+  let acquired = await $.process.run(['mkdir', lock])
+  if (acquired.exitCode !== 0 && await $.fs.exists(lock)) {
+    const stat = await $.fs.stat(lock)
+    if (!stat.isLink && stat.kind === 'dir' && (await $.clock.now()) - stat.mtimeMs > 60_000) {
+      const released = await $.process.run(['rmdir', lock])
+      if (released.exitCode === 0) acquired = await $.process.run(['mkdir', lock])
+    }
+  }
+  if (acquired.exitCode !== 0) throw new Error('Learning library is busy; retained evidence for the next turn.')
+  try {
+    const before = await readLearningLibrary($)
+    const after = update(before)
+    for (const skill of after.skills) {
+      const previous = before.skills.find(item => item.id === skill.id)
+      if (previous?.revision === skill.revision && previous.archived === skill.archived) continue
+      const path = `${learnedSkillsDir}/${skill.id}/SKILL.md`
+      if (await $.fs.exists(path)) {
+        const stat = await $.fs.stat(path)
+        if (stat.isLink || !previous || await $.fs.read(path) !== renderLearnedSkill(previous)) {
+          throw new Error(`Preserving an unmanaged or manually changed skill: ${path}`)
+        }
+      }
+      if (skill.archived) {
+        if (await $.fs.exists(path)) {
+          const folder = `${learningRoot}/archive/${skill.id}`
+          await learningDirectory($, folder)
+          const moved = await $.process.run(['mv', '-f', path, `${folder}/SKILL.md`])
+          if (moved.exitCode !== 0) throw new Error(`could not archive ${skill.id}`)
+        }
+      } else {
+        await learningDirectory($, `${learnedSkillsDir}/${skill.id}`)
+        await learningWrite($, path, renderLearnedSkill(skill))
+      }
+    }
+    await learningWrite($, `${learningRoot}/library.json`, JSON.stringify(after) + '\n')
+    learningLibrary = after
+  } finally {
+    const released = await $.process.run(['rmdir', lock])
+    if (released.exitCode !== 0) $.ui.log('Could not release the session learning library lock.')
+  }
+}
+
+async function initializeLearning($: EngineInterface): Promise<void> {
+  if (!learningEnabled) return
+  const home = await $.env.get('HOME')
+  if (!home || !home.startsWith('/')) {
+    $.ui.log('Session learning unavailable: HOME is not an absolute directory.')
+    return
+  }
+  learningRoot = `${home.replace(/\/$/, '')}/.claude/dag-workflow/learning`
+  learnedSkillsDir = `${home.replace(/\/$/, '')}/.claude/skills`
+  await learningDirectory($, `${learningRoot}/sessions`)
+  await learningDirectory($, learnedSkillsDir)
+  learningLibrary = await readLearningLibrary($)
+  const path = learningSessionPath()
+  if (await $.fs.exists(path)) {
+    const parsed = parseLearningSession(await $.fs.read(path))
+    if (!parsed.ok) throw new Error(parsed.error.message)
+    learningSession = parsed.value
+    if (learningSession.batch) {
+      const active = (await $.agent.list()).some(agent => agent.id === learningSession.batch?.agentId && agent.status === 'running')
+      if (active) learningAgents.add(learningSession.batch.agentId)
+      else {
+        learningSession = { ...learningSession, batch: undefined }
+        await saveLearningSession($)
+      }
+    }
+  }
+}
+
+async function collectLearning($: EngineInterface, kind: LearningEvent['kind'], text: string, agentId?: string): Promise<void> {
+  if (!learningEnabled || !learningRoot || (agentId && learningAgents.has(agentId)) || !text.trim()) return
+  const at = await $.clock.now()
+  const id = `${hash(sessionId)}:${learningSession.nextId}`
+  const event: LearningEvent = { id, sessionId, projectRoot, kind, text: capText(text, 3_900).replace(/\0/g, '').slice(0, 4_000), at, ...(agentId ? { agentId } : {}) }
+  let events = [...learningSession.events, event].slice(-80)
+  while (events.reduce((size, item) => size + item.text.length, 0) > 60_000) events = events.slice(1)
+  learningSession = {
+    ...learningSession, events, nextId: learningSession.nextId + 1,
+    toolsSinceLearn: learningSession.toolsSinceLearn + (kind === 'tool' ? 1 : 0),
+  }
+}
+
+async function startLearning($: EngineInterface, force = false): Promise<string> {
+  if (!learningEnabled || !learningRoot) return 'Session learning is off or unavailable.'
+  if (learningSession.batch || learningSpawning) return 'Session learning is already running.'
+  const pending = learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough)
+  if (pending.length === 0) return 'No new user-session experience to learn.'
+  const user = learningSession.events.findLast(event => event.kind === 'user')
+  if (!user) return 'No new user-session experience to learn.'
+  const events = pending.some(event => event.kind === 'user') ? pending : [user, ...pending.slice(-79)]
+  while (events.reduce((size, item) => size + item.text.length, 0) > 60_000) events.splice(1, 1)
+  if (!force && learningSession.toolsSinceLearn < learningInterval) return 'Session learning will run after more tool calls.'
+  learningLibrary = await readLearningLibrary($)
+  learningSpawning = true
+  try {
+    const spawned = await $.agent.spawn({
+      prompt: buildLearningPrompt(events, eligibleSkills(learningLibrary, projectRoot)),
+      description: 'Learn reusable skills from this user session',
+      subagentType: 'general-purpose', model: 'sonnet',
+    })
+    if (!spawned.agentId) return `Could not start session learning: ${spawned.deny ?? 'no agent id'}`
+    learningAgents.add(spawned.agentId)
+    learningSession = {
+      ...learningSession,
+      batch: { agentId: spawned.agentId, events, baseline: learningLibrary.skills, through: learningSession.nextId - 1 },
+    }
+    await saveLearningSession($)
+    return 'Session learning started in the background.'
+  } finally {
+    learningSpawning = false
+  }
+}
+
+async function finishLearning($: EngineInterface, end: AgentEnd): Promise<void> {
+  const batch = learningSession.batch
+  if (!batch || batch.agentId !== end.agentId) return
+  try {
+    if (!learningEnabled || end.isAborted || end.reason !== 'answer') return
+    const answer = end.answer || await recoverReport($, end.agentId)
+    const parsed = parseLearningProposals(answer, batch.events, batch.baseline)
+    if (!parsed.ok) throw new Error(parsed.error.message)
+    const now = await $.clock.now()
+    await updateLearningLibrary($, library => {
+      for (const proposal of parsed.value) {
+        for (const id of [proposal.id, ...proposal.replaces]) {
+          const expected = batch.baseline.find(skill => skill.id === id)
+          const current = library.skills.find(skill => skill.id === id)
+          if (current?.revision !== expected?.revision || current?.archived !== expected?.archived) {
+            throw new Error(`Skill ${id} changed in another session; retained evidence for relearning.`)
+          }
+        }
+      }
+      return applyLearningProposals(library, parsed.value, { events: batch.events, sessionId, projectRoot, now })
+    })
+    learningSession = {
+      ...learningSession, learnedThrough: batch.through,
+      toolsSinceLearn: learningSession.events.filter(event => event.kind === 'tool' && Number(event.id.split(':').at(-1)) > batch.through).length,
+    }
+    $.ui.log(`Session learning saved ${parsed.value.length} skill proposal(s).`)
+  } finally {
+    learningSession = { ...learningSession, batch: undefined }
+    await saveLearningSession($)
+  }
+  if (learningTurnRequested && !mainTurnBusy) {
+    learningTurnRequested = false
+    await startLearning($, true)
+  }
+}
+
+async function observeLearnedSkill($: EngineInterface, tool: string, input: Readonly<Record<string, unknown>>): Promise<void> {
+  if (!learningEnabled || !learningRoot) return
+  const id = tool === 'Skill' && typeof input.skill === 'string' ? input.skill.split(':').at(-1)
+    : tool === 'Read' && typeof input.file_path === 'string'
+      ? eligibleSkills(learningLibrary, projectRoot).find(skill => input.file_path === `${learnedSkillsDir}/${skill.id}/SKILL.md`)?.id
+      : undefined
+  if (!id || !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) return
+  const now = await $.clock.now()
+  await updateLearningLibrary($, library => recordSkillUse(library, id, projectRoot, now))
+}
 let antiSlopScan = true
 let antiSlopSkip: ReadonlySet<string> = new Set()
 // The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
@@ -1349,11 +1559,13 @@ async function folderFiles($: EngineInterface, dir: string): Promise<{ files: st
 }
 
 // contains holds when any file under the folder has the text, absent when none does; the first file that breaks absent is named, never quoted.
-async function folderCheckResult($: EngineInterface, check: FileCheck, dir: string): Promise<{ passed: boolean; detail: string }> {
+type CheckResult = { outcome: VerificationOutcome; detail: string; exitCode?: number }
+
+async function folderCheckResult($: EngineInterface, check: FileCheck, dir: string): Promise<CheckResult> {
   const unsupported = FOLDER_CHECK_FIELDS.filter(field => check[field] !== undefined)
-  if (unsupported.length) return { passed: false, detail: `${check.path} is a folder, and a folder check allows only contains and absent, not ${unsupported.join(', ')}` }
+  if (unsupported.length) return { outcome: 'unknown', detail: `${check.path} is a folder, and a folder check allows only contains and absent, not ${unsupported.join(', ')}` }
   const listed = await folderFiles($, dir)
-  if ('problem' in listed) return { passed: false, detail: `${check.path}: ${listed.problem}` }
+  if ('problem' in listed) return { outcome: 'unknown', detail: `${check.path}: ${listed.problem}` }
   const base = check.path.replace(/[\\/]+$/, '')
   let found = check.contains === undefined
   for (const file of listed.files) {
@@ -1363,36 +1575,36 @@ async function folderCheckResult($: EngineInterface, check: FileCheck, dir: stri
     try {
       text = await $.fs.read(`${dir}/${file}`)
     } catch (error) {
-      return { passed: false, detail: `${shown} could not be read (${message(error)}), so the folder check cannot be judged` }
+      return { outcome: 'unknown', detail: `${shown} could not be read (${message(error)}), so the folder check cannot be judged` }
     }
     const problem = check.absent === undefined ? undefined : textProblem(text, { absent: check.absent }, shown)
-    if (problem) return { passed: false, detail: problem }
+    if (problem) return { outcome: 'failed', detail: problem }
     if (check.contains !== undefined && text.includes(check.contains)) found = true
   }
-  if (!found) return { passed: false, detail: textProblem('', { contains: check.contains }, `${check.path} (${listed.files.length} files)`) ?? '' }
-  return { passed: true, detail: `Folder verified: ${check.path} (${listed.files.length} files)` }
+  if (!found) return { outcome: 'failed', detail: textProblem('', { contains: check.contains }, `${check.path} (${listed.files.length} files)`) ?? '' }
+  return { outcome: 'passed', detail: `Folder verified: ${check.path} (${listed.files.length} files)` }
 }
 
 // A file check on a missing or unreadable path fails, absent included: a path that is not there proves nothing.
-async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<{ passed: boolean; detail: string }> {
-  if (!projectPath(check.path) && !readOnlyAbsolutePath(check.path)) return { passed: false, detail: `Path not allowed: ${check.path}` }
+async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<CheckResult> {
+  if (!projectPath(check.path) && !readOnlyAbsolutePath(check.path)) return { outcome: 'unknown', detail: `Path not allowed: ${check.path}` }
   const path = projectPath(check.path) ? resolveCheckPath(check.path) : check.path
   let kind: string
   try {
     kind = (await $.fs.stat(path)).kind
   } catch (error) {
-    return { passed: false, detail: `Path is missing or unreadable: ${check.path} (${message(error)})` }
+    return { outcome: await $.fs.exists(path) ? 'unknown' : 'failed', detail: `Path is missing or unreadable: ${check.path} (${message(error)})` }
   }
   const hasText = TEXT_FIELDS.some(field => check[field] !== undefined)
-  if (kind === 'dir') return hasText ? folderCheckResult($, check, path) : { passed: true, detail: `Folder verified: ${check.path}` }
-  if (kind !== 'file') return { passed: false, detail: `Expected a file or folder: ${check.path}` }
+  if (kind === 'dir') return hasText ? folderCheckResult($, check, path) : { outcome: 'passed', detail: `Folder verified: ${check.path}` }
+  if (kind !== 'file') return { outcome: 'failed', detail: `Expected a file or folder: ${check.path}` }
   const problem = hasText ? textProblem(await $.fs.read(path), check, check.path) : undefined
-  return problem ? { passed: false, detail: problem } : { passed: true, detail: `File verified: ${check.path}` }
+  return problem ? { outcome: 'failed', detail: problem } : { outcome: 'passed', detail: `File verified: ${check.path}` }
 }
 
 // A program that cannot start or runs past the limit makes $.process.run reject, which fails the check whatever expect says.
 // The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
-async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<{ passed: boolean; detail: string; exitCode: number | undefined }> {
+async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<CheckResult> {
   const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
   const expectation = check.expect
@@ -1402,7 +1614,11 @@ async function commandCheckResult($: EngineInterface, check: CommandCheck): Prom
     truncated('stdout') ?? (expectation?.stdout ? textProblem(result.stdout, expectation.stdout, 'stdout') : undefined) ??
     truncated('stderr') ?? (expectation?.stderr ? textProblem(result.stderr, expectation.stderr, 'stderr') : undefined)
   const excerpt = `${JSON.stringify(check.argv)} exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`
-  return { passed: problem === undefined, detail: (problem ? `${problem}\n${excerpt}` : excerpt).slice(0, 4_000), exitCode }
+  const outcome = exitCode === undefined ? 'unknown'
+    : exitProblem(exitCode, expectation) ? 'failed'
+    : truncated('stdout') || truncated('stderr') ? 'unknown'
+    : problem ? 'failed' : 'passed'
+  return { outcome, detail: (problem ? `${problem}\n${excerpt}` : excerpt).slice(0, 4_000), exitCode }
 }
 
 async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<NonNullable<NodeRun['verification']>> {
@@ -1410,17 +1626,17 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
   if (!checks?.length) return { status: 'missing', evidence: [], error: 'No verification contract was declared; amend this node with verify checks.' }
   const evidence: VerificationEvidence[] = []
   for (const check of checks) {
-    let passed = false
+    let outcome: VerificationOutcome = 'unknown'
     let detail = ''
     let exitCode: number | undefined
     try {
       switch (check.kind) {
         case 'file': {
-          ({ passed, detail } = await fileCheckResult($, check))
+          ({ outcome, detail } = await fileCheckResult($, check))
           break
         }
         case 'command': {
-          ({ passed, detail, exitCode } = await commandCheckResult($, check))
+          ({ outcome, detail, exitCode } = await commandCheckResult($, check))
           break
         }
         default: {
@@ -1429,9 +1645,12 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
         }
       }
     } catch (error) {
+      outcome = check.kind === 'command' ? 'not_run' : 'unknown'
       detail = `Verification could not run: ${message(error)}`
     }
-    evidence.push({ check, passed, detail, checkedAt: await $.clock.now(), ...(exitCode !== undefined ? { exitCode } : {}) })
+    const item = { check, passed: outcome === 'passed', outcome, detail, checkedAt: await $.clock.now(), ...(exitCode !== undefined ? { exitCode } : {}) }
+    if (missingProgram(item)) item.outcome = 'not_run'
+    evidence.push(item)
   }
   const status = evidence.every(item => item.passed) ? 'passed' : 'failed'
   const dir = `${runsDir}/${run.runId}`
@@ -1925,6 +2144,24 @@ async function commandFilePath($: EngineInterface, given: string): Promise<strin
 // `fromComposer` is whether the person typed the command in the prompt, the only origin that may approve a held run.
 async function runCommand($: EngineInterface, args: string, fromComposer = false): Promise<{ text?: string }> {
   const [verb = 'open', ...rest] = splitArgs(args)
+  if (verb === 'learn') return { text: await startLearning($, true) }
+  if (verb === 'learning') {
+    const action = rest[0] ?? 'status'
+    if (action === 'on' || action === 'off') {
+      if (!fromComposer) return { text: USER_ONLY }
+      learningEnabled = action === 'on'
+      if (learningEnabled && !learningRoot) await initializeLearning($)
+      return { text: `Session learning: ${learningEnabled ? 'on' : 'off'}` }
+    }
+    if (!learningRoot) return { text: 'Session learning is off or unavailable.' }
+    if (action === 'prune') {
+      if (!fromComposer) return { text: USER_ONLY }
+      const now = await $.clock.now()
+      await updateLearningLibrary($, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learningMinOpportunities, maxSkills: learningMaxSkills, now }))
+    } else if (action !== 'status') return { text: 'Usage: /dag learning [status|on|off|prune]' }
+    learningLibrary = await readLearningLibrary($)
+    return { text: JSON.stringify({ enabled: learningEnabled, running: learningSession.batch?.agentId, pendingEvents: learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough).length, root: learningRoot, skills: learningLibrary.skills }, null, 2) }
+  }
   if (verb === 'inspect') {
     const choice = rest[0]
     if (choice !== 'dag' && choice !== 'decisions' && choice !== 'context' && choice !== 'sessions') return { text: USAGE }
@@ -2490,6 +2727,15 @@ export function register(on: On, options: PluginOptions) {
   antiSlopScan = options.anti_slop_scan !== false
   if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
   jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
+  learningEnabled = options.session_learning !== false
+  for (const [key, set] of [
+    ['learning_interval', (value: number) => { learningInterval = value }],
+    ['learning_min_opportunities', (value: number) => { learningMinOpportunities = value }],
+    ['learning_max_skills', (value: number) => { learningMaxSkills = value }],
+  ] as const) {
+    const value = options[key]
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 1000) set(value)
+  }
 
   on('session.start', async ($, e, next) => {
     interactive = e.isInteractive
@@ -2529,6 +2775,12 @@ export function register(on: On, options: PluginOptions) {
     }
     await restorePlanningFromContext($)
     try {
+      await initializeLearning($)
+    } catch (error) {
+      learningRoot = ''
+      $.ui.log(`could not initialize session learning: ${message(error)}`)
+    }
+    try {
       await refreshSessions($)
       await serialized(async () => {
         await recoverRuns($)
@@ -2567,8 +2819,8 @@ export function register(on: On, options: PluginOptions) {
     await $.command.register({ name: 'dag-ping', description: 'Check that the dag-workflow mod is loaded' })
     await $.command.register({
       name: 'dag',
-      description: 'Open the DAG pane, or run, list, inspect, approve, cancel or retry DAG workflows, or set enforcement',
-      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|auto|guide|off]]',
+      description: 'Manage DAG workflows and enforcement, or learn and manage reusable skills from the whole session',
+      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|auto|guide|off] | learn | learning [status|on|off|prune]]',
       immediate: true,
     })
     return next(e)
@@ -2585,6 +2837,14 @@ export function register(on: On, options: PluginOptions) {
     // A cleared or switched conversation holds no block yet; prompt.context records one again if it re-renders.
     if (e.source === 'clear' || previous !== sessionId) forgetDelivered()
     if (previous && previous !== sessionId) {
+      if (learningRoot) {
+        const currentId = sessionId
+        sessionId = previous
+        await saveLearningSession($)
+        sessionId = currentId
+        learningSession = emptyLearningSession()
+        await initializeLearning($)
+      }
       await serialized(async () => {
         for (const run of [...runs.values()]) {
           if (run.sessionId === previous) await persist($, { ...run, sessionId, ...(run.handoff ? { handoff: { ...run.handoff, from: sessionId } } : {}) })
@@ -2605,6 +2865,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('session.end', async ($, e, next) => {
     sessionClosed = true
+    if (learningRoot) await saveLearningSession($)
     try {
       await refreshSessions($, true)
     } catch (error) {
@@ -2670,6 +2931,13 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('skill.prompt', async ($, e, next) => {
+    if (learningRoot) {
+      const id = e.skill.split(':').at(-1)
+      const managed = learningLibrary.skills.find(skill => skill.id === id)
+      if (managed && !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) {
+        return { text: 'This learned skill is archived or belongs to another project; do not apply it here.' }
+      }
+    }
     // Skipped while a node's own planning-skill call is in flight: that load is the node's, not the conversation's.
     if (isPlanningSkill(e.skill) && nodePlanningCalls === 0) await setPlanningLoaded($, true)
     return next(e)
@@ -2694,11 +2962,45 @@ export function register(on: On, options: PluginOptions) {
     // note state the model has not received yet; a plugin's prompt never gets it, and the plugin's own carry the news.
     // It counts as received only once the prompt entered: a hook beneath that drops it delivers nothing.
     const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive, turnMode)])]
+    if (learningEnabled && learningRoot && userOrigin && next.origin.plugin === 'engine') {
+      try {
+        const now = await $.clock.now()
+        await updateLearningLibrary($, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learningMinOpportunities, maxSkills: learningMaxSkills, now }))
+        const catalog = learningCatalog(learningLibrary, projectRoot, learnedSkillsDir)
+        if (eligibleSkills(learningLibrary, projectRoot).length) context.push(catalog)
+      } catch (error) {
+        $.ui.log(`could not load learned skills: ${message(error)}`)
+      }
+    }
     const block = userOrigin && contextUnseen(delivered, contextSlices(workflowContext, [...runs.values()])) ? restoration() : undefined
     if (block) context.push(block.text)
     const result = await next({ ...e, context })
     if (block && result.drop === undefined) block.received()
+    if (result.drop === undefined && userOrigin && next.origin.plugin === 'engine' && e.text.trim()) {
+      learningTurnRequested = true
+      await collectLearning($, 'user', e.text)
+      if (learningEnabled && learningRoot) {
+        try {
+          const now = await $.clock.now()
+          await updateLearningLibrary($, library => recordSkillOpportunity(library, projectRoot, now))
+          await saveLearningSession($)
+        } catch (error) {
+          $.ui.log(`could not record learned-skill exposure: ${message(error)}`)
+        }
+      }
+    }
     return result
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    if (e.parentAgentId && learningAgents.has(e.parentAgentId)) return { deny: 'Session learning returns proposals without spawning agents.' }
+    if (learningSpawning) {
+      const result = await next({ ...e, background: true })
+      if (result.agentId) learningAgents.add(result.agentId)
+      return result
+    }
+    if (!learningEnabled || !learningRoot || eligibleSkills(learningLibrary, projectRoot).length === 0) return next(e)
+    return next({ ...e, prompt: `${e.prompt}\n\n${learningCatalog(learningLibrary, projectRoot, learnedSkillsDir)}` })
   })
 
   on('classic.PermissionRequest', async ($, e, next) => {
@@ -2750,6 +3052,26 @@ export function register(on: On, options: PluginOptions) {
 
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
+    if (agentId && learningAgents.has(agentId)) return { deny: 'Return learning proposal JSON using the supplied evidence. Learning agents cannot call tools.' }
+    if (learningRoot && e.tool === 'Skill') {
+      const id = e.skill.split(':').at(-1)
+      const managed = learningLibrary.skills.find(skill => skill.id === id)
+      if (managed && !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) {
+        return { deny: 'This learned skill is archived or belongs to another project.' }
+      }
+    }
+    const track = async <T extends ToolCallResult>(reply: T): Promise<T> => {
+      if (reply.deny === undefined && next.origin.plugin === 'engine') {
+        await collectLearning($, 'tool', JSON.stringify({ input: boundInput(e), outcome: boundInput(reply) }), agentId)
+        try {
+          await observeLearnedSkill($, e.tool, e as Readonly<Record<string, unknown>>)
+        } catch (error) {
+          $.ui.log(`could not record learned-skill use: ${message(error)}`)
+        }
+      }
+      return reply
+    }
+    const call = async () => track(await next(e))
     if (agentId) seenAgent($, agentId, 'tool.call')
     const owner = agentId ? nodeOfAgent(agentId) : undefined
     const def = owner?.run.definition.nodes.find(node => node.id === owner.nodeId)
@@ -2767,11 +3089,11 @@ export function register(on: On, options: PluginOptions) {
         if (e.tool === 'Skill' && isPlanningSkill((e as { skill?: unknown }).skill)) await setPlanningLoaded($, true)
         // A direct turn is judged again on the person's answer to a popup, before the gate below is looked at.
         if (e.tool === 'AskUserQuestion' && enforcement === 'auto' && turnMode === 'direct' && next.origin.plugin === 'engine') {
-          return await reconsiderAfterAnswer($, await next(e), next.signal)
+          return await reconsiderAfterAnswer($, await track(await next(e)), next.signal)
         }
-        if (!gatesMainLoop(enforcement, turnMode) || next.origin.plugin !== 'engine') return await next(e)
+        if (!gatesMainLoop(enforcement, turnMode) || next.origin.plugin !== 'engine') return await call()
         const verdict = mainLoopVerdict(e.tool, e as Readonly<Record<string, unknown>>, extraAllowed)
-        if (verdict.allowed) return await next(e)
+        if (verdict.allowed) return await call()
         $.ui.log(`refused ${e.tool} in the main conversation; work runs in DAG nodes`)
         return { deny: denyMessage(e.tool, verdict.reason) }
       }
@@ -2790,7 +3112,7 @@ export function register(on: On, options: PluginOptions) {
       // A call means the worker's turn is under way, so a wait for its background work is over.
       endBackgroundWait(agentId)
       try {
-        const reply = await next(e)
+        const reply = await call()
         // Recorded once the call is answered: a refused call started nothing.
         if (owner && reply.deny === undefined && startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) backgroundAgents.add(agentId)
         return reply
@@ -2820,6 +3142,21 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId && learningAgents.has(e.agentId)) {
+      const agentId = e.agentId
+      try {
+        await serialized(() => finishLearning($, { agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }))
+      } catch (error) {
+        $.ui.log(`session learning did not save proposals: ${message(error)}`)
+      }
+      return { text: '' }
+    }
+    if (learningEnabled && learningRoot) {
+      await serialized(async () => {
+        await collectLearning($, 'assistant', `${e.reason}: ${e.answer ?? ''}`, e.agentId)
+        await saveLearningSession($)
+      })
+    }
     if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
     if (e.agentId) clearWaiting($, e.agentId)
@@ -2844,6 +3181,18 @@ export function register(on: On, options: PluginOptions) {
       }
     }
     if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($, next.signal)
+    if (learningEnabled && learningRoot && !sessionClosed) {
+      try {
+        const flush = !e.agentId && learningTurnRequested && !e.isAborted && e.reason === 'answer'
+        if (flush || learningSession.toolsSinceLearn >= learningInterval) {
+          const alreadyRunning = learningSession.batch !== undefined
+          await serialized(() => startLearning($, flush))
+          if (flush && !alreadyRunning) learningTurnRequested = false
+        }
+      } catch (error) {
+        $.ui.log(`could not start session learning: ${message(error)}`)
+      }
+    }
     return next(e)
   })
 

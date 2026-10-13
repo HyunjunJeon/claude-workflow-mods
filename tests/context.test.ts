@@ -110,6 +110,7 @@ test('restoration projects current owned states and recorded evidence, not self-
   expect(node.declaredChecks).toBe(1)
   expect(node.verification.status).toBe('failed')
   expect(node.verification.evidence[0].passed).toBe(false)
+  expect(node.verification.evidence[0].outcome).toBe('unknown')
   expect(node.verification.evidence[0].exitCode).toBe(1)
   expect(node.recovery.used).toBe(1)
   expect(node.output).toBe(undefined)
@@ -117,6 +118,19 @@ test('restoration projects current owned states and recorded evidence, not self-
   expect(summary.omitted).toEqual({ notes: 0, runs: 0, nodes: 0, requests: 0 })
   expect({ record, runs }).toEqual(before)
   expect(contextSummary(record, runs, '/context.json')).toBe(contextSummary(record, [...runs].reverse(), '/context.json'))
+})
+
+test('restoration preserves unavailable check outcomes from current checkpoints', () => {
+  const current = run('current', 'failed')
+  const verification = current.nodes[0]?.verification
+  if (!verification) throw new Error('Missing fixture verification')
+  verification.evidence = [
+    { check: { kind: 'command', argv: ['missing'] }, passed: false, outcome: 'not_run', checkedAt: 3, detail: 'ENOENT' },
+    { check: { kind: 'file', path: 'a.txt' }, passed: false, outcome: 'unknown', checkedAt: 3, detail: 'EACCES' },
+  ]
+  const summary = JSON.parse(contextSummary(emptyContext('/project', 'session', 0), [current], '/context.json'))
+  const node = summary.entries.find((entry: { kind: string }) => entry.kind === 'node')
+  expect(node.verification.evidence.map((item: { outcome: string }) => item.outcome)).toEqual(['not_run', 'unknown'])
 })
 
 test('restoration remains bounded with escaped text and signals omitted raw sources', () => {
