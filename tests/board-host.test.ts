@@ -1,6 +1,7 @@
 import { expect, test, type Engine, type Mounted } from 'claude-code/testing'
 import type { EventOf, On } from 'claude-code'
 import { parseBoardFile } from '../hooks/engine/board.ts'
+import { hash } from '../hooks/engine/hash.ts'
 import { boot, command, dag, finish, harness, ROOT, start } from './control-harness.ts'
 
 const BOARD_TOOL = 'mcp__dag-workflow__board'
@@ -257,10 +258,11 @@ test('a settled run of the session gets a Result board with its summary and node
 
   const result = resultBoardOf(h)
   expect(result.title).toBe('Result: Solo')
-  expect(result.blocks.map(block => `${block.id} ${block.type}`)).toEqual(['b1 callout', 'b2 table', 'b3 flow'])
+  expect(result.blocks.map(block => `${block.id} ${block.type}`)).toEqual(['b1 callout', 'b2 table', 'b3 flow', 'b4 table'])
   expect(result.blocks[0]).toMatchObject({ type: 'callout', tone: 'info', title: 'completed · 1 of 1 node done · 0s', text: 'Solo' })
   expect(result.blocks[1]).toMatchObject({ type: 'table', title: 'Nodes', columns: ['Node', 'State', 'Checks', 'Model', 'Time'], rows: [['a', 'completed', '1/1', 'sonnet', expect.any(String)]] })
-  expect(result.run).toEqual({ runId, facts: { summary: 'b1', nodes: 'b2', graph: 'b3' } })
+  expect(result.blocks[3]).toMatchObject({ type: 'table', title: 'Decisions', columns: ['Kind', 'Subject', 'Picked', 'Outcome'], rows: [['routing', 'a', expect.any(String), expect.any(String)]] })
+  expect(result.run).toEqual({ runId, facts: { summary: 'b1', nodes: 'b2', graph: 'b3', decisions: 'b4' } })
 
   const [news] = settleNews(h)
   expect(news).toContain(`Result board "Result: Solo" (board_id ${result.boardId})`)
@@ -279,7 +281,7 @@ test('a retry that settles again redraws the facts in their blocks, keeps the mo
   await finish($, h)
   const first = resultBoardOf(h)
   expect(first.blocks[0]).toMatchObject({ type: 'callout', tone: 'risk', title: 'failed · 0 of 1 node done · 0s' })
-  expect(first.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3'])
+  expect(first.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3', 'b4'])
   await board($, { action: 'edit', board_id: first.boardId, edits: [{ op: 'insert', block: { type: 'section', title: 'Verified result', text: 'Nothing works yet.' } }] })
 
   h.control.exitCode = 0
@@ -289,11 +291,12 @@ test('a retry that settles again redraws the facts in their blocks, keeps the mo
   const second = resultBoardOf(h)
   expect(savedBoards(h)).toHaveLength(1)
   expect(second.boardId).toBe(first.boardId)
-  expect(second.blocks.map(block => `${block.id} ${block.type}`)).toEqual(['b1 callout', 'b2 table', 'b3 flow', 'b4 section', 'b5 table'])
+  expect(second.blocks.map(block => `${block.id} ${block.type}`)).toEqual(['b1 callout', 'b2 table', 'b3 flow', 'b4 table', 'b5 section', 'b6 table'])
   expect(second.blocks[0]).toMatchObject({ tone: 'info', title: 'completed · 1 of 1 node done · 0s' })
-  expect(second.blocks[3]).toMatchObject({ title: 'Verified result', text: 'Nothing works yet.' })
-  expect(second.blocks[4]).toMatchObject({ title: 'Declared writes', rows: [['src/a.ts', 'a']] })
-  expect(second.run).toEqual({ runId, facts: { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b5' } })
+  expect(second.blocks[3]).toMatchObject({ title: 'Decisions' })
+  expect(second.blocks[4]).toMatchObject({ title: 'Verified result', text: 'Nothing works yet.' })
+  expect(second.blocks[5]).toMatchObject({ title: 'Declared writes', rows: [['src/a.ts', 'a']] })
+  expect(second.run).toEqual({ runId, facts: { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b6', decisions: 'b4' } })
 
   const news = settleNews(h)
   expect(news).toHaveLength(2)
@@ -443,4 +446,96 @@ test('the refused chip toast speaks Korean when the language is ko', { options: 
   await boot($)
   await pressChip($)
   expect(h.toasts.map(toast => toast.text)).toEqual(['블록을 프롬프트에 넣지 못했습니다 (unknown)'])
+})
+
+// A trace block quotes one artifact of one of this session's runs: the host reads the run checkpoint, never the model's input.
+const TRACE = (run: string, node = 'a', part = 'answer') => ({ op: 'insert', block: { type: 'trace', run, node, part } })
+
+test('a trace insert quotes the run checkpoint and the saved board holds the lines the host read', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, RUN)
+  await finish($, h)
+  const boardId = await create($, 'Evidence')
+
+  const edited = await board($, { action: 'edit', board_id: boardId, edits: [TRACE(runId)] })
+  expect(edited).toMatchObject({ isError: false, value: { board_id: boardId, inserted: ['b1'] } })
+
+  const saved = savedBoards(h).find(candidate => candidate.boardId === boardId)
+  expect(saved?.blocks[0]).toMatchObject({ type: 'trace', run: runId, node: 'a', part: 'answer', lines: ['DAG_NODE_STATUS: completed'] })
+})
+
+test('a trace of a missing run, a missing node or another session\'s run fails with invalid_board_edit', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, RUN)
+  const boardId = await create($, 'Evidence')
+
+  const missingRun = await board($, { action: 'edit', board_id: boardId, edits: [TRACE('dag_norun_1')] })
+  expect(missingRun.value.error).toMatchObject({ code: 'invalid_board_edit', message: expect.stringContaining('no checkpoint') })
+
+  const missingNode = await board($, { action: 'edit', board_id: boardId, edits: [TRACE(runId, 'zzz')] })
+  expect(missingNode.value.error).toMatchObject({ code: 'invalid_board_edit', message: expect.stringContaining('zzz') })
+
+  h.files.set(`${ROOT}/runs/dag_elsewhere_1.json`, JSON.stringify({ runId: 'dag_elsewhere_1', sessionId: 'elsewhere', nodes: [{ id: 'a', state: 'completed', answer: 'hi' }] }))
+  const foreign = await board($, { action: 'edit', board_id: boardId, edits: [TRACE('dag_elsewhere_1')] })
+  expect(foreign.value.error).toMatchObject({ code: 'invalid_board_edit', message: expect.stringContaining('another session') })
+})
+
+test('export returns the board as markdown with a mermaid flow and block id anchors', async ($, on) => {
+  harness(on)
+  await boot($)
+  const boardId = await create($, 'How sum works')
+  await board($, { action: 'edit', board_id: boardId, edits: [SECTION, FLOW] })
+
+  const exported = await board($, { action: 'export', board_id: boardId })
+  expect(exported.isError).toBe(false)
+  const markdown = exported.value.markdown as string
+  expect(markdown).toContain('# How sum works')
+  expect(markdown).toContain('<!-- b1 -->')
+  expect(markdown).toContain('```mermaid\nflowchart LR')
+  expect(markdown).toContain('in["values"]')
+})
+
+// A record seeded for another run must not land on this run's result board: the decisions slot quotes the run's own rows.
+test('a settled run\'s decisions table holds the run\'s records and not another run\'s', async ($, on) => {
+  const h = harness(on)
+  h.files.set(`${ROOT}/decisions/source.json`, JSON.stringify({
+    schemaVersion: 1, projectRoot: '/work', sessionId: 'source',
+    records: [{ id: 'x-1', at: 500, sessionId: 'source', kind: 'routing', subject: 'foreign', proposed: 'standard', selected: 'standard', source: 'baseline', outcome: 'applied', ruleset: 'r', threshold: 0.5, latencyMs: 0, stateHash: 'h', runId: 'dag_foreign_1' }],
+  }))
+  await boot($)
+  const runId = await start($, RUN)
+  await finish($, h)
+
+  const decisions = resultBoardOf(h).blocks.find(block => block.type === 'table' && block.title === 'Decisions')
+  expect(decisions).toBeDefined()
+  const rows = (decisions as { rows: string[][] }).rows
+  expect(rows.map(row => row[1])).toEqual(['a'])
+  expect(rows.map(row => row[0])).toEqual(['routing'])
+})
+
+test('accepting a handoff copies the source session\'s boards under the accepting session id', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const boardId = await create($, 'Plan')
+  await board($, { action: 'edit', board_id: boardId, edits: [SECTION] })
+
+  h.store.set(`dag-session:${hash('/work')}:target`, { schemaVersion: 1, sessionId: 'target', projectRoot: '/work', updatedAt: 1_000, status: 'active', runIds: [], writes: [] })
+  const runId = await start($, { key: 'handoff', name: 'Handoff', nodes: [{ id: 'a', prompt: 'Produce', verify: [{ kind: 'command', argv: ['check-control'] }] }, { id: 'b', prompt: 'Consume', dependsOn: ['a'], verify: [{ kind: 'command', argv: ['check-control'] }] }] })
+  await command($, `handoff ${runId} target`)
+  await finish($, h)
+
+  h.control.sessionId = 'target'
+  await boot($)
+  const reply = await command($, `accept ${runId}`)
+  expect(reply.text).toContain('Accepted')
+
+  const file = h.files.get(`${ROOT}/boards/target.json`)
+  expect(file).toBeDefined()
+  const parsed = parseBoardFile(file ?? '', 'target')
+  expect(parsed.ok).toBe(true)
+  const copied = parsed.ok ? parsed.value.boards : []
+  expect(copied.map(board => board.boardId)).toContain(boardId)
+  expect(copied.find(board => board.boardId === boardId)?.blocks[0]).toMatchObject({ type: 'section', title: 'What sum does' })
 })

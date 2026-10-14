@@ -481,7 +481,7 @@ review:
 실행 소유권은 명시적인 인계로만 옮깁니다.
 
 1. 원래 세션에서 `/dag handoff <run> <session>`: 같은 프로젝트의 활성 세션에만 제안할 수 있습니다. 새 노드는 시작하지 않고(대기 노드는 `paused`), 실행 중인 노드는 끝날 때까지 둡니다. 실행 중인 노드가 모두 끝나 제안이 `offered`가 된 뒤에는 원래 세션을 닫아도 됩니다.
-2. 받는 세션에서 `/dag accept <run>`: 실행 중인 노드가 모두 끝난 뒤에만 수락됩니다. 끝나지 않은 노드만 이어서 실행하고, 완료된 노드와 결과는 그대로 둡니다. 원래 세션의 고정 노트도 가져옵니다.
+2. 받는 세션에서 `/dag accept <run>`: 실행 중인 노드가 모두 끝난 뒤에만 수락됩니다. 끝나지 않은 노드만 이어서 실행하고, 완료된 노드와 결과는 그대로 둡니다. 원래 세션의 고정 노트와 보드 전체도 가져옵니다(보드의 `sessionId`는 받는 세션 것으로 바뀌고, 수락한 실행에 연결된 보드가 있으면 그게 선택된 보드가 됩니다. 원래 세션의 보드 파일은 그대로 둡니다).
 3. 취소는 원래 세션에서 `/dag handoff <run> cancel`입니다.
 
 다른 프로젝트 세션은 대상이 될 수 없습니다. 인계 알림이 와도 패널만 새로 고칠 뿐 자동으로 수락하지 않습니다. `attach`는 소유 세션이 아직 활성이거나 인계 중인 실행이면 거부합니다(`owner_active`, `manual_handoff_required`).
@@ -587,9 +587,10 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | --- | --- | --- |
 | `create` | `{title}` (1-80자) | `{board_id}`. id는 `board_<시각의 36진수>_<무작위 6자>` 모양입니다. 새 보드가 패널에서 선택된 보드가 됩니다 |
 | `edit` | `{board_id, edits}` (edits 1-20개) | `{board_id, blocks, inserted}`. `blocks`는 고친 뒤 보드의 모든 블록 `[{id, type}]`, `inserted`는 이번 호출이 새로 만든 블록 id입니다. 고친 보드가 선택된 보드가 됩니다 |
-| `get` | `{board_id}` | 보드 전체: `boardId`, `sessionId`, `title`, `createdAt`, `updatedAt`, `nextId`, `blocks`(결과 보드는 `run`도). `code_peek`은 `lines` 대신 줄 수 `lineCount`를 돌려줍니다 |
+| `get` | `{board_id}` | 보드 전체: `boardId`, `sessionId`, `title`, `createdAt`, `updatedAt`, `nextId`, `blocks`(결과 보드는 `run`도). `code_peek`과 `trace`는 `lines` 대신 줄 수 `lineCount`를 돌려줍니다 |
 | `list` | 없음 | `{boards: [{board_id, title, blocks, updatedAt}]}`. 생성 순서이고, `blocks`는 블록 수입니다 |
 | `open` | `{board_id}` | `{board_id, shown: true}`. 이 세션의 실행이 아직 끝나지 않았으면 `{board_id, shown: true, section: 'dag', hint}`이고 패널은 DAG 화면에 머뭅니다. 패널을 그릴 수 없는 화면이거나 사용자가 패널을 닫아 둔 상태면 `{board_id, shown: false, hint}`입니다 |
+| `export` | `{board_id}` | `{board_id, markdown}`. 보드를 마크다운 한 편으로 직렬화합니다. 각 블록 위에 `<!-- b3 -->` 주석으로 블록 id를 남기고, `flow`·`sequence`는 mermaid(`flowchart LR`·`sequenceDiagram`)로 씁니다 |
 
 `edit`의 `edits`는 순서대로 적용하며 전부 성공하거나 아무것도 바뀌지 않습니다. 하나라도 거부되면 보드도 저장 파일도 그대로입니다. 글자 수는 앞뒤 공백을 지운 뒤 셉니다. 알 수 없는 필드는 오타를 조용히 버리지 않고 거부하며, 오류 메시지는 `edits[0]: nodes[0].label: must be 1-40 characters, got 0`처럼 몇 번째 edit의 어느 필드인지 알려 줍니다.
 
@@ -610,6 +611,8 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `callout` | `tone` (`info`, `decision`, `risk`, `warning` 중 하나), `text` (1-1,000자), `title?` (80자까지) |
 | `table` | `columns` (1-6개, 각 1-80자), `rows` (0-30행, 한 행의 셀 수는 열 수와 같고 셀은 80자까지이며 빈 셀도 가능), `title?` (80자까지). `rows`는 비어 있어도 `[]`로 써야 합니다 |
 | `code_peek` | `path`, `start`, `end`, `note?` (200자까지), `title?` (80자까지). 아래 **code_peek** 설명 |
+| `code` | `code` (1-4,000자, 40줄까지·줄 하나는 240자까지), `language?` (20자까지), `note?` (200자까지), `title?` (80자까지). 아래 **code·trace** 설명 |
+| `trace` | `run`, `node`, `part` (`output`, `answer`, `error`, `verification` 중 하나), `note?` (200자까지), `title?` (80자까지). 아래 **code·trace** 설명 |
 | `flow` | `nodes` (1-24개), `edges` (0-48개), `title?` (80자까지). 노드는 `id`, `label` (1-40자), `kind?` (`process`, `decision`, `terminal`), `note?` (80자까지)이고, 간선은 `from`, `to`, `label?` (40자까지)입니다. `edges`는 비어 있어도 `[]`로 써야 합니다 |
 | `sequence` | `participants` (2-8명), `steps` (1-40개), `title?` (80자까지). 참여자는 `id`, `label` (1-24자)이고, 단계는 `from`, `to`, `label` (1-60자), `kind?` (`call`, `return`, `async`, `note`)입니다 |
 
@@ -624,6 +627,14 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 - 줄은 **블록을 그릴 때** `<프로젝트 루트>/<path>`에서 읽어 보드에 저장합니다. 파일이 나중에 바뀌어도 보드에는 그때 논의한 줄이 그대로 남습니다. 새로 읽으려면 `update`로 `path`, `start`, `end` 중 하나를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다. 줄 하나는 240자까지만 저장하고 넘으면 `…`로 자릅니다. 파일 내용 일부가 `.claude/dag/boards/`에 복사됩니다.
 - 파일을 읽을 수 없거나 범위가 파일 끝을 넘으면(`... reach past the end of the file, which has N lines`) `invalid_board_edit`로 거부합니다. 마지막 줄바꿈은 새 줄로 세지 않습니다.
 - 한계: 같은 `edit` 호출에서 방금 `insert`한 `code_peek`의 범위를 `update`로 옮기면 `could not read …`로 실패합니다. 범위는 다른 호출에서 옮깁니다.
+
+**code·trace**: `code`는 아직 파일에 없는, 모델이 제안하는 코드 조각을 보여 주는 블록입니다. 보낸 내용을 그대로 저장하므로 파일을 읽지 않고 경로 검사도 없습니다. `language`는 패널의 코드 머리글과 `export`의 코드 펜스에 쓰이는 이름입니다.
+
+`trace`는 이 세션의 실행 한 번에서 노드 하나의 산출물을 인용하는 블록입니다.
+
+- 모델은 `run`(실행 id `dag_…`), `node`(그 실행의 노드 id), `part`만 보내고 `lines`는 보낼 수 없습니다. 호스트가 `.claude/dag/runs/<run>.json` 체크포인트를 읽어 줄을 채웁니다. 다른 세션의 실행이거나 없는 실행·노드이면 `invalid_board_edit`로 거부합니다.
+- `part`가 `output`·`answer`·`error`이면 노드의 그 필드를, `verification`이면 노드의 검증 보고서 파일을 읽습니다. 노드에 그 내용이 없으면 거부합니다.
+- `code_peek`처럼 줄은 블록을 그릴 때 읽어 저장하므로 실행 기록이 나중에 바뀌어도 보드에는 그때 본 내용이 남습니다. 40줄까지만 저장하고 넘으면 앞의 39줄과 `… +N more lines` 한 줄로 자르며, 줄 하나는 240자까지만 저장합니다. 새로 읽으려면 `update`로 `run`·`node`·`part` 중 하나를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다.
 
 ### 보드 섹션
 
@@ -650,8 +661,8 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 실행이 끝나면(완료·실패·취소) 플러그인이 그 결과를 보드에 그린 뒤 정산 메시지로 모델에게 알립니다. 모델은 결과를 검증하고 `Verified result` 섹션을 그 보드에 더한 뒤 보드를 엽니다.
 
 - **어떤 실행**: 대화형 세션에서 노드가 하나라도 시작한 실행(`attempt`가 있거나 시작 시각이 기록된 노드가 있는 실행)입니다. 시작 전에 사용자가 거절한 실행과 비대화형(`claude -p`) 세션의 실행은 보드를 그리지 않습니다. 그리다 실패하면 로그(`could not draw the result board of <실행 id>: ...`)에 남기고 정산 메시지는 보드 안내 없이 예전대로 나갑니다.
-- **보드와 제목**: 실행 하나에 보드 하나입니다. 제목은 `Result: <실행 이름>`(한국어 `결과: <실행 이름>`, 80자까지)이고, 영어와 한국어는 `language` 설정을 따릅니다. 보드에는 실행 id와 사실 블록의 id를 적은 `run: {runId, facts}`가 붙으며, `facts`는 `summary`, `nodes`, `graph`, `writes` 슬롯별 블록 id입니다. 모델의 `edit`로는 `run`을 바꾸거나 달 수 없습니다.
-- **사실 블록**: 아래 네 개를 이 순서로 그립니다. 셀은 80자, 표는 30행까지입니다.
+- **보드와 제목**: 실행 하나에 보드 하나입니다. 제목은 `Result: <실행 이름>`(한국어 `결과: <실행 이름>`, 80자까지)이고, 영어와 한국어는 `language` 설정을 따릅니다. 보드에는 실행 id와 사실 블록의 id를 적은 `run: {runId, facts}`가 붙으며, `facts`는 `summary`, `nodes`, `graph`, `writes`, `decisions` 슬롯별 블록 id입니다. 모델의 `edit`로는 `run`을 바꾸거나 달 수 없습니다.
+- **사실 블록**: 아래 다섯 개를 이 순서로 그립니다. 셀은 80자, 표는 30행까지입니다.
 
 | 슬롯 | 블록 | 내용 |
 | --- | --- | --- |
@@ -659,6 +670,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `nodes` | `table` | 제목 `Nodes`(`노드`), 열 `Node`·`State`·`Checks`·`Model`·`Time`(`노드`·`상태`·`검사`·`모델`·`시간`). 노드마다 한 행입니다. `Checks`는 노드의 검증 증거 중 통과한 수와 전체 수 `3/4`이고 증거가 없으면 `-`, `Model`은 `claude-`를 뗀 모델 이름이고 없으면 `-`, `Time`은 `1m 01s` 꼴이고 시작이나 종료 기록이 없으면 `-`입니다. 30행을 넘으면 29행과 `… N more nodes`(`… 노드 N개 더`) 행으로 줄입니다 |
 | `graph` | `flow` | 제목 `Run graph`(`실행 그래프`). 노드마다 하나이고 flow id는 위치대로 `n1`, `n2`…, `label`은 실제 노드 id(40자까지), `note`는 상태 또는 `<상태> · <통과>/<전체> checks`(`검사 <통과>/<전체>`)입니다. `kind`는 완료 `terminal`, 실패 `decision`, 그 밖에 `process`이고 간선은 정의의 `dependsOn`입니다. 노드가 24개를 넘거나 간선이 48개를 넘으면 이 블록은 그리지 않습니다 |
 | `writes` | `table` | 제목 `Declared writes`(`선언된 쓰기 범위`), 열 `Path`·`Node`(`경로`·`노드`). 완료된 노드가 선언한 `writes` 경로를 경로마다 한 행으로, 경로 순서로 두고 노드 id는 `, `로 잇습니다. 실패·건너뜀·취소 노드의 선언은 뺍니다. 선언된 경로가 없으면 블록이 없고, 30행을 넘으면 29행과 `… N more paths`(`… 경로 N개 더`) 행으로 줄입니다 |
+| `decisions` | `table` | 제목 `Decisions`(`결정`), 열 `Kind`·`Subject`·`Picked`·`Outcome`(`종류`·`대상`·`선택`·`결과`). 이 세션의 판단 기록([판단 기록](#판단-기록) 등) 중 이 실행의 `runId`를 단 것만 오래된 순으로 한 행씩입니다. 그런 기록이 없으면 블록이 없고, 30행을 넘으면 29행과 `… N more decisions`(`… 결정 N개 더`) 행으로 줄입니다 |
 
 - **다시 끝났을 때**: `retry`나 `amend` 뒤 같은 실행이 다시 끝나면 새 보드를 만들지 않고 `run`으로 같은 보드를 찾아 사실 블록을 같은 id로 바꿉니다. 모델이 더한 섹션은 그대로 남고, 블록 id가 같으므로 그 블록을 가리키던 칩도 그대로 가리킵니다. 모델이 사실 블록을 지웠으면 그 블록은 보드 끝에 다시 그리고, 이번에 내용이 없는 슬롯(예: 쓰기 선언이 없어짐)은 있던 블록을 지웁니다. 호스트가 버려서 같은 정산 메시지를 다시 보낼 때는 사실이 같으면 다시 그리지 않고 처음 그린 보드를 그대로 가리킵니다.
 - **화면은 그대로**: 그리는 동안 선택된 보드도 패널의 화면도 바꾸지 않고 패널을 열지도 않습니다. 정산 때 패널이 DAG에서 Board 섹션으로 넘어가는 일은 없습니다. 사용자는 `b`로 Board 섹션을 열어 보드를 넘겨 보거나 모델의 `open`을 기다립니다. 선택된 보드가 없으면 Board 섹션은 가장 나중에 고친 보드를 보이므로 그때는 결과 보드가 보입니다.

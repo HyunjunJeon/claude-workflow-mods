@@ -361,13 +361,21 @@ test('insert adds a trace with the lines the host read from the run checkpoint',
   expect(board.blocks).toEqual([{ id: 'b1', type: 'trace', title: 'Build', run: 'dag_1', node: 'build', part: 'output', lines: ['ok 1', 'ok 2'], note: 'tail' }])
 })
 
-test('a trace keeps the first 40 lines of an artifact and cuts each to 240 characters', () => {
+test('a trace keeps the first 39 lines of an artifact plus a dropped-count marker, and cuts each to 240 characters', () => {
   const long = Array.from({ length: 55 }, (_, i) => `${i}:${'y'.repeat(500)}`)
   const { board } = accepted(apply(boardOf(), [insert(traceOf('dag_1', 'build', 'answer'))], NO_PEEKS, runText('dag_1', 'build', 'answer', long)))
   const block = board.blocks[0]
   expect(block?.type === 'trace' && block.lines).toHaveLength(40)
   expect(block?.type === 'trace' && block.lines[0]?.length).toBe(240)
-  expect(block?.type === 'trace' && block.lines[39]?.startsWith('39:')).toBe(true)
+  expect(block?.type === 'trace' && block.lines[38]?.startsWith('38:')).toBe(true)
+  expect(block?.type === 'trace' && block.lines[39]).toBe('… +16 more lines')
+})
+
+test('a trace of exactly 40 lines needs no marker', () => {
+  const { board } = accepted(apply(boardOf(), [insert(traceOf('dag_1', 'build', 'answer'))], NO_PEEKS, runText('dag_1', 'build', 'answer', Array.from({ length: 40 }, (_, i) => `line ${i}`))))
+  const block = board.blocks[0]
+  expect(block?.type === 'trace' && block.lines).toHaveLength(40)
+  expect(block?.type === 'trace' && block.lines[39]?.startsWith('…')).toBe(false)
 })
 
 test('a trace whose artifact was not read is refused, naming run, node and part, and nothing is applied', () => {

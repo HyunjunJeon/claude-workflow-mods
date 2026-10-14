@@ -420,8 +420,10 @@ function tracedLines(trace: TraceInput, traces: ReadonlyMap<string, string[]>): 
   const lines = traces.get(key)
   if (lines === undefined) return bad('run', `could not read the ${trace.part} of node ${trace.node} in run ${trace.run} (${key}); the run checkpoint does not hold it`)
   if (lines.length === 0) return bad('part', `the ${trace.part} of node ${trace.node} in run ${trace.run} (${key}) is empty`)
-  // No range to ask for, so a long artifact keeps its first lines: a stored trace never holds more than a code_peek can.
-  return good(lines.slice(0, PEEK_MAX_LINES).map(cutLine))
+  // No range to ask for, so a long artifact keeps its first lines and a marker line says how many it dropped: a stored
+  // trace never holds more than a code_peek can.
+  if (lines.length > PEEK_MAX_LINES) return good([...lines.slice(0, PEEK_MAX_LINES - 1).map(cutLine), `… +${lines.length - PEEK_MAX_LINES + 1} more lines`])
+  return good(lines.map(cutLine))
 }
 
 function hostedLines(input: Hosted, sources: Sources): Parsed<string[]> {

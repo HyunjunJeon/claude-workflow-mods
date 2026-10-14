@@ -28,6 +28,10 @@
 # Wave-2 nodes declare only file checks: four lanes edit tests/ at once, so a full `claude plugin test .` or a whole-
 # project tsc could fail on a sibling's half-written file. Each worker still runs the suite itself; board-host and
 # review-spec run it on the whole result.
+#
+# Outcome: the run died at board-engine when the headless host killed background agents 10 minutes after the last turn
+# (CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS). The four completed lanes' files landed in a292671; the host wiring, the
+# session check on trace runs, the truncated-trace marker, docs and the commit were finished by hand after that.
 # Expected lint warnings: "one producer owns 3 files" on board-engine and board-render; each is one slice.
 # Note on the type union: board-contract widens Block/BlockInput, so the whole project cannot typecheck until both
 # board.ts (board-engine) and board-model.ts (board-render) handle the new members. No node before board-host gets a

@@ -2201,6 +2201,30 @@ async function saveBoards($: EngineInterface, next: Board[]): Promise<void> {
   boards = next
 }
 
+// An accepted handoff brings the source session's boards along: a block's lines were captured when it was drawn, so
+// copying is only the board list with each board's sessionId rewritten — parseBoardFile refuses a board that names
+// another session, and this session's own file would too. A copied board linked to the accepted run becomes the
+// selected board. A missing or unparsable source file is a no-op; a failure is logged and never fails the accept.
+async function inheritBoards($: EngineInterface, source: string, acceptedRunId: string): Promise<void> {
+  const path = `${projectRoot}/${BOARDS_SUBDIR}/${source}.json`
+  try {
+    if (!(await $.fs.exists(path))) return
+    const parsed = parseBoardFile(await $.fs.read(path), source)
+    if (!parsed.ok) {
+      $.ui.log(`could not inherit ${path}: ${parsed.error.message}`)
+      return
+    }
+    const held = new Set(boards.map(board => board.boardId))
+    const inherited = parsed.value.boards.filter(board => !held.has(board.boardId)).map(board => ({ ...board, sessionId }))
+    if (inherited.length === 0) return
+    await saveBoards($, [...boards, ...inherited])
+    const linked = inherited.find(board => board.run?.runId === acceptedRunId)
+    if (linked) selectedBoardId = linked.boardId
+  } catch (error) {
+    $.ui.log(`could not inherit ${path}: ${message(error)}`)
+  }
+}
+
 // Lines start..end (1-based) of a project file for a code_peek. peeksNeeded merges a range several edits ask for, so a
 // refusal names the path and no edit index.
 async function readPeek($: EngineInterface, request: PeekRequest): Promise<Result<string[]>> {
@@ -2233,6 +2257,8 @@ async function readTrace($: EngineInterface, request: TraceRequest): Promise<Res
   } catch (error) {
     return fail('invalid_board_edit', `${at}: cannot read the run checkpoint (${message(error)})`)
   }
+  // A board is session state, so it may quote only the session's own runs.
+  if (run.sessionId !== sessionId) return fail('invalid_board_edit', `${at}: the run belongs to another session`)
   const node = run.nodes.find(candidate => candidate.id === request.node)
   if (node === undefined) return fail('invalid_board_edit', `${at}: the run has no node ${request.node}`)
   if (request.part === 'verification') {
@@ -2332,7 +2358,7 @@ function factLink(previous: Record<string, string>, edits: readonly BoardEdit[],
 async function drawResultBoard($: EngineInterface, run: Run): Promise<SettleBoard | undefined> {
   if (!interactive || !drawsResult(run)) return undefined
   try {
-    const facts = resultFacts(run, language)
+    const facts = resultFacts(run, language, decisionRecords.filter(record => record.runId === run.runId))
     const factsHash = hash(stableStringify(facts))
     const linked = boards.find(board => board.run?.runId === run.runId)
     const drawn = resultDraws.get(run.runId)
@@ -2481,6 +2507,7 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
         $.ui.log(warning)
         warnings.push(warning)
       }
+      await inheritBoards($, run.sessionId, run.runId)
     }
     if (operation === 'request') {
       if (result.value.handoff?.offeredAt !== undefined) await notifyHandoff($, result.value)
