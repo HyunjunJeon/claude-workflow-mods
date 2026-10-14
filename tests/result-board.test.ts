@@ -427,7 +427,7 @@ function remembered(slots: ResultSlot[], inserted: string[]): Partial<Record<Res
 
 function drawn(board: Board, run: Run, previous: Partial<Record<ResultSlot, string>>, records: readonly DecisionRecord[] = []) {
   const { edits, insertedSlots } = factEdits(resultFacts(run, 'en', records), previous, board.blocks.map(block => block.id))
-  const applied = applyEdits(board, edits, { now: 2_000, peeks: new Map(), traces: new Map() })
+  const applied = applyEdits(board, edits, { now: 2_000, peeks: new Map(), traces: new Map(), diffs: new Map() })
   if (!applied.ok) throw new Error(`${applied.error.code}: ${applied.error.message}`)
   return { board: applied.value.board, ids: { ...previous, ...remembered(insertedSlots, applied.value.inserted) } }
 }

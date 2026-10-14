@@ -587,10 +587,10 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | --- | --- | --- |
 | `create` | `{title}` (1-80자) | `{board_id}`. id는 `board_<시각의 36진수>_<무작위 6자>` 모양입니다. 새 보드가 패널에서 선택된 보드가 됩니다 |
 | `edit` | `{board_id, edits}` (edits 1-20개) | `{board_id, blocks, inserted}`. `blocks`는 고친 뒤 보드의 모든 블록 `[{id, type}]`, `inserted`는 이번 호출이 새로 만든 블록 id입니다. 고친 보드가 선택된 보드가 됩니다 |
-| `get` | `{board_id}` | 보드 전체: `boardId`, `sessionId`, `title`, `createdAt`, `updatedAt`, `nextId`, `blocks`(결과 보드는 `run`도). `code_peek`과 `trace`는 `lines` 대신 줄 수 `lineCount`를 돌려줍니다 |
+| `get` | `{board_id}` | 보드 전체: `boardId`, `sessionId`, `title`, `createdAt`, `updatedAt`, `nextId`, `blocks`(결과 보드는 `run`도). `code_peek`, `trace`, `diff`는 `lines` 대신 줄 수 `lineCount`를 돌려줍니다 |
 | `list` | 없음 | `{boards: [{board_id, title, blocks, updatedAt}]}`. 생성 순서이고, `blocks`는 블록 수입니다 |
 | `open` | `{board_id}` | `{board_id, shown: true}`. 이 세션의 실행이 아직 끝나지 않았으면 `{board_id, shown: true, section: 'dag', hint}`이고 패널은 DAG 화면에 머뭅니다. 패널을 그릴 수 없는 화면이거나 사용자가 패널을 닫아 둔 상태면 `{board_id, shown: false, hint}`입니다 |
-| `export` | `{board_id}` | `{board_id, markdown}`. 보드를 마크다운 한 편으로 직렬화합니다. 각 블록 위에 `<!-- b3 -->` 주석으로 블록 id를 남기고, `flow`·`sequence`는 mermaid(`flowchart LR`·`sequenceDiagram`)로 씁니다 |
+| `export` | `{board_id}` | `{board_id, markdown}`. 보드를 마크다운 한 편으로 직렬화합니다. 각 블록 위에 `<!-- b3 -->` 주석으로 블록 id를 남기고, `flow`·`sequence`는 mermaid(`flowchart LR`·`sequenceDiagram`)로 쓰고, `diff`는 `diff` 코드 펜스로 씁니다. `ref`가 있는 `code_peek`은 줄 범위 뒤에 `at <ref>`가 붙습니다 |
 
 `edit`의 `edits`는 순서대로 적용하며 전부 성공하거나 아무것도 바뀌지 않습니다. 하나라도 거부되면 보드도 저장 파일도 그대로입니다. 글자 수는 앞뒤 공백을 지운 뒤 셉니다. 알 수 없는 필드는 오타를 조용히 버리지 않고 거부하며, 오류 메시지는 `edits[0]: nodes[0].label: must be 1-40 characters, got 0`처럼 몇 번째 edit의 어느 필드인지 알려 줍니다.
 
@@ -610,9 +610,10 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `section` | `title` (1-80자), `text?` (4,000자까지) |
 | `callout` | `tone` (`info`, `decision`, `risk`, `warning` 중 하나), `text` (1-1,000자), `title?` (80자까지) |
 | `table` | `columns` (1-6개, 각 1-80자), `rows` (0-30행, 한 행의 셀 수는 열 수와 같고 셀은 80자까지이며 빈 셀도 가능), `title?` (80자까지). `rows`는 비어 있어도 `[]`로 써야 합니다 |
-| `code_peek` | `path`, `start`, `end`, `note?` (200자까지), `title?` (80자까지). 아래 **code_peek** 설명 |
+| `code_peek` | `path`, `ref?` (64자까지), `start`, `end`, `note?` (200자까지), `title?` (80자까지). 아래 **code_peek** 설명 |
 | `code` | `code` (1-4,000자, 40줄까지·줄 하나는 240자까지), `language?` (20자까지), `note?` (200자까지), `title?` (80자까지). 아래 **code·trace** 설명 |
 | `trace` | `run`, `node`, `part` (`output`, `answer`, `error`, `verification` 중 하나), `note?` (200자까지), `title?` (80자까지). 아래 **code·trace** 설명 |
+| `diff` | `ref` (1-64자, 필수), `path?` (300자까지), `note?` (200자까지), `title?` (80자까지). 아래 **diff** 설명 |
 | `flow` | `nodes` (1-24개), `edges` (0-48개), `title?` (80자까지). 노드는 `id`, `label` (1-40자), `kind?` (`process`, `decision`, `terminal`), `note?` (80자까지)이고, 간선은 `from`, `to`, `label?` (40자까지)입니다. `edges`는 비어 있어도 `[]`로 써야 합니다 |
 | `sequence` | `participants` (2-8명), `steps` (1-40개), `title?` (80자까지). 참여자는 `id`, `label` (1-24자)이고, 단계는 `from`, `to`, `label` (1-60자), `kind?` (`call`, `return`, `async`, `note`)입니다 |
 
@@ -624,9 +625,12 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 
 - `path`는 1-300자의 프로젝트 상대 경로입니다. 절대 경로, 드라이브 문자, `..`, 대소문자와 관계없이 `.claude` 구간이 들어간 경로는 거부합니다.
 - `start`와 `end`는 1부터 세는 정수이고 `end`가 `start`보다 앞설 수 없습니다. 한 블록은 40줄까지(`end - start`가 40 미만)입니다.
-- 줄은 **블록을 그릴 때** `<프로젝트 루트>/<path>`에서 읽어 보드에 저장합니다. 파일이 나중에 바뀌어도 보드에는 그때 논의한 줄이 그대로 남습니다. 새로 읽으려면 `update`로 `path`, `start`, `end` 중 하나를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다. 줄 하나는 240자까지만 저장하고 넘으면 `…`로 자릅니다. 파일 내용 일부가 `.claude/dag/boards/`에 복사됩니다.
-- 파일을 읽을 수 없거나 범위가 파일 끝을 넘으면(`... reach past the end of the file, which has N lines`) `invalid_board_edit`로 거부합니다. 마지막 줄바꿈은 새 줄로 세지 않습니다.
-- 한계: 같은 `edit` 호출에서 방금 `insert`한 `code_peek`의 범위를 `update`로 옮기면 `could not read …`로 실패합니다. 범위는 다른 호출에서 옮깁니다.
+- `ref?`가 없으면 줄은 **블록을 그릴 때** `<프로젝트 루트>/<path>`에서 읽어 보드에 저장합니다. 파일이 나중에 바뀌어도 보드에는 그때 논의한 줄이 그대로 남습니다. 새로 읽으려면 `update`로 `path`, `ref`, `start`, `end` 중 하나를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다. 줄 하나는 240자까지만 저장하고 넘으면 `…`로 자릅니다. 파일 내용 일부가 `.claude/dag/boards/`에 복사됩니다.
+- `ref`가 있으면 워킹 트리 대신 `git show <ref>:<path>`로 그 시점의 파일을 읽습니다(프로젝트 루트에서 실행하며 `path`는 프로젝트 루트 기준). 예: 직전 커밋 버전은 `HEAD~1`, 다른 브랜치는 `main`. 읽은 줄은 `ref`를 쓰지 않을 때와 같이 그릴 때의 내용으로 저장하고, `ref`·`path`·`start`·`end` 중 하나를 바꾸는 `update`는 줄을 다시 읽습니다. `update`에서 `ref`를 `""`로 보내면 워킹 트리 읽기로 돌아갑니다.
+- `ref`는 1-64자이고 영문, 숫자, `_ . / ~ ^ { } @ -`만 쓸 수 있으며 첫 글자는 영문, 숫자, `_`, `@`만 됩니다(`-`로 시작해 git 옵션으로 읽히는 것을 막습니다). 글자 검사는 `a..b` 같은 범위 모양도 통과시키지만, `git show`가 그 파일을 읽지 못하면 아래처럼 읽기 실패로 거부합니다.
+- 파일을 읽을 수 없거나(`ref`가 있으면 `git show`가 실패한 경우, 알 수 없는 `ref`와 그 시점에 없는 파일 포함) 범위가 파일 끝을 넘으면(`... reach past the end of the file, which has N lines`, `ref`가 있으면 `path@ref`와 그 버전의 줄 수를 알려 줍니다) `invalid_board_edit`로 거부합니다. 마지막 줄바꿈은 새 줄로 세지 않습니다.
+- 패널의 머리글 줄은 `ref`가 있으면 `<path>@<ref>:<start>-<end>`(예: `src/a.ts@HEAD~1:8-9`)로 시점을 밝히고, 없으면 `<path>:<start>-<end>` 그대로입니다. `export`는 `` `path` (L8–L9 at main~2) `` 꼴로 씁니다.
+- 한계: 같은 `edit` 호출에서 방금 `insert`한 `code_peek`의 범위나 `ref`를 `update`로 옮기면 `could not read …`로 실패합니다. 범위와 `ref`는 다른 호출에서 옮깁니다.
 
 **code·trace**: `code`는 아직 파일에 없는, 모델이 제안하는 코드 조각을 보여 주는 블록입니다. 보낸 내용을 그대로 저장하므로 파일을 읽지 않고 경로 검사도 없습니다. `language`는 패널의 코드 머리글과 `export`의 코드 펜스에 쓰이는 이름입니다.
 
@@ -635,6 +639,14 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 - 모델은 `run`(실행 id `dag_…`), `node`(그 실행의 노드 id), `part`만 보내고 `lines`는 보낼 수 없습니다. 호스트가 `.claude/dag/runs/<run>.json` 체크포인트를 읽어 줄을 채웁니다. 다른 세션의 실행이거나 없는 실행·노드이면 `invalid_board_edit`로 거부합니다.
 - `part`가 `output`·`answer`·`error`이면 노드의 그 필드를, `verification`이면 노드의 검증 보고서 파일을 읽습니다. 노드에 그 내용이 없으면 거부합니다.
 - `code_peek`처럼 줄은 블록을 그릴 때 읽어 저장하므로 실행 기록이 나중에 바뀌어도 보드에는 그때 본 내용이 남습니다. 40줄까지만 저장하고 넘으면 앞의 39줄과 `… +N more lines` 한 줄로 자르며, 줄 하나는 240자까지만 저장합니다. 새로 읽으려면 `update`로 `run`·`node`·`part` 중 하나를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다.
+
+**diff**: git 변경을 인용하는 블록입니다. `code_peek`처럼 모델은 `lines`를 보낼 수 없고 호스트가 채웁니다.
+
+- `ref`는 필수이고 `code_peek`의 `ref`와 같은 모양입니다(`HEAD~1`, `main`, `main..feature` 같은 범위도 됩니다). `path?`는 1-300자의 프로젝트 상대 경로이며 `code_peek`의 `path`와 같은 검사를 받습니다. 하나의 파일로 diff를 좁힙니다.
+- 호스트가 프로젝트 루트에서 `git diff <ref>`를 실행해 출력 줄을 저장하고, `path`가 있으면 `-- <path>`를 붙여 그 파일만 봅니다. 색과 외부 diff 도구 설정과 관계없이 평문 unified diff 줄을 받습니다. `path`는 글자 그대로 한 파일 경로로 읽고 패턴으로 읽지 않습니다.
+- diff가 비어 있거나(`... is empty; nothing differs`) git이 읽지 못하면(알 수 없는 `ref`, git 실행 실패, 저장소 밖 경로) `invalid_board_edit`로 거부하고 보드는 그대로입니다.
+- `trace`와 같은 규칙으로 저장합니다. 40줄까지만 저장하고 넘으면 앞의 39줄과 `… +N more lines` 한 줄로 자르며, 줄 하나는 240자까지만 저장합니다. 그릴 때 읽은 줄이 남고, 새로 읽으려면 `update`로 `ref`나 `path`를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다. `get`은 `lines` 대신 줄 수 `lineCount`를 돌려줍니다. 같은 `edit` 호출에서 방금 `insert`한 `diff`의 `ref`·`path`를 `update`로 바꾸면 `code_peek`처럼 `could not read …`로 실패합니다.
+- 패널의 머리글 줄은 git 인자 그대로 `<ref>`(예: `main`), `path`가 있으면 `<ref> -- <path>`(예: `main..feature -- src/a.ts`)이고, 줄은 `trace`처럼 1부터 번호를 매깁니다. 패널은 `+`·`-` 줄에 색을 입히지 않습니다. `export`는 `` `ref · path` `` 한 줄 뒤에 `diff` 코드 펜스를 씁니다. 파일 내용 일부가 `code_peek`처럼 `.claude/dag/boards/`에 복사됩니다.
 
 ### 보드 섹션
 
@@ -696,7 +708,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `invalid_request` | 알 수 없는 `action` |
 | `invalid_board_title` | `create`의 `title`이 1-80자가 아님 |
 | `unknown_board` | `board_id`가 이 세션의 보드가 아님(`edit`, `get`, `open`). `list`로 확인합니다 |
-| `invalid_board_edit` | `edits`가 1-20개 배열이 아님, 알 수 없는 `op`나 필드, 블록 검사 위반(위 표의 제한, flow 순환·중복·존재하지 않는 노드, 60개 초과), `id`·`type`·`lines` 변경, `code_peek` 파일을 읽을 수 없음 또는 범위가 파일 끝을 넘음 |
+| `invalid_board_edit` | `edits`가 1-20개 배열이 아님, 알 수 없는 `op`나 필드, 블록 검사 위반(위 표의 제한, flow 순환·중복·존재하지 않는 노드, 60개 초과), `id`·`type`·`lines` 변경, `code_peek` 파일(`ref`가 있으면 그 시점의 파일)을 읽을 수 없음 또는 범위가 파일 끝을 넘음, `diff`가 비었거나 git이 읽지 못함, `ref` 모양 위반 |
 | `unknown_block` | `afterId`나 `update`·`replace`·`remove`의 `id`가 보드에 없음. 메시지에 보드의 블록 id가 나열됩니다 |
 | `hook_<종류>` | 훅 자체가 실패함. 메시지는 `The board tool failed: ...`로 시작합니다 |
 

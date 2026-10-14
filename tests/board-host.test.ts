@@ -99,6 +99,122 @@ test('a code_peek of a missing file names the path, and one past the end names t
   expect(savedBoards(h)[0]?.blocks).toEqual([])
 })
 
+// sum.ts as an older commit held it; h.control.git answers for that commit, and the worktree file holds SUM.
+const OLD_SUM = 'export function sum(values: number[]): number {\n  return values.reduce((total, value) => total + value, 0)\n}\n'
+const PEEK_AT = (ref: string, end = 2) => ({ op: 'insert', block: { type: 'code_peek', path: 'src/sum.ts', ref, start: 2, end } })
+
+test('a code_peek at a git ref saves the lines git show printed for that ref, read from the project root, not the worktree file', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/src/sum.ts', SUM)
+  h.control.git.set('show HEAD~1:./src/sum.ts', OLD_SUM)
+  await boot($)
+  const boardId = await create($, 'Before')
+
+  const edited = await board($, { action: 'edit', board_id: boardId, edits: [PEEK_AT('HEAD~1')] })
+  expect(edited.isError).toBe(false)
+  expect(savedBoards(h)[0]?.blocks[0]).toMatchObject({ type: 'code_peek', path: 'src/sum.ts', ref: 'HEAD~1', lines: ['  return values.reduce((total, value) => total + value, 0)'] })
+  const gitCalls = h.processes.filter(e => e.argv[0] === 'git').map(e => ({ argv: [...e.argv], cwd: e.init?.cwd }))
+  expect(gitCalls).toEqual([{ argv: ['git', 'show', 'HEAD~1:./src/sum.ts'], cwd: '/work' }])
+})
+
+test('a code_peek at a ref git cannot read is refused with invalid_board_edit naming path@ref and git\'s complaint, and nothing is saved', async ($, on) => {
+  const h = harness(on)
+  // The worktree has the file, so only the git read can refuse it.
+  h.files.set('/work/src/sum.ts', SUM)
+  await boot($)
+  const boardId = await create($, 'Before')
+
+  const refused = await board($, { action: 'edit', board_id: boardId, edits: [PEEK_AT('v9')] })
+  expect(refused.isError).toBe(true)
+  expect(refused.value.error).toEqual({
+    code: 'invalid_board_edit',
+    message: 'code_peek src/sum.ts@v9: git show could not read it (fatal: the test git knows no show v9:./src/sum.ts)',
+  })
+  expect(savedBoards(h)[0]?.blocks).toEqual([])
+})
+
+test('a code_peek at a ref past the end of the file as git holds it names the ref and that version\'s line count', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/src/sum.ts', SUM)
+  h.control.git.set('show HEAD~1:./src/sum.ts', OLD_SUM)
+  await boot($)
+  const boardId = await create($, 'Before')
+
+  // Lines 2-4 exist in the worktree's five, but HEAD~1 held three.
+  const past = await board($, { action: 'edit', board_id: boardId, edits: [PEEK_AT('HEAD~1', 4)] })
+  expect(past.value.error).toEqual({
+    code: 'invalid_board_edit',
+    message: 'code_peek src/sum.ts@HEAD~1: lines 2-4 reach past the end of the file, which has 3 lines',
+  })
+})
+
+// What git diff HEAD~1 -- :(literal)src/sum.ts prints for the change from OLD_SUM to SUM, one entry per line.
+const PATCH = [
+  'diff --git a/src/sum.ts b/src/sum.ts',
+  '--- a/src/sum.ts',
+  '+++ b/src/sum.ts',
+  '@@ -1,3 +1,5 @@',
+  ' export function sum(values: number[]): number {',
+  '-  return values.reduce((total, value) => total + value, 0)',
+  '+  let total = 0',
+  '+  for (const value of values) total += value',
+  '+  return total',
+  ' }',
+]
+const DIFF = (ref: string, path?: string) => ({ op: 'insert', block: { type: 'diff', ref, ...(path ? { path } : {}) } })
+
+test('a diff insert saves the lines git diff printed for the ref and path, read from the project root', async ($, on) => {
+  const h = harness(on)
+  h.control.git.set('diff --no-color --no-ext-diff HEAD~1 -- :(literal)src/sum.ts', `${PATCH.join('\n')}\n`)
+  await boot($)
+  const boardId = await create($, 'Change')
+
+  const edited = await board($, { action: 'edit', board_id: boardId, edits: [DIFF('HEAD~1', 'src/sum.ts')] })
+  expect(edited).toMatchObject({ isError: false, value: { inserted: ['b1'] } })
+  expect(savedBoards(h)[0]?.blocks[0]).toEqual({ id: 'b1', type: 'diff', ref: 'HEAD~1', path: 'src/sum.ts', lines: PATCH })
+  expect(h.processes.filter(e => e.argv[0] === 'git').map(e => e.init?.cwd)).toEqual(['/work'])
+})
+
+test('a diff of a ref git does not know is refused with invalid_board_edit naming the diff and git\'s complaint, and nothing is saved', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const boardId = await create($, 'Change')
+
+  const refused = await board($, { action: 'edit', board_id: boardId, edits: [DIFF('nope', 'src/sum.ts')] })
+  expect(refused.isError).toBe(true)
+  expect(refused.value.error).toEqual({
+    code: 'invalid_board_edit',
+    message: 'diff nope src/sum.ts: git diff could not read it (fatal: the test git knows no diff --no-color --no-ext-diff nope -- :(literal)src/sum.ts)',
+  })
+  expect(savedBoards(h)[0]?.blocks).toEqual([])
+})
+
+test('an empty diff is refused because nothing differs, and nothing is saved', async ($, on) => {
+  const h = harness(on)
+  h.control.git.set('diff --no-color --no-ext-diff HEAD -- :(literal)src/sum.ts', '')
+  await boot($)
+  const boardId = await create($, 'Change')
+
+  const refused = await board($, { action: 'edit', board_id: boardId, edits: [DIFF('HEAD', 'src/sum.ts')] })
+  expect(refused.isError).toBe(true)
+  expect(refused.value.error).toMatchObject({ code: 'invalid_board_edit', message: expect.stringContaining('is empty; nothing differs') })
+  expect(savedBoards(h)[0]?.blocks).toEqual([])
+})
+
+test('an update that points a diff at another ref runs git diff again and saves the new lines', async ($, on) => {
+  const h = harness(on)
+  h.control.git.set('diff --no-color --no-ext-diff main', 'diff --git a/a.ts b/a.ts\n-old\n+new\n')
+  h.control.git.set('diff --no-color --no-ext-diff main..feature', 'diff --git a/b.ts b/b.ts\n+added\n')
+  await boot($)
+  const boardId = await create($, 'Change')
+  await board($, { action: 'edit', board_id: boardId, edits: [DIFF('main')] })
+  expect(savedBoards(h)[0]?.blocks[0]).toMatchObject({ ref: 'main', lines: ['diff --git a/a.ts b/a.ts', '-old', '+new'] })
+
+  const updated = await board($, { action: 'edit', board_id: boardId, edits: [{ op: 'update', id: 'b1', changes: { ref: 'main..feature' } }] })
+  expect(updated.isError).toBe(false)
+  expect(savedBoards(h)[0]?.blocks[0]).toEqual({ id: 'b1', type: 'diff', ref: 'main..feature', lines: ['diff --git a/b.ts b/b.ts', '+added'] })
+})
+
 test('list returns this session\'s boards and an unknown board_id is unknown_board', async ($, on) => {
   harness(on)
   await boot($)

@@ -1,5 +1,5 @@
 import type {
-  Block, Board, CalloutBlock, CodeBlock, CodePeekBlock, FlowBlock, FlowNode, FlowNodeKind, SectionBlock, SequenceBlock, SequenceStep, TableBlock, TraceBlock,
+  Block, Board, CalloutBlock, CodeBlock, CodePeekBlock, DiffBlock, FlowBlock, FlowNode, FlowNodeKind, SectionBlock, SequenceBlock, SequenceStep, TableBlock, TraceBlock,
 } from './board-types.ts'
 
 // What a board becomes when it leaves the pane: one markdown document the model can read back or quote. Each block keeps its
@@ -17,6 +17,7 @@ function blockLines(block: Block): string[] {
     case 'code_peek': return codePeekLines(block)
     case 'code': return codeLines(block)
     case 'trace': return traceLines(block)
+    case 'diff': return diffLines(block)
     case 'flow': return flowLines(block)
     case 'sequence': return sequenceLines(block)
   }
@@ -63,7 +64,8 @@ function tableLines(block: TableBlock): string[] {
 }
 
 function codePeekLines(block: CodePeekBlock): string[] {
-  return [...titled(block), `\`${block.path}\` (L${block.start}–L${block.end})`, ...fenced(block.lines), ...noted(block.note)]
+  const range = `L${block.start}–L${block.end}`
+  return [...titled(block), `\`${block.path}\` (${block.ref ? `${range} at ${block.ref}` : range})`, ...fenced(block.lines), ...noted(block.note)]
 }
 
 function codeLines(block: CodeBlock): string[] {
@@ -72,6 +74,11 @@ function codeLines(block: CodeBlock): string[] {
 
 function traceLines(block: TraceBlock): string[] {
   return [...titled(block), `\`${block.node} · ${block.part}\``, ...fenced(block.lines), ...noted(block.note)]
+}
+
+function diffLines(block: DiffBlock): string[] {
+  const scope = block.path ? `${block.ref} · ${block.path}` : block.ref
+  return [...titled(block), `\`${scope}\``, ...fenced(block.lines, 'diff'), ...noted(block.note)]
 }
 
 // A quote ends a mermaid label, so it becomes the other quote.

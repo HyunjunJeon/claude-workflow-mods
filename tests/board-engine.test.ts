@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from '../hooks/engine/board-spec.ts'
-import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded } from '../hooks/engine/board.ts'
+import { applyEdits, boardForModel, diffKey, diffsNeeded, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded } from '../hooks/engine/board.ts'
+import { boardToMarkdown } from '../hooks/engine/board-export.ts'
 import type { Block, BlockInput, Board, BoardEdit, BoardFile, TracePart } from '../hooks/engine/board-types.ts'
 import { TOOL_DESCRIPTION_LIMIT } from '../hooks/engine/tool-spec.ts'
 import type { Result } from '../hooks/engine/types.ts'
@@ -8,27 +9,39 @@ import type { Result } from '../hooks/engine/types.ts'
 const NOW = 1_000
 const NO_PEEKS: ReadonlyMap<string, string[]> = new Map()
 const NO_TRACES: ReadonlyMap<string, string[]> = new Map()
+const NO_DIFFS: ReadonlyMap<string, string[]> = new Map()
 
 function boardOf(blocks: Block[] = [], nextId = blocks.length + 1): Board {
   return { boardId: 'board_1', sessionId: 'sess', title: 'Plan', createdAt: 1, updatedAt: 1, nextId, blocks }
 }
 
-function apply(board: Board, edits: BoardEdit[], peeks: ReadonlyMap<string, string[]> = NO_PEEKS, traces: ReadonlyMap<string, string[]> = NO_TRACES) {
-  return applyEdits(board, edits, { now: NOW, peeks, traces })
+function apply(
+  board: Board,
+  edits: BoardEdit[],
+  peeks: ReadonlyMap<string, string[]> = NO_PEEKS,
+  traces: ReadonlyMap<string, string[]> = NO_TRACES,
+  diffs: ReadonlyMap<string, string[]> = NO_DIFFS,
+) {
+  return applyEdits(board, edits, { now: NOW, peeks, traces, diffs })
 }
 
 function insert(block: BlockInput, afterId?: string): BoardEdit {
   return afterId === undefined ? { op: 'insert', block } : { op: 'insert', block, afterId }
 }
 
-// The text a host read for src/a.ts lines start..end: "line <n>" for line n.
-function fileText(path: string, start: number, end: number): ReadonlyMap<string, string[]> {
-  return new Map([[peekKey({ path, start, end }), Array.from({ length: end - start + 1 }, (_, i) => `line ${start + i}`)]])
+// The text a host read for src/a.ts lines start..end, from the worktree or at a git ref: "line <n>" for line n.
+function fileText(path: string, start: number, end: number, ref?: string): ReadonlyMap<string, string[]> {
+  return new Map([[peekKey({ path, ...(ref ? { ref } : {}), start, end }), Array.from({ length: end - start + 1 }, (_, i) => `line ${start + i}`)]])
 }
 
 // The text a host read from a run checkpoint for one part of one node.
 function runText(run: string, node: string, part: TracePart, lines: string[]): ReadonlyMap<string, string[]> {
   return new Map([[traceKey({ run, node, part }), lines]])
+}
+
+// The output a host read from git for one diff: the whole diff of a ref, or the part for one path.
+function gitText(ref: string, path: string | undefined, lines: string[]): ReadonlyMap<string, string[]> {
+  return new Map([[diffKey({ ref, ...(path ? { path } : {}) }), lines]])
 }
 
 function accepted<T>(result: Result<T>): T {
@@ -51,8 +64,12 @@ const flowOf = (edges: { from: string; to: string }[]): BlockInput => ({
 const peekOf = (path: string, start: number, end: number): BlockInput => ({ type: 'code_peek', path, start, end })
 const snippetOf = (code: string): BlockInput => ({ type: 'code', code })
 const traceOf = (run: string, node: string, part: TracePart): BlockInput => ({ type: 'trace', run, node, part })
+const peekAt = (ref: string, path = 'src/a.ts', start = 3, end = 5): BlockInput => ({ type: 'code_peek', path, ref, start, end })
+const diffOf = (ref: string, path?: string): BlockInput => ({ type: 'diff', ref, ...(path ? { path } : {}) })
 // Raw input, as the model sends it: parseEdits is where a bad block is refused before any file or run is read.
 const traceEdit = (fields: Record<string, unknown>) => parseEdits([{ op: 'insert', block: { type: 'trace', run: 'dag_1', node: 'build', part: 'output', ...fields } }])
+const diffEdit = (fields: Record<string, unknown>) => parseEdits([{ op: 'insert', block: { type: 'diff', ref: 'main', ...fields } }])
+const peekEdit = (fields: Record<string, unknown>) => parseEdits([{ op: 'insert', block: { type: 'code_peek', path: 'src/a.ts', start: 1, end: 2, ...fields } }])
 const textLines = (count: number, width: number) => Array.from({ length: count }, () => 'x'.repeat(width)).join('\n')
 
 test('insert adds a section with the next id and stamps updatedAt', () => {
@@ -294,6 +311,42 @@ test('a code_peek keeps each line to 240 characters', () => {
   expect(block?.type === 'code_peek' && block.lines[0]?.length).toBe(240)
 })
 
+test('insert adds a code_peek at a git ref, naming the ref and holding the lines read at it', () => {
+  const { board } = accepted(apply(boardOf(), [insert(peekAt(' main~2 '))], fileText('src/a.ts', 3, 5, 'main~2')))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'code_peek', path: 'src/a.ts', ref: 'main~2', start: 3, end: 5, lines: ['line 3', 'line 4', 'line 5'] }])
+})
+
+test('a code_peek ref is a git ref or an a..b range of at most 64 characters, never an option or a path', () => {
+  for (const ref of ['main', 'HEAD~3', 'origin/main', 'v1.2.3', 'main..feature', 'main...feature', '@{u}', 'HEAD^{commit}', 'a'.repeat(64)]) {
+    expect(accepted(peekEdit({ ref }))).toHaveLength(1)
+  }
+  for (const ref of ['-x', '--output=/tmp/x', 'a b', 'a:b', 'a;b', '$(id)', 'a\nb', '.hidden', 'a'.repeat(65)]) {
+    const error = refused(peekEdit({ ref }))
+    expect(error.code).toBe('invalid_board_edit')
+    expect(error.message).toContain('edits[0]: ref')
+  }
+  expect(refused(peekEdit({ ref: 7 })).message).toBe('edits[0]: ref: must be a string')
+})
+
+test('a code_peek read at a ref that the host could not read is refused, naming the ref', () => {
+  const error = refused(apply(boardOf(), [insert(peekAt('v9', 'src/gone.ts', 4, 9))], fileText('src/gone.ts', 4, 9)))
+  expect(error.message).toContain('src/gone.ts#L4-L9@v9')
+  expect(error.message).toContain('at that ref')
+})
+
+test('update of a code_peek ref reads the lines again, and "" returns it to the worktree', () => {
+  const start = boardOf([{ id: 'b1', type: 'code_peek', path: 'src/a.ts', start: 3, end: 5, lines: ['old 3', 'old 4', 'old 5'] }])
+  const pinned = accepted(apply(start, [{ op: 'update', id: 'b1', changes: { ref: 'v1' } }], fileText('src/a.ts', 3, 5, 'v1'))).board
+  expect(pinned.blocks).toEqual([{ id: 'b1', type: 'code_peek', path: 'src/a.ts', ref: 'v1', start: 3, end: 5, lines: ['line 3', 'line 4', 'line 5'] }])
+  // Without the text for the new ref the old lines must not survive as if they came from it.
+  const stale = refused(apply(start, [{ op: 'update', id: 'b1', changes: { ref: 'v2' } }]))
+  expect(stale.message).toContain('src/a.ts#L3-L5@v2')
+  const noted = accepted(apply(pinned, [{ op: 'update', id: 'b1', changes: { note: 'why' } }])).board
+  expect(noted.blocks[0]).toEqual({ ...pinned.blocks[0], note: 'why' })
+  const back = accepted(apply(pinned, [{ op: 'update', id: 'b1', changes: { ref: '' } }], new Map([['src/a.ts#L3-L5', ['wt 3', 'wt 4', 'wt 5']]]))).board
+  expect(back.blocks).toEqual([{ id: 'b1', type: 'code_peek', path: 'src/a.ts', start: 3, end: 5, lines: ['wt 3', 'wt 4', 'wt 5'] }])
+})
+
 test('insert adds a code block that keeps its text as sent, indentation and trailing newline included', () => {
   const code = '  if (ok) {\n    go()\n  }\n'
   const { board } = accepted(apply(boardOf(), [insert({ type: 'code', title: ' Fix ', language: ' ts ', code, note: ' why ' })]))
@@ -449,6 +502,113 @@ test('replace turns a block into a trace with the host lines, and a trace into a
   expect(coded.blocks).toEqual([{ id: 'b1', type: 'code', code: 'x' }])
 })
 
+test('insert adds a diff with the lines the host read from git, trimming its strings', () => {
+  const edit = insert({ type: 'diff', title: ' Routing ', ref: ' main~1 ', path: ' hooks/a.ts ', note: ' why ' })
+  const { board } = accepted(apply(boardOf(), [edit], NO_PEEKS, NO_TRACES, gitText('main~1', 'hooks/a.ts', ['@@ -1 +1 @@', '-old', '+new'])))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'diff', title: 'Routing', ref: 'main~1', path: 'hooks/a.ts', lines: ['@@ -1 +1 @@', '-old', '+new'], note: 'why' }])
+})
+
+test('a diff without a path covers the whole ref, and "" for the path means none', () => {
+  const read = gitText('main..feature', undefined, ['diff --git a/x b/x'])
+  const whole = accepted(apply(boardOf(), [insert(diffOf('main..feature'))], NO_PEEKS, NO_TRACES, read)).board
+  expect(whole.blocks).toEqual([{ id: 'b1', type: 'diff', ref: 'main..feature', lines: ['diff --git a/x b/x'] }])
+  expect(accepted(apply(boardOf(), [insert({ type: 'diff', ref: 'main..feature', path: '' })], NO_PEEKS, NO_TRACES, read)).board.blocks).toEqual(whole.blocks)
+})
+
+test('a diff needs a ref that is a git ref or an a..b range, and refuses one that git could read as an option', () => {
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'diff' } }])).message).toBe('edits[0]: ref: must be a string')
+  expect(refused(diffEdit({ ref: '   ' })).message).toBe('edits[0]: ref: must be 1-64 characters, got 0')
+  expect(refused(diffEdit({ ref: 'r'.repeat(65) })).message).toBe('edits[0]: ref: must be 1-64 characters, got 65')
+  for (const ref of ['-p', '--stat', 'a b', 'a:b', 'HEAD;ls', '.git']) expect(refused(diffEdit({ ref })).message).toContain('edits[0]: ref: must be a git ref')
+  for (const ref of ['main', 'HEAD~3', 'origin/main..HEAD', 'abc123', 'v1.0']) expect(accepted(diffEdit({ ref }))).toHaveLength(1)
+})
+
+test('a diff path stays inside the project and outside .claude, like a code_peek path', () => {
+  for (const path of ['../secrets.txt', 'src/../../x', '/etc/passwd', '.claude/dag/runs/x.json', 'a/.CLAUDE/b', 'C:\\x']) {
+    const error = refused(diffEdit({ path }))
+    expect(error.code).toBe('invalid_board_edit')
+    expect(error.message).toContain('edits[0]: path')
+  }
+  expect(refused(diffEdit({ path: 'p'.repeat(301) })).message).toContain('edits[0]: path')
+  expect(refused(diffEdit({ path: 7 })).message).toBe('edits[0]: path: must be a string')
+})
+
+test('a diff takes no range, no lines and no code from the model, and limits its title and note', () => {
+  for (const field of ['start', 'end', 'lines', 'code', 'run']) {
+    expect(refused(diffEdit({ [field]: 1 })).message).toContain(`edits[0]: ${field}: unknown field`)
+  }
+  expect(refused(diffEdit({ note: 'n'.repeat(201) })).message).toContain('edits[0]: note')
+  expect(refused(diffEdit({ title: 't'.repeat(81) })).message).toContain('edits[0]: title')
+})
+
+test('a diff whose git output was not read is refused, naming the ref and path, and nothing is applied', () => {
+  const start = boardOf([{ id: 'b1', ...section }])
+  const before = structuredClone(start)
+  const error = refused(apply(start, [insert(callout), insert(diffOf('v9', 'src/a.ts'))], NO_PEEKS, NO_TRACES, gitText('v9', undefined, ['x'])))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message.startsWith('edits[1]: ref: ')).toBe(true)
+  expect(error.message).toContain('v9::src/a.ts')
+  expect(start).toEqual(before)
+})
+
+test('a diff with no changes is refused rather than drawn as an empty quote', () => {
+  const error = refused(apply(boardOf(), [insert(diffOf('main'))], NO_PEEKS, NO_TRACES, gitText('main', undefined, [])))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('edits[0]: ref')
+  expect(error.message).toContain('is empty')
+})
+
+test('a diff keeps the first 39 lines plus a dropped-count marker, and cuts each to 240 characters', () => {
+  const long = Array.from({ length: 55 }, (_, i) => `${i}:${'y'.repeat(500)}`)
+  const { board } = accepted(apply(boardOf(), [insert(diffOf('main'))], NO_PEEKS, NO_TRACES, gitText('main', undefined, long)))
+  const block = board.blocks[0]
+  expect(block?.type === 'diff' && block.lines).toHaveLength(40)
+  expect(block?.type === 'diff' && block.lines[0]?.length).toBe(240)
+  expect(block?.type === 'diff' && block.lines[38]?.startsWith('38:')).toBe(true)
+  expect(block?.type === 'diff' && block.lines[39]).toBe('… +16 more lines')
+})
+
+test('a diff of exactly 40 lines needs no marker', () => {
+  const lines = Array.from({ length: 40 }, (_, i) => `line ${i}`)
+  const { board } = accepted(apply(boardOf(), [insert(diffOf('main'))], NO_PEEKS, NO_TRACES, gitText('main', undefined, lines)))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'diff', ref: 'main', lines }])
+})
+
+test('update of a diff title or note keeps its lines, and of ref or path runs git again', () => {
+  const start = boardOf([{ id: 'b1', type: 'diff', ref: 'main', path: 'src/a.ts', lines: ['-old', '+new'] }])
+  // No git output is supplied here: a title or note update must not need any.
+  const noted = accepted(apply(start, [{ op: 'update', id: 'b1', changes: { title: 'Change', note: 'why' } }])).board
+  expect(noted.blocks).toEqual([{ id: 'b1', type: 'diff', title: 'Change', ref: 'main', path: 'src/a.ts', lines: ['-old', '+new'], note: 'why' }])
+  const moved = accepted(apply(noted, [{ op: 'update', id: 'b1', changes: { ref: 'v1' } }], NO_PEEKS, NO_TRACES, gitText('v1', 'src/a.ts', ['+v1']))).board
+  expect(moved.blocks[0]).toEqual({ id: 'b1', type: 'diff', title: 'Change', ref: 'v1', path: 'src/a.ts', lines: ['+v1'], note: 'why' })
+  const whole = accepted(apply(moved, [{ op: 'update', id: 'b1', changes: { path: '' } }], NO_PEEKS, NO_TRACES, gitText('v1', undefined, ['+all']))).board
+  expect(whole.blocks[0]).toEqual({ id: 'b1', type: 'diff', title: 'Change', ref: 'v1', lines: ['+all'], note: 'why' })
+})
+
+test('update of a diff ref without the new git output is refused and the board is not changed', () => {
+  const start = boardOf([{ id: 'b1', type: 'diff', ref: 'main', lines: ['+x'] }])
+  const before = structuredClone(start)
+  const error = refused(apply(start, [{ op: 'update', id: 'b1', changes: { ref: 'v2', path: 'src/b.ts' } }]))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('v2::src/b.ts')
+  expect(start).toEqual(before)
+})
+
+test('update refuses a diff change of lines or type', () => {
+  const start = boardOf([{ id: 'b1', type: 'diff', ref: 'main', lines: ['+x'] }])
+  for (const field of ['lines', 'type']) {
+    const error = refused(apply(start, [{ op: 'update', id: 'b1', changes: { [field]: field === 'lines' ? ['+y'] : 'code' } }]))
+    expect(error.message).toContain(`edits[0]: ${field}: cannot be changed`)
+  }
+})
+
+test('replace turns a code block into a diff with the host lines, and a diff into a section without any', () => {
+  const start = boardOf([{ id: 'b1', type: 'code', code: 'x' }])
+  const drawn = accepted(apply(start, [{ op: 'replace', id: 'b1', block: diffOf('main') }], NO_PEEKS, NO_TRACES, gitText('main', undefined, ['+a']))).board
+  expect(drawn.blocks).toEqual([{ id: 'b1', type: 'diff', ref: 'main', lines: ['+a'] }])
+  expect(accepted(apply(drawn, [{ op: 'replace', id: 'b1', block: section }])).board.blocks).toEqual([{ id: 'b1', ...section }])
+})
+
 test('a sequence needs 2 to 8 participants and steps between them, and allows a step to itself', () => {
   const people = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `p${i}`, label: `P${i}` }))
   const steps = [{ from: 'p0', to: 'p0', label: 'think' }]
@@ -513,6 +673,58 @@ test('peekKey joins path and range', () => {
   expect(peekKey({ path: 'hooks/register.ts', start: 12, end: 30 })).toBe('hooks/register.ts#L12-L30')
 })
 
+test('peekKey adds the ref after the range, and no ref, "" or a different ref gives another key', () => {
+  const range = { path: 'hooks/register.ts', start: 12, end: 30 }
+  expect(peekKey({ ...range, ref: 'main~2' })).toBe('hooks/register.ts#L12-L30@main~2')
+  expect(peekKey({ ...range, ref: 'v1' })).not.toBe(peekKey({ ...range, ref: 'v2' }))
+  expect(peekKey({ ...range, ref: 'v1' })).not.toBe(peekKey(range))
+  // A worktree file named like a path plus a ref must not take the key of that ref's version.
+  expect(peekKey({ path: 'logo@2x.png', start: 1, end: 2 })).not.toBe(peekKey({ path: 'logo', ref: '2x.png', start: 1, end: 2 }))
+})
+
+test('diffKey is the ref for a whole diff and ref::path for one file', () => {
+  expect(diffKey({ ref: 'main..feature' })).toBe('main..feature')
+  expect(diffKey({ ref: 'main', path: 'hooks/register.ts' })).toBe('main::hooks/register.ts')
+  expect(diffKey({ ref: 'main', path: 'src/a.ts' })).not.toBe(diffKey({ ref: 'main', path: 'src/b.ts' }))
+})
+
+test('peeksNeeded keeps two quotes of one range at different refs apart, and both are drawn from their own text', () => {
+  const board = boardOf([{ id: 'b1', ...section }])
+  const edits: BoardEdit[] = [insert(peekAt('v1')), insert(peekAt('v2')), insert(peekOf('src/a.ts', 3, 5)), insert(peekAt('v1'))]
+  expect(peeksNeeded(board, edits)).toEqual([
+    { path: 'src/a.ts', ref: 'v1', start: 3, end: 5 },
+    { path: 'src/a.ts', ref: 'v2', start: 3, end: 5 },
+    { path: 'src/a.ts', start: 3, end: 5 },
+  ])
+  const read = new Map([
+    ['src/a.ts#L3-L5@v1', ['one 3', 'one 4', 'one 5']],
+    ['src/a.ts#L3-L5@v2', ['two 3', 'two 4', 'two 5']],
+  ])
+  const { board: drawn } = accepted(apply(boardOf(), edits.slice(0, 2), read))
+  expect(drawn.blocks.map(block => block.type === 'code_peek' && block.lines[0])).toEqual(['one 3', 'two 3'])
+})
+
+test('peeksNeeded asks again when an update changes only the ref of a code_peek, and drops the ref when "" clears it', () => {
+  const board = boardOf([{ id: 'b1', type: 'code_peek', path: 'src/a.ts', ref: 'v1', start: 1, end: 3, lines: ['x', 'y', 'z'] }])
+  expect(peeksNeeded(board, [{ op: 'update', id: 'b1', changes: { ref: 'v2' } }])).toEqual([{ path: 'src/a.ts', ref: 'v2', start: 1, end: 3 }])
+  expect(peeksNeeded(board, [{ op: 'update', id: 'b1', changes: { start: 2 } }])).toEqual([{ path: 'src/a.ts', ref: 'v1', start: 2, end: 3 }])
+  const cleared = peeksNeeded(board, [{ op: 'update', id: 'b1', changes: { ref: '' } }])
+  expect(cleared).toEqual([{ path: 'src/a.ts', start: 1, end: 3 }])
+  expect('ref' in (cleared[0] ?? {})).toBe(false)
+})
+
+test('peeksNeeded never asks for a ref the engine would refuse', () => {
+  const board = boardOf([{ id: 'b1', type: 'code_peek', path: 'src/a.ts', start: 1, end: 3, lines: ['x', 'y', 'z'] }])
+  const edits: BoardEdit[] = [
+    insert(peekAt('--output=/tmp/x')),
+    insert(peekAt('a:b')),
+    insert(peekAt('r'.repeat(65))),
+    { op: 'update', id: 'b1', changes: { ref: '-p' } },
+    { op: 'update', id: 'b1', changes: { ref: 7 } },
+  ]
+  expect(peeksNeeded(board, edits)).toEqual([])
+})
+
 test('traceKey joins run, node and part', () => {
   expect(traceKey({ run: 'dag_1', node: 'build', part: 'output' })).toBe('dag_1#build#output')
 })
@@ -561,6 +773,59 @@ test('tracesNeeded leaves the blocks of other types to peeksNeeded and never ask
   ]
   expect(tracesNeeded(board, edits)).toEqual([])
   expect(peeksNeeded(board, [insert(traceOf('dag_1', 'build', 'output'))])).toEqual([])
+})
+
+test('diffsNeeded asks for the diffs an insert or a replace brings in, once each, with ref and path trimmed', () => {
+  const board = boardOf([{ id: 'b1', ...section }])
+  const edits: BoardEdit[] = [
+    insert(diffOf('main')),
+    insert(section),
+    { op: 'replace', id: 'b1', block: diffOf('v1', 'src/a.ts') },
+    insert(diffOf(' main ')),
+    insert({ type: 'diff', ref: ' v1 ', path: ' src/a.ts ' }),
+    insert(diffOf('v1', 'src/b.ts')),
+    insert({ type: 'diff', ref: 'main', path: '' }),
+  ]
+  expect(diffsNeeded(board, edits)).toEqual([
+    { ref: 'main' },
+    { ref: 'v1', path: 'src/a.ts' },
+    { ref: 'v1', path: 'src/b.ts' },
+  ])
+})
+
+test('diffsNeeded asks for an updated diff with the unchanged fields filled in, once, and only for ref or path', () => {
+  const board = boardOf([
+    { id: 'b1', type: 'diff', ref: 'main', path: 'src/a.ts', lines: ['+x'] },
+    { id: 'b2', type: 'code_peek', path: 'src/a.ts', start: 1, end: 1, lines: ['x'] },
+  ])
+  expect(diffsNeeded(board, [{ op: 'update', id: 'b1', changes: { ref: 'v1' } }])).toEqual([{ ref: 'v1', path: 'src/a.ts' }])
+  expect(diffsNeeded(board, [{ op: 'update', id: 'b1', changes: { path: 'src/b.ts' } }])).toEqual([{ ref: 'main', path: 'src/b.ts' }])
+  expect(diffsNeeded(board, [{ op: 'update', id: 'b1', changes: { path: '' } }])).toEqual([{ ref: 'main' }])
+  const twice: BoardEdit[] = [{ op: 'update', id: 'b1', changes: { ref: 'v1' } }, { op: 'update', id: 'b1', changes: { ref: 'v1', note: 'again' } }]
+  expect(diffsNeeded(board, twice)).toEqual([{ ref: 'v1', path: 'src/a.ts' }])
+  expect(diffsNeeded(board, [{ op: 'update', id: 'b1', changes: { title: 'T', note: 'why' } }])).toEqual([])
+  expect(diffsNeeded(board, [{ op: 'update', id: 'b2', changes: { ref: 'v1' } }])).toEqual([])
+  expect(diffsNeeded(board, [{ op: 'update', id: 'b9', changes: { ref: 'v1' } }])).toEqual([])
+})
+
+test('diffsNeeded leaves the other types to their own collectors and never asks for a diff the engine would refuse', () => {
+  const board = boardOf([{ id: 'b1', type: 'diff', ref: 'main', lines: ['+x'] }])
+  const edits: BoardEdit[] = [
+    insert(peekAt('v1')),
+    insert(traceOf('dag_1', 'build', 'output')),
+    insert(diffOf('-p')),
+    insert(diffOf('a b')),
+    insert(diffOf('r'.repeat(65))),
+    insert(diffOf('main', '../x')),
+    insert(diffOf('main', '.claude/dag/runs/r.json')),
+    { op: 'update', id: 'b1', changes: { ref: 7 } },
+    { op: 'update', id: 'b1', changes: { ref: '' } },
+    { op: 'update', id: 'b1', changes: { path: '../../etc/passwd' } },
+    { op: 'update', id: 'b1', changes: { path: 7 } },
+  ]
+  expect(diffsNeeded(board, edits)).toEqual([])
+  expect(peeksNeeded(board, [insert(diffOf('main'))])).toEqual([])
+  expect(tracesNeeded(board, [insert(diffOf('main'))])).toEqual([])
 })
 
 test('parseEdits returns typed edits and an optional afterId', () => {
@@ -639,6 +904,19 @@ test('boardForModel replaces the lines of a trace with their count and returns a
   expect(shown.blocks).toEqual([
     { id: 'b1', type: 'code', language: 'ts', code },
     { id: 'b2', type: 'trace', run: 'dag_1', node: 'build', part: 'error', lineCount: 3, note: 'n' },
+  ])
+  expect(JSON.stringify(shown)).not.toContain('"lines"')
+})
+
+test('boardForModel replaces the lines of a diff with their count, and keeps the ref of a code_peek', () => {
+  const board = boardOf([
+    { id: 'b1', type: 'diff', ref: 'main', path: 'src/a.ts', lines: ['-x', '+y', '+z'], note: 'n' },
+    { id: 'b2', type: 'code_peek', path: 'src/a.ts', ref: 'v1', start: 1, end: 2, lines: ['x', 'y'] },
+  ])
+  const shown = boardForModel(board)
+  expect(shown.blocks).toEqual([
+    { id: 'b1', type: 'diff', ref: 'main', path: 'src/a.ts', lineCount: 3, note: 'n' },
+    { id: 'b2', type: 'code_peek', path: 'src/a.ts', ref: 'v1', start: 1, end: 2, lineCount: 2 },
   ])
   expect(JSON.stringify(shown)).not.toContain('"lines"')
 })
@@ -722,6 +1000,47 @@ test('parseBoardFile checks a stored code block and trace again: size, unknown p
   expect(refused(parseBoardFile(richFileText(0, { lines: ['x'] }), 'sess')).message).toContain('boards[0].blocks[0].lines: unknown field')
   expect(refused(parseBoardFile(richFileText(1, { part: 'log' }), 'sess')).message).toContain('boards[0].blocks[1].part')
   expect(refused(parseBoardFile(richFileText(1, { run: '' }), 'sess')).message).toContain('boards[0].blocks[1].run')
+})
+
+// A board of one code_peek at a ref and one diff of a path, as the engine saves them.
+function pinnedFile(): BoardFile {
+  const edits = [insert(peekAt('v1')), insert(diffOf('main..feature', 'src/a.ts'))]
+  const board = accepted(apply(boardOf(), edits, fileText('src/a.ts', 3, 5, 'v1'), NO_TRACES, gitText('main..feature', 'src/a.ts', ['@@ -1 +1 @@', '-old', '+new']))).board
+  return { schemaVersion: 1, sessionId: 'sess', boards: [board] }
+}
+
+function pinnedFileText(index: number, patch: Record<string, unknown>): string {
+  const file = pinnedFile()
+  const board = file.boards[0]!
+  return JSON.stringify({ ...file, boards: [{ ...board, blocks: board.blocks.map((block, at) => (at === index ? { ...block, ...patch } : block)) }] })
+}
+
+test('parseBoardFile reads back a diff and a code_peek at a ref with their lines', () => {
+  const file = pinnedFile()
+  expect(file.boards[0]?.blocks).toEqual([
+    { id: 'b1', type: 'code_peek', path: 'src/a.ts', ref: 'v1', start: 3, end: 5, lines: ['line 3', 'line 4', 'line 5'] },
+    { id: 'b2', type: 'diff', ref: 'main..feature', path: 'src/a.ts', lines: ['@@ -1 +1 @@', '-old', '+new'] },
+  ])
+  expect(accepted(parseBoardFile(JSON.stringify(file), 'sess'))).toEqual(file)
+})
+
+test('parseBoardFile refuses stored diff lines that are missing, empty, not text, over 40 or over 240 characters', () => {
+  const tooMany = Array.from({ length: 41 }, () => 'x')
+  for (const lines of [undefined, [], '+x', [1], tooMany, ['x'.repeat(241)]]) {
+    const error = refused(parseBoardFile(pinnedFileText(1, { lines }), 'sess'))
+    expect(error.code).toBe('invalid_board_file')
+    expect(error.message).toContain('boards[0].blocks[1].lines')
+  }
+  expect(accepted(parseBoardFile(pinnedFileText(1, { lines: Array.from({ length: 40 }, () => 'x'.repeat(240)) }), 'sess')).boards).toHaveLength(1)
+})
+
+test('parseBoardFile checks a stored diff and a stored ref again: option-like or missing ref, escaping path, stray range', () => {
+  expect(refused(parseBoardFile(pinnedFileText(1, { ref: '--stat' }), 'sess')).message).toContain('boards[0].blocks[1].ref')
+  expect(refused(parseBoardFile(pinnedFileText(1, { ref: undefined }), 'sess')).message).toContain('boards[0].blocks[1].ref')
+  expect(refused(parseBoardFile(pinnedFileText(1, { path: '../x' }), 'sess')).message).toContain('boards[0].blocks[1].path')
+  expect(refused(parseBoardFile(pinnedFileText(1, { start: 1 }), 'sess')).message).toContain('boards[0].blocks[1].start: unknown field')
+  expect(refused(parseBoardFile(pinnedFileText(0, { ref: 'a b' }), 'sess')).message).toContain('boards[0].blocks[0].ref')
+  expect(refused(parseBoardFile(pinnedFileText(0, { lines: ['only one'] }), 'sess')).message).toContain('boards[0].blocks[0].lines')
 })
 
 const RUN_LINK = { runId: 'dag_mv6bifi0_ggt9of', facts: { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b9' } }
@@ -835,4 +1154,49 @@ test('the board input schema declares the six actions, and only action is requir
   expect(BOARD_INPUT_SCHEMA.properties.action.enum).toEqual(['create', 'edit', 'get', 'list', 'open', 'export'])
   expect(BOARD_INPUT_SCHEMA.required).toEqual(['action'])
   expect(BOARD_INPUT_SCHEMA.properties.edits.maxItems).toBe(20)
+})
+
+test('the markdown export names the ref of a code_peek and fences a diff as diff, naming its ref and path', () => {
+  const board: Board = boardOf([
+    { id: 'b1', type: 'code_peek', path: 'src/a.ts', ref: 'main~2', start: 8, end: 9, lines: ['const a = 1', 'const b = 2'] },
+    { id: 'b2', type: 'diff', title: 'Routing', ref: 'main..feature', path: 'src/a.ts', lines: ['@@ -1 +1 @@', '-old', '+new'], note: 'why' },
+    { id: 'b3', type: 'diff', ref: 'v1', lines: ['+only'] },
+  ])
+  expect(boardToMarkdown(board)).toBe([
+    '# Plan',
+    '',
+    '<!-- b1 -->',
+    '`src/a.ts` (L8–L9 at main~2)',
+    '```',
+    'const a = 1',
+    'const b = 2',
+    '```',
+    '',
+    '<!-- b2 -->',
+    '**Routing**',
+    '`main..feature · src/a.ts`',
+    '```diff',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    '```',
+    '*why*',
+    '',
+    '<!-- b3 -->',
+    '`v1`',
+    '```diff',
+    '+only',
+    '```',
+    '',
+  ].join('\n'))
+})
+
+test('the board tool description and schema name the diff block and the ref field', () => {
+  const { type, ref, path } = BOARD_INPUT_SCHEMA.properties.edits.items.properties.block.properties
+  expect(type.enum).toContain('diff')
+  expect(ref.description).toContain('diff (required)')
+  expect(path.description).toContain('diff (optional)')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('code_peek {path, ref?')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('diff {ref, path?')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('quotes a git diff the host runs')
 })

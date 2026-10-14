@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import type { Block, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../hooks/engine/board-types.ts'
-import { calloutLines, codeLines, codePeekLines, sectionLines, tableLines, traceLines, wrapText, type CalloutLabels } from '../hooks/ui/board-blocks.ts'
+import type { Block, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, DiffBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../hooks/engine/board-types.ts'
+import { calloutLines, codeLines, codePeekLines, diffLines, sectionLines, tableLines, traceLines, wrapText, type CalloutLabels } from '../hooks/ui/board-blocks.ts'
 import { buildBoardView } from '../hooks/ui/board-model.ts'
 import { width, type Line } from '../hooks/ui/text.ts'
 
@@ -17,6 +17,7 @@ const PARTS_KO: Record<TracePart, string> = { output: '출력', answer: '답변'
 const code = (body: string, extra: Partial<CodeBlock> = {}): CodeBlock => ({ id: 'b5', type: 'code', code: body, ...extra })
 const trace = (lines: string[], extra: Partial<TraceBlock> = {}): TraceBlock => ({ id: 'b6', type: 'trace', run: 'dag_mv6fveyq_y06sr2', node: 'board-render', part: 'output', lines, ...extra })
 const peek = (lines: string[], extra: Partial<CodePeekBlock> = {}): CodePeekBlock => ({ id: 'b4', type: 'code_peek', path: 'src/a.ts', start: 8, end: 7 + lines.length, lines, ...extra })
+const diff = (lines: string[], extra: Partial<DiffBlock> = {}): DiffBlock => ({ id: 'b7', type: 'diff', ref: 'main..feature', lines, ...extra })
 
 test('section shows its title in bold accent', () => {
   expect(sectionLines(section('body'), 40)[0]).toEqual([{ text: 'Plan', color: 'cyan', bold: true }])
@@ -179,6 +180,63 @@ test('code_peek shows Korean source text within the columns', () => {
   expect(text(lines[1] ?? []).endsWith('…')).toBe(true)
 })
 
+test('code_peek read from git names its ref after the path and keeps the line range last', () => {
+  const lines = codePeekLines(peek(['one', 'two'], { ref: 'HEAD~1' }), 40)
+  expect(texts(lines)).toEqual(['src/a.ts@HEAD~1:8-9', '8 │ one', '9 │ two'])
+  expect(lines[0]).toEqual([{ text: 'src/a.ts@HEAD~1:8-9', bold: true }])
+})
+
+test('code_peek with a ref and a title shows both after the bold label', () => {
+  const lines = codePeekLines(peek(['x'], { ref: 'v1.2.0', title: 'Before the rename' }), 60)
+  expect(text(lines[0] ?? [])).toBe('src/a.ts@v1.2.0:8-8 · Before the rename')
+  expect(lines[0]?.[0]).toEqual({ text: 'src/a.ts@v1.2.0:8-8', bold: true })
+})
+
+test('code_peek keeps the line range when the ref makes the label wider than the columns', () => {
+  const lines = codePeekLines(peek(['x'], { ref: 'a'.repeat(40) }), 24)
+  expect(text(lines[0] ?? []).endsWith(':8-8')).toBe(true)
+  expect(lineWidth(lines[0] ?? [])).toBe(24)
+})
+
+test('diff shows its ref in bold, the diff lines numbered from 1 with a dim gutter, and the note dim', () => {
+  const lines = diffLines(diff(['@@ -1,2 +1,2 @@', '-const a = 1', '+const a = 2'], { note: 'The default changed' }), 40)
+  expect(texts(lines)).toEqual(['main..feature', '1 │ @@ -1,2 +1,2 @@', '2 │ -const a = 1', '3 │ +const a = 2', 'The default changed'])
+  expect(lines[0]).toEqual([{ text: 'main..feature', bold: true }])
+  expect(lines[2]?.slice(0, 2)).toEqual([{ text: '2', dim: true }, { text: ' │ ', dim: true }])
+  expect(lines[4]).toEqual([{ text: 'The default changed', dim: true }])
+})
+
+test('diff scoped to a path puts the path after the ref the way git takes its arguments', () => {
+  const lines = diffLines(diff(['-a', '+b'], { ref: 'HEAD', path: 'src/a.ts' }), 40)
+  expect(texts(lines)).toEqual(['HEAD -- src/a.ts', '1 │ -a', '2 │ +b'])
+  expect(lines[0]).toEqual([{ text: 'HEAD -- src/a.ts', bold: true }])
+})
+
+test('diff adds the title after the bold ref and path', () => {
+  const lines = diffLines(diff(['+x'], { path: 'src/a.ts', title: 'What changed' }), 60)
+  expect(text(lines[0] ?? [])).toBe('main..feature -- src/a.ts · What changed')
+  expect(lines[0]?.[0]).toEqual({ text: 'main..feature -- src/a.ts', bold: true })
+})
+
+test('diff right-aligns its gutter once it passes nine lines and cuts a long line with an ellipsis', () => {
+  const rows = Array.from({ length: 10 }, (_, i) => `+row${i + 1}`)
+  rows[0] = `+${'x'.repeat(50)}`
+  const lines = diffLines(diff(rows), 20)
+  expect(text(lines[1] ?? [])).toBe(` 1 │ +${'x'.repeat(13)}…`)
+  expect(lineWidth(lines[1] ?? [])).toBe(20)
+  expect(text(lines[10] ?? [])).toBe('10 │ +row10')
+})
+
+test('diff keeps the end of a ref and path label that is wider than the columns', () => {
+  const lines = diffLines(diff(['+x'], { ref: 'release/2026-10..main', path: 'packages/very/deep/folder/file.ts' }), 24)
+  expect(text(lines[0] ?? []).endsWith('folder/file.ts')).toBe(true)
+  expect(lineWidth(lines[0] ?? [])).toBe(24)
+})
+
+test('diff lines are empty when there is no room', () => {
+  expect(diffLines(diff(['+x']), 0)).toEqual([])
+})
+
 test('wrapText breaks at spaces by cell width', () => {
   expect(wrapText('aa bb cc dd', 5)).toEqual(['aa bb', 'cc dd'])
   expect(wrapText('가나 다라 마바', 5)).toEqual(['가나', '다라', '마바'])
@@ -203,6 +261,8 @@ test('every block fits a narrow pane without throwing', () => {
     codePeekLines(peek(['\tconst 값 = 1'], { title: 'Peek', note: 'note text' }), columns),
     codeLines(code('\tconst 값 = 1\nreturn', { language: 'typescript', title: 'Snippet', note: 'note text' }), columns),
     traceLines(trace(['\tFAIL 값이 다릅니다', 'second'], { node: 'board-render', title: 'Trace', note: 'note text', part: 'verification' }), columns, PARTS_KO),
+    codePeekLines(peek(['\tconst 값 = 1'], { ref: 'release/2026-10', title: 'Past', note: 'note text' }), columns),
+    diffLines(diff(['@@ -1 +1 @@', '-\tconst 값 = 1', '+return'], { path: 'src/값.ts', title: 'Diff', note: 'note text' }), columns),
   ]
   for (const columns of [1, 2, 3, 5, 8, 13, 21]) {
     for (const lines of blocks(columns)) {
@@ -222,6 +282,8 @@ test('control characters in block text never reach the output', () => {
     codePeekLines(peek([dirty], { path: dirty, title: dirty, note: dirty }), 40),
     codeLines(code(dirty, { language: dirty, title: dirty, note: dirty }), 40),
     traceLines(trace([dirty], { node: dirty, title: dirty, note: dirty }), 40, PARTS_EN),
+    codePeekLines(peek([dirty], { ref: dirty }), 40),
+    diffLines(diff([dirty], { ref: dirty, path: dirty, title: dirty, note: dirty }), 40),
   ]
   for (const lines of rendered) expect(/[\x00-\x08\x0b-\x1f\x7f]/.test(texts(lines).join('\n'))).toBe(false)
 })
@@ -352,4 +414,24 @@ test('the board view draws code and trace blocks with their header and rows', ()
 
 test('the board view labels a trace part in Korean when the pane is Korean', () => {
   expect(viewRows(CODE_AND_TRACE, 'ko')[5]).toBe('build · 검증')
+})
+
+// The ref is git's own text, so the header reads the same in either language; only the pane's hint line is translated.
+const REF_BLOCKS: Block[] = [
+  { id: 'b1', type: 'code_peek', path: 'src/a.ts', ref: 'abc123', start: 3, end: 3, lines: ['x'] },
+  { id: 'b2', type: 'diff', ref: 'main', path: 'src/a.ts', lines: ['-old', '+new'] },
+]
+const REF_ROWS = ['[b1] code_peek', 'src/a.ts@abc123:3-3', '3 │ x', '', '[b2] diff', 'main -- src/a.ts', '1 │ -old', '2 │ +new']
+
+test('the board view draws a code_peek ref and a diff header in English', () => {
+  expect(viewRows(REF_BLOCKS, 'en').slice(0, REF_ROWS.length)).toEqual(REF_ROWS)
+})
+
+test('the board view keeps diff as the block type and names the ref when the pane is Korean', () => {
+  expect(viewRows(REF_BLOCKS, 'ko').slice(0, REF_ROWS.length)).toEqual(REF_ROWS)
+})
+
+test('the board view puts a diff title after the block type in the header', () => {
+  const rows = viewRows([{ id: 'b3', type: 'diff', ref: 'main', title: 'Scope', lines: ['+x'] }], 'ko')
+  expect(rows.slice(0, 2)).toEqual(['[b3] diff · Scope', 'main · Scope'])
 })

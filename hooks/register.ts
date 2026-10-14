@@ -48,7 +48,7 @@ import { parseYaml } from './engine/yaml.ts'
 import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
 import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { applyEdits, boardForModel, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded, type PeekRequest, type TraceRequest } from './engine/board.ts'
+import { applyEdits, boardForModel, diffKey, diffsNeeded, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded, type DiffRequest, type PeekRequest, type TraceRequest } from './engine/board.ts'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from './engine/board-spec.ts'
 import { boardToMarkdown } from './engine/board-export.ts'
 import { chipContext, chipLabel, chipSpans, citedChips } from './engine/board-chips.ts'
@@ -98,6 +98,10 @@ const JEV_TIMEOUT_MS = 5_000
 // so the model gets about twice the slowest of them, more room than HTTP.
 const JEV_MODEL_TIMEOUT_MS = 10_000
 const JEV_MODEL_CALLS = 8
+// A board edit runs inside serialized(), so a git read that hangs (an index lock, a stalled network disk) would hold spawns and
+// ticks behind it. git show and git diff against a local ref took 17-26 ms in this repository (git 2.54), so 10 s leaves room
+// for a slow disk and still gives the queue back.
+const GIT_READ_TIMEOUT_MS = 10_000
 // The whole mode decision under enforcement auto, both backends together: the user's prompt waits for it before it
 // enters. HTTP alone may take JEV_TIMEOUT_MS and the model JEV_MODEL_TIMEOUT_MS after it (15 s), while session-model
 // routing calls took 1.5-5.3 s, so 8 s covers a slow model answer and runs an unanswered turn directly.
@@ -2225,20 +2229,46 @@ async function inheritBoards($: EngineInterface, source: string, acceptedRunId: 
   }
 }
 
-// Lines start..end (1-based) of a project file for a code_peek. peeksNeeded merges a range several edits ask for, so a
-// refusal names the path and no edit index.
-async function readPeek($: EngineInterface, request: PeekRequest): Promise<Result<string[]>> {
-  let text: string
-  try {
-    text = await $.fs.read(`${projectRoot}/${request.path}`)
-  } catch (error) {
-    return fail('invalid_board_edit', `code_peek ${request.path}: cannot read the file (${message(error)})`)
-  }
+// A final newline ends the last line; it does not start another.
+function textLines(text: string): string[] {
   const lines = text.split(/\r?\n/)
-  // A final newline ends the last line; it does not start another.
   if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
+// What git prints for a board quote, run from the project root like a verify command. A git that cannot start or runs past
+// GIT_READ_TIMEOUT_MS rejects, and that refuses the edit the same way a non-zero exit does, with git's own complaint.
+async function gitOutput($: EngineInterface, args: string[], at: string): Promise<Result<string>> {
+  const refused = (reason: string) => fail<string>('invalid_board_edit', `${at}: git ${args[0]} could not read it (${reason})`)
+  try {
+    const result = await $.process.run(['git', ...args], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+    return result.exitCode === 0 ? { ok: true, value: result.stdout } : refused(result.stderr.trim() || `exit ${result.exitCode}`)
+  } catch (error) {
+    return refused(message(error))
+  }
+}
+
+// Lines start..end (1-based) of a project file for a code_peek: the worktree file, or with a ref the file as git holds it at
+// that ref. The ./ makes git read the path from the project root, which may be a folder inside the repository; a bare
+// <ref>:<path> starts at the repository root. peeksNeeded merges a range several edits ask for, so a refusal names the path
+// and no edit index.
+async function readPeek($: EngineInterface, request: PeekRequest): Promise<Result<string[]>> {
+  const at = request.ref ? `code_peek ${request.path}@${request.ref}` : `code_peek ${request.path}`
+  let text: string
+  if (request.ref) {
+    const shown = await gitOutput($, ['show', `${request.ref}:./${request.path}`], at)
+    if (!shown.ok) return shown
+    text = shown.value
+  } else {
+    try {
+      text = await $.fs.read(`${projectRoot}/${request.path}`)
+    } catch (error) {
+      return fail('invalid_board_edit', `${at}: cannot read the file (${message(error)})`)
+    }
+  }
+  const lines = textLines(text)
   if (request.end > lines.length) {
-    return fail('invalid_board_edit', `code_peek ${request.path}: lines ${request.start}-${request.end} reach past the end of the file, which has ${lines.length} lines`)
+    return fail('invalid_board_edit', `${at}: lines ${request.start}-${request.end} reach past the end of the file, which has ${lines.length} lines`)
   }
   return { ok: true, value: lines.slice(request.start - 1, request.end) }
 }
@@ -2277,6 +2307,18 @@ async function readTrace($: EngineInterface, request: TraceRequest): Promise<Res
   return { ok: true, value: text.split(/\r?\n/) }
 }
 
+// The lines of git diff <ref> [-- <path>] for a diff block; path is project-relative, as a pathspec from the project root is.
+// :(literal) makes git read the path as one file name, as the commit stage's checks do (stages.ts): a bare app/[id]/page.ts is
+// a pattern that also names app/i/page.ts, and a leading ":" is pathspec magic. --no-color and --no-ext-diff keep a plain
+// unified diff when the person's config sets color.ui=always or an external diff tool such as difftastic. An empty diff is no
+// read failure: the engine refuses it in the block's own words. diffsNeeded merges a diff several edits ask for, so a refusal
+// names the diff, not an edit index.
+async function readDiff($: EngineInterface, request: DiffRequest): Promise<Result<string[]>> {
+  const at = request.path ? `diff ${request.ref} ${request.path}` : `diff ${request.ref}`
+  const shown = await gitOutput($, ['diff', '--no-color', '--no-ext-diff', request.ref, ...(request.path ? ['--', `:(literal)${request.path}`] : [])], at)
+  return shown.ok ? { ok: true, value: textLines(shown.value) } : shown
+}
+
 async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): Promise<ToolReply> {
   const peeks = new Map<string, string[]>()
   for (const request of peeksNeeded(board, edits)) {
@@ -2290,7 +2332,13 @@ async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): 
     if (!lines.ok) return err(lines.error)
     traces.set(traceKey(request), lines.value)
   }
-  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks, traces })
+  const diffs = new Map<string, string[]>()
+  for (const request of diffsNeeded(board, edits)) {
+    const lines = await readDiff($, request)
+    if (!lines.ok) return err(lines.error)
+    diffs.set(diffKey(request), lines.value)
+  }
+  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks, traces, diffs })
   if (!applied.ok) return err(applied.error)
   const edited = applied.value.board
   await saveBoards($, boards.map(candidate => (candidate.boardId === edited.boardId ? edited : candidate)))
@@ -2373,7 +2421,7 @@ async function drawResultBoard($: EngineInterface, run: Run): Promise<SettleBoar
     }
     const previous = linked?.run?.facts ?? {}
     const { edits, insertedSlots } = factEdits(facts, previous, board.blocks.map(block => block.id))
-    const applied = applyEdits(board, edits, { now, peeks: new Map(), traces: new Map() })
+    const applied = applyEdits(board, edits, { now, peeks: new Map(), traces: new Map(), diffs: new Map() })
     if (!applied.ok) throw new Error(applied.error.message)
     const drawnBoard: Board = { ...applied.value.board, run: { runId: run.runId, facts: factLink(previous, edits, insertedSlots, applied.value.inserted) } }
     await saveBoards($, linked ? boards.map(candidate => (candidate.boardId === drawnBoard.boardId ? drawnBoard : candidate)) : [...boards, drawnBoard])

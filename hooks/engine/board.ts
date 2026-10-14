@@ -3,8 +3,8 @@ import { fail, type Result } from './types.ts'
 import { projectPath } from './verification.ts'
 import type {
   Block, BlockInput, BlockType, Board, BoardEdit, BoardFile, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, CodePeekInput,
-  FlowBlock, FlowEdge, FlowNode, FlowNodeKind, RunLink, SectionBlock, SequenceBlock, SequenceParticipant, SequenceStep,
-  SequenceStepKind, TableBlock, TraceBlock, TracePart,
+  DiffBlock, DiffInput, FlowBlock, FlowEdge, FlowNode, FlowNodeKind, RunLink, SectionBlock, SequenceBlock, SequenceParticipant,
+  SequenceStep, SequenceStepKind, TableBlock, TraceBlock, TracePart,
 } from './board-types.ts'
 
 // The limits keep one block readable in a pane: the Board layouts wrap and clip at these sizes, and a board stays small enough to
@@ -21,6 +21,11 @@ const MAX_COLUMNS = 6
 const MAX_ROWS = 30
 const CELL_MAX = 80
 const PEEK_PATH_MAX = 300
+// A git ref or an a..b range, which the host puts into argv: it never starts with "-", so git cannot read it as an option, and it holds
+// no space or ":", so `ref:path` stays one `git show` object. REF_MAX is the 1 + {0,63} characters the pattern allows.
+const REF = /^[A-Za-z0-9_@][A-Za-z0-9_.\/~^{}@-]{0,63}$/
+const REF_MAX = 64
+const PATH_RULE = 'must be relative to the project, without "..", and outside .claude'
 const PEEK_MAX_LINES = 40
 const PEEK_NOTE_MAX = 200
 // A line of a minified bundle must not balloon the board file; the pane clips lines to its width anyway.
@@ -43,14 +48,17 @@ const FACT_KEY = /^[a-z]{1,16}$/
 const REF_ID = /^[A-Za-z0-9_.-]{1,32}$/
 const BLOCK_ID = /^b([1-9][0-9]*)$/
 
-const BLOCK_TYPES: readonly BlockType[] = ['section', 'callout', 'table', 'code_peek', 'code', 'trace', 'flow', 'sequence']
+const BLOCK_TYPES: readonly BlockType[] = ['section', 'callout', 'table', 'code_peek', 'code', 'trace', 'diff', 'flow', 'sequence']
+// The kinds whose lines the host fills: a code_peek's from a file or a git ref, a trace's from the run checkpoint, a diff's from git.
+const HOSTED_TYPES: readonly BlockType[] = ['code_peek', 'trace', 'diff']
 const BLOCK_FIELDS: Record<BlockType, readonly string[]> = {
   section: ['title', 'text'],
   callout: ['tone', 'title', 'text'],
   table: ['title', 'columns', 'rows'],
-  code_peek: ['title', 'path', 'start', 'end', 'note'],
+  code_peek: ['title', 'path', 'ref', 'start', 'end', 'note'],
   code: ['title', 'language', 'code', 'note'],
   trace: ['title', 'run', 'node', 'part', 'note'],
+  diff: ['title', 'ref', 'path', 'note'],
   flow: ['title', 'nodes', 'edges'],
   sequence: ['title', 'participants', 'steps'],
 }
@@ -73,17 +81,18 @@ const EDIT_FIELDS: Record<BoardEdit['op'], readonly string[]> = {
 const FIXED_FIELDS = [
   ['id', 'ids never change'],
   ['type', 'a block keeps its type; use replace to draw another kind'],
-  ['lines', 'the host fills lines; change path, start or end of a code_peek, or run, node or part of a trace'],
+  ['lines', 'the host fills lines; change path, ref, start or end of a code_peek, run, node or part of a trace, or ref or path of a diff'],
 ] as const
 // What a host-filled block's lines are read from: changing one of these reads them again, changing anything else keeps them.
-const RANGE_FIELDS = ['path', 'start', 'end']
+const RANGE_FIELDS = ['path', 'ref', 'start', 'end']
 const TRACE_FIELDS = ['run', 'node', 'part']
+const DIFF_FIELDS = ['ref', 'path']
 
 type Fields = Record<string, unknown>
 type TraceInput = Omit<TraceBlock, 'id' | 'lines'>
-// The two kinds whose lines the host fills: a code_peek's from a file, a trace's from the run checkpoint.
-type Hosted = CodePeekInput | TraceInput
-type Sources = { peeks: ReadonlyMap<string, string[]>; traces: ReadonlyMap<string, string[]> }
+// The three kinds whose lines the host fills: a code_peek's from a file or a git ref, a trace's from the run checkpoint, a diff's from git.
+type Hosted = CodePeekInput | TraceInput | DiffInput
+type Sources = { peeks: ReadonlyMap<string, string[]>; traces: ReadonlyMap<string, string[]>; diffs: ReadonlyMap<string, string[]> }
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string }
 
 function good<T>(value: T): Parsed<T> {
@@ -152,6 +161,21 @@ function refId(raw: unknown, field: string): Parsed<string> {
   return typeof raw === 'string' && REF_ID.test(raw) ? good(raw) : bad(field, 'must be 1-32 letters, digits, "_", "-" or "."')
 }
 
+function refShape(ref: string): Parsed<string> {
+  return REF.test(ref) ? good(ref) : bad('ref', 'must be a git ref or an a..b range: letters, digits and _ . / ~ ^ { } @ -, not starting with "-"')
+}
+
+function gitRef(raw: unknown): Parsed<string> {
+  const ref = requiredText(raw, 'ref', 1, REF_MAX)
+  return ref.ok ? refShape(ref.value) : ref
+}
+
+// An empty ref stands for none, so an update returns a code_peek to the worktree by sending "".
+function optionalRef(raw: unknown): Parsed<string> {
+  const ref = optionalText(raw, 'ref', REF_MAX)
+  return !ref.ok || ref.value === '' ? ref : refShape(ref.value)
+}
+
 function items<T>(raw: unknown, field: string, min: number, max: number, parse: (item: unknown, at: string) => Parsed<T>): Parsed<T[]> {
   if (!Array.isArray(raw)) return bad(field, 'must be an array')
   if (raw.length < min || raw.length > max) {
@@ -213,7 +237,9 @@ function parseCodePeek(raw: Fields): Parsed<CodePeekInput> {
   if (!title.ok) return title
   const file = requiredText(raw.path, 'path', 1, PEEK_PATH_MAX)
   if (!file.ok) return file
-  if (!projectPath(file.value)) return bad('path', 'must be relative to the project, without "..", and outside .claude')
+  if (!projectPath(file.value)) return bad('path', PATH_RULE)
+  const ref = optionalRef(raw.ref)
+  if (!ref.ok) return ref
   if (!isLine(raw.start)) return bad('start', 'must be a whole number from 1')
   if (!isLine(raw.end)) return bad('end', 'must be a whole number from 1')
   if (raw.end < raw.start) return bad('end', `must not be before start (${raw.start})`)
@@ -221,8 +247,8 @@ function parseCodePeek(raw: Fields): Parsed<CodePeekInput> {
   const note = optionalText(raw.note, 'note', PEEK_NOTE_MAX)
   if (!note.ok) return note
   return good({
-    type: 'code_peek', ...(title.value ? { title: title.value } : {}), path: file.value, start: raw.start, end: raw.end,
-    ...(note.value ? { note: note.value } : {}),
+    type: 'code_peek', ...(title.value ? { title: title.value } : {}), path: file.value, ...(ref.value ? { ref: ref.value } : {}),
+    start: raw.start, end: raw.end, ...(note.value ? { note: note.value } : {}),
   })
 }
 
@@ -269,6 +295,23 @@ function parseTrace(raw: Fields): Parsed<TraceInput> {
   if (!note.ok) return note
   return good({
     type: 'trace', ...(title.value ? { title: title.value } : {}), run: run.value, node: node.value, part: part.value,
+    ...(note.value ? { note: note.value } : {}),
+  })
+}
+
+// path scopes the diff to one file; without it the diff covers everything the ref differs in.
+function parseDiff(raw: Fields): Parsed<DiffInput> {
+  const title = optionalText(raw.title, 'title', TITLE_MAX)
+  if (!title.ok) return title
+  const ref = gitRef(raw.ref)
+  if (!ref.ok) return ref
+  const file = optionalText(raw.path, 'path', PEEK_PATH_MAX)
+  if (!file.ok) return file
+  if (file.value && !projectPath(file.value)) return bad('path', PATH_RULE)
+  const note = optionalText(raw.note, 'note', PEEK_NOTE_MAX)
+  if (!note.ok) return note
+  return good({
+    type: 'diff', ...(title.value ? { title: title.value } : {}), ref: ref.value, ...(file.value ? { path: file.value } : {}),
     ...(note.value ? { note: note.value } : {}),
   })
 }
@@ -363,7 +406,7 @@ function parseSequence(raw: Fields): Parsed<Omit<SequenceBlock, 'id'>> {
 }
 
 // Validates and normalises what the model sends (strings trimmed except a code snippet, empty optional fields dropped). A block
-// without id or lines: the board assigns the id and the host supplies a code_peek's or a trace's lines.
+// without id or lines: the board assigns the id and the host supplies the lines of a code_peek, a trace or a diff.
 function parseBlockInput(raw: unknown): Parsed<BlockInput> {
   if (!isRecord(raw)) return bad('block', 'must be an object')
   const type = oneOf(raw.type, 'type', BLOCK_TYPES)
@@ -377,15 +420,18 @@ function parseBlockInput(raw: unknown): Parsed<BlockInput> {
     case 'code_peek': return parseCodePeek(fields.value)
     case 'code': return parseCode(fields.value)
     case 'trace': return parseTrace(fields.value)
+    case 'diff': return parseDiff(fields.value)
     case 'flow': return parseFlow(fields.value)
     case 'sequence': return parseSequence(fields.value)
   }
 }
 
-export type PeekRequest = { path: string; start: number; end: number }
+export type PeekRequest = { path: string; ref?: string; start: number; end: number }
 
+// A ref goes after the range, because a ref holds no "#": the text after the last "#" says whether a key names a git version, and a
+// worktree file such as logo@2x.png cannot collide with a ref.
 export function peekKey(request: PeekRequest): string {
-  return `${request.path}#L${request.start}-L${request.end}`
+  return `${request.path}#L${request.start}-L${request.end}${request.ref ? `@${request.ref}` : ''}`
 }
 
 export type TraceRequest = { run: string; node: string; part: TracePart }
@@ -394,12 +440,20 @@ export function traceKey(request: TraceRequest): string {
   return `${request.run}#${request.node}#${request.part}`
 }
 
+export type DiffRequest = { ref: string; path?: string }
+
+// A ref holds no ":", so the first "::" ends it, whatever the path holds.
+export function diffKey(request: DiffRequest): string {
+  return request.path ? `${request.ref}::${request.path}` : request.ref
+}
+
 // The host reads files for these, so a request exists only for a range the engine would accept; applyEdits reports the rest.
-function peekRequest(file: unknown, start: unknown, end: unknown): PeekRequest | undefined {
+function peekRequest(file: unknown, ref: unknown, start: unknown, end: unknown): PeekRequest | undefined {
   if (typeof file !== 'string') return undefined
   const trimmed = file.trim()
-  if (!projectPath(trimmed) || !isLine(start) || !isLine(end) || end < start || end - start >= PEEK_MAX_LINES) return undefined
-  return { path: trimmed, start, end }
+  const version = optionalRef(ref)
+  if (!projectPath(trimmed) || !version.ok || !isLine(start) || !isLine(end) || end < start || end - start >= PEEK_MAX_LINES) return undefined
+  return { path: trimmed, ...(version.value ? { ref: version.value } : {}), start, end }
 }
 
 function cutLine(line: string): string {
@@ -409,10 +463,17 @@ function cutLine(line: string): string {
 function peekedLines(peek: CodePeekInput, peeks: ReadonlyMap<string, string[]>): Parsed<string[]> {
   const key = peekKey(peek)
   const lines = peeks.get(key)
-  if (lines === undefined) return bad('path', `could not read ${key} (the file is missing or unreadable)`)
+  if (lines === undefined) return bad('path', `could not read ${key} (the file${peek.ref ? ' at that ref' : ''} is missing or unreadable)`)
   const wanted = peek.end - peek.start + 1
   if (lines.length !== wanted) return bad('end', `${key} reaches past the end of the file (${lines.length} of ${wanted} lines exist)`)
   return good(lines.map(cutLine))
+}
+
+// No range to ask for, so a long quote keeps its first lines and a marker line says how many it dropped: a stored trace or diff
+// never holds more than a code_peek can.
+function cappedLines(lines: string[]): string[] {
+  if (lines.length > PEEK_MAX_LINES) return [...lines.slice(0, PEEK_MAX_LINES - 1).map(cutLine), `… +${lines.length - PEEK_MAX_LINES + 1} more lines`]
+  return lines.map(cutLine)
 }
 
 function tracedLines(trace: TraceInput, traces: ReadonlyMap<string, string[]>): Parsed<string[]> {
@@ -420,20 +481,33 @@ function tracedLines(trace: TraceInput, traces: ReadonlyMap<string, string[]>): 
   const lines = traces.get(key)
   if (lines === undefined) return bad('run', `could not read the ${trace.part} of node ${trace.node} in run ${trace.run} (${key}); the run checkpoint does not hold it`)
   if (lines.length === 0) return bad('part', `the ${trace.part} of node ${trace.node} in run ${trace.run} (${key}) is empty`)
-  // No range to ask for, so a long artifact keeps its first lines and a marker line says how many it dropped: a stored
-  // trace never holds more than a code_peek can.
-  if (lines.length > PEEK_MAX_LINES) return good([...lines.slice(0, PEEK_MAX_LINES - 1).map(cutLine), `… +${lines.length - PEEK_MAX_LINES + 1} more lines`])
-  return good(lines.map(cutLine))
+  return good(cappedLines(lines))
+}
+
+function diffedLines(diff: DiffInput, diffs: ReadonlyMap<string, string[]>): Parsed<string[]> {
+  const key = diffKey(diff)
+  const lines = diffs.get(key)
+  if (lines === undefined) return bad('ref', `could not read the git diff ${key} (the ref is unknown, the path is outside the repository, or git failed)`)
+  if (lines.length === 0) return bad('ref', `the git diff ${key} is empty; nothing differs`)
+  return good(cappedLines(lines))
 }
 
 function hostedLines(input: Hosted, sources: Sources): Parsed<string[]> {
-  return input.type === 'code_peek' ? peekedLines(input, sources.peeks) : tracedLines(input, sources.traces)
+  switch (input.type) {
+    case 'code_peek': return peekedLines(input, sources.peeks)
+    case 'trace': return tracedLines(input, sources.traces)
+    case 'diff': return diffedLines(input, sources.diffs)
+  }
 }
 
-// A host-filled block's lines come from outside the input (a file read, a run checkpoint, the old block, a persisted file), so the
-// caller supplies them.
+function isHosted(input: BlockInput): input is Hosted {
+  return HOSTED_TYPES.includes(input.type)
+}
+
+// A host-filled block's lines come from outside the input (a file or git read, a run checkpoint, the old block, a persisted file), so
+// the caller supplies them.
 function assemble(id: string, input: BlockInput, linesFor: (hosted: Hosted) => Parsed<string[]>): Parsed<Block> {
-  if (input.type !== 'code_peek' && input.type !== 'trace') return good({ id, ...input })
+  if (!isHosted(input)) return good({ id, ...input })
   const lines = linesFor(input)
   return lines.ok ? good({ id, ...input, lines: lines.value }) : lines
 }
@@ -482,20 +556,21 @@ export function parseEdits(input: unknown): Result<BoardEdit[]> {
   return { ok: true, value: edits }
 }
 
-// The ranges the host must read before applyEdits: those an insert or replace brings in, and an update that moves a code_peek.
+// The ranges the host must read before applyEdits: those an insert or replace brings in, and an update that moves a code_peek or
+// points it at another ref.
 export function peeksNeeded(board: Board, edits: BoardEdit[]): PeekRequest[] {
   const found = new Map<string, PeekRequest>()
-  const want = (file: unknown, start: unknown, end: unknown) => {
-    const request = peekRequest(file, start, end)
+  const want = (file: unknown, ref: unknown, start: unknown, end: unknown) => {
+    const request = peekRequest(file, ref, start, end)
     if (request) found.set(peekKey(request), request)
   }
   for (const edit of edits) {
     if ((edit.op === 'insert' || edit.op === 'replace') && edit.block.type === 'code_peek') {
-      want(edit.block.path, edit.block.start, edit.block.end)
+      want(edit.block.path, edit.block.ref, edit.block.start, edit.block.end)
     } else if (edit.op === 'update') {
       const block = board.blocks.find(candidate => candidate.id === edit.id)
       if (block?.type === 'code_peek' && RANGE_FIELDS.some(key => key in edit.changes)) {
-        want(edit.changes.path ?? block.path, edit.changes.start ?? block.start, edit.changes.end ?? block.end)
+        want(edit.changes.path ?? block.path, edit.changes.ref ?? block.ref, edit.changes.start ?? block.start, edit.changes.end ?? block.end)
       }
     }
   }
@@ -525,6 +600,35 @@ export function tracesNeeded(board: Board, edits: BoardEdit[]): TraceRequest[] {
       const block = board.blocks.find(candidate => candidate.id === edit.id)
       if (block?.type === 'trace' && TRACE_FIELDS.some(key => key in edit.changes)) {
         want(edit.changes.run ?? block.run, edit.changes.node ?? block.node, edit.changes.part ?? block.part)
+      }
+    }
+  }
+  return [...found.values()]
+}
+
+// Like peekRequest, a request exists only for a diff the engine would accept, with ref and path trimmed the way parseDiff trims them.
+function diffRequest(ref: unknown, path: unknown): DiffRequest | undefined {
+  const version = gitRef(ref)
+  const file = optionalText(path, 'path', PEEK_PATH_MAX)
+  if (!version.ok || !file.ok || (file.value && !projectPath(file.value))) return undefined
+  return { ref: version.value, ...(file.value ? { path: file.value } : {}) }
+}
+
+// The git diffs the host must run before applyEdits: those an insert or replace brings in, and an update that points a diff at
+// another ref or path.
+export function diffsNeeded(board: Board, edits: BoardEdit[]): DiffRequest[] {
+  const found = new Map<string, DiffRequest>()
+  const want = (ref: unknown, path: unknown) => {
+    const request = diffRequest(ref, path)
+    if (request) found.set(diffKey(request), request)
+  }
+  for (const edit of edits) {
+    if ((edit.op === 'insert' || edit.op === 'replace') && edit.block.type === 'diff') {
+      want(edit.block.ref, edit.block.path)
+    } else if (edit.op === 'update') {
+      const block = board.blocks.find(candidate => candidate.id === edit.id)
+      if (block?.type === 'diff' && DIFF_FIELDS.some(key => key in edit.changes)) {
+        want(edit.changes.ref ?? block.ref, edit.changes.path ?? block.path)
       }
     }
   }
@@ -562,6 +666,7 @@ function insertBlock(draft: Draft, edit: Op<'insert'>, at: string, sources: Sour
 function keptLines(existing: Block, changes: Fields): string[] | undefined {
   if (existing.type === 'code_peek') return RANGE_FIELDS.some(key => key in changes) ? undefined : existing.lines
   if (existing.type === 'trace') return TRACE_FIELDS.some(key => key in changes) ? undefined : existing.lines
+  if (existing.type === 'diff') return DIFF_FIELDS.some(key => key in changes) ? undefined : existing.lines
   return undefined
 }
 
@@ -615,7 +720,8 @@ export function applyEdits(board: Board, edits: BoardEdit[], context: Sources & 
   return { ok: true, value: { board: { ...board, updatedAt: context.now, nextId: draft.nextId, blocks: draft.blocks }, inserted: draft.inserted } }
 }
 
-export type ModelBlock = Exclude<Block, CodePeekBlock | TraceBlock> | (Omit<CodePeekBlock, 'lines'> & { lineCount: number }) | (Omit<TraceBlock, 'lines'> & { lineCount: number })
+type Counted<T extends { lines: string[] }> = Omit<T, 'lines'> & { lineCount: number }
+export type ModelBlock = Exclude<Block, CodePeekBlock | TraceBlock | DiffBlock> | Counted<CodePeekBlock> | Counted<TraceBlock> | Counted<DiffBlock>
 export type ModelBoard = Omit<Board, 'blocks'> & { blocks: ModelBlock[] }
 
 // What the get action returns: the model drew these blocks and does not need the file or run text back. A code block is the model's own text, so it stays.
@@ -623,7 +729,7 @@ export function boardForModel(board: Board): ModelBoard {
   return {
     ...board,
     blocks: board.blocks.map((block): ModelBlock => {
-      if (block.type !== 'code_peek' && block.type !== 'trace') return block
+      if (block.type !== 'code_peek' && block.type !== 'trace' && block.type !== 'diff') return block
       const { lines, ...rest } = block
       return { ...rest, lineCount: lines.length }
     }),
@@ -640,7 +746,8 @@ function storedLines(raw: unknown, peek: CodePeekInput): Parsed<string[]> {
   return bad('lines', `must hold ${wanted} strings of at most ${PEEK_LINE_MAX} characters`)
 }
 
-function storedTraceLines(raw: unknown): Parsed<string[]> {
+// A trace or a diff has no range, so what it stores is whatever cappedLines left: 1 to 40 lines.
+function storedQuoteLines(raw: unknown): Parsed<string[]> {
   if (isStringArray(raw) && raw.length >= 1 && raw.length <= PEEK_MAX_LINES && raw.every(line => line.length <= PEEK_LINE_MAX)) return good(raw)
   return bad('lines', `must hold 1-${PEEK_MAX_LINES} strings of at most ${PEEK_LINE_MAX} characters`)
 }
@@ -649,9 +756,9 @@ function parseStoredBlock(raw: unknown, at: string): Parsed<Block> {
   if (!isRecord(raw)) return bad(at, 'must be an object')
   const id = raw.id
   if (typeof id !== 'string' || !BLOCK_ID.test(id)) return bad(child(at, 'id'), 'must look like b1, b2, ...')
-  const input = within(at, parseBlockInput(omit(raw, 'id', ...(raw.type === 'code_peek' || raw.type === 'trace' ? ['lines'] : []))))
+  const input = within(at, parseBlockInput(omit(raw, 'id', ...(HOSTED_TYPES.some(type => type === raw.type) ? ['lines'] : []))))
   if (!input.ok) return input
-  return within(at, assemble(id, input.value, hosted => (hosted.type === 'code_peek' ? storedLines(raw.lines, hosted) : storedTraceLines(raw.lines))))
+  return within(at, assemble(id, input.value, hosted => (hosted.type === 'code_peek' ? storedLines(raw.lines, hosted) : storedQuoteLines(raw.lines))))
 }
 
 function stamp(raw: unknown, field: string): Parsed<number> {

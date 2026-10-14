@@ -1,5 +1,5 @@
 import type { Block, Board, TracePart } from '../engine/board-types.ts'
-import { calloutLines, codeLines, codePeekLines, sectionLines, tableLines, traceLines, type CalloutLabels } from './board-blocks.ts'
+import { calloutLines, codeLines, codePeekLines, diffLines, sectionLines, tableLines, traceLines, type CalloutLabels } from './board-blocks.ts'
 import { flowLines, type FlowLabels } from './flow-layout.ts'
 import type { Language } from './i18n.ts'
 import type { InspectorAction, InspectorLineAction, InspectorModel } from './inspector-model.ts'
@@ -117,6 +117,7 @@ function renderBlock(block: Block, columns: number, t: BoardStrings): Line[] {
     case 'code_peek': return codePeekLines(block, columns)
     case 'code': return codeLines(block, columns)
     case 'trace': return traceLines(block, columns, t.parts)
+    case 'diff': return diffLines(block, columns)
     case 'flow': return flowLines(block, columns, t.flow)
     case 'sequence': return sequenceLines(block, columns)
   }

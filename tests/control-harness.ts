@@ -32,7 +32,10 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
   // permission: the Jev answer to a permission question; unset, the question gets the generic 'trivial' answer.
-  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined }
+  // git: what a git call prints, keyed by its argv after 'git' joined with spaces ('show HEAD~1:./src/a.ts',
+  // 'diff --no-color --no-ext-diff main -- :(literal)src/b.ts'); a call whose key is absent exits 128 as git does for an unknown
+  // ref or path.
+  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
@@ -54,6 +57,13 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   })
   on('process.run', ($, e) => {
     processes.push(e)
+    if (e.argv[0] === 'git') {
+      const key = e.argv.slice(1).join(' ')
+      const stdout = control.git.get(key)
+      return { value: stdout === undefined
+        ? { exitCode: 128, stdout: '', stderr: `fatal: the test git knows no ${key}\n`, isStdoutTruncated: false, isStderrTruncated: false }
+        : { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     let exitCode = e.argv[0] === 'check-control' ? control.exitCode : 0
     const path = e.argv.at(-1)
     if (e.argv[0] === 'sleep') return { deny: 'No wall-clock waits in tests' }
@@ -192,7 +202,7 @@ export function folder(h: ReturnType<typeof harness>, path: string, files: Recor
   for (const [name, text] of Object.entries(files)) h.files.set(`${path}/${name}`, text)
 }
 
-// The harness answers every program with exit 0 and no output. Load this plugin beside a test's harness
+// The harness answers every program except git (control.git) with exit 0 and no output. Load this plugin beside a test's harness
 // (`{ plugins: [PROGRAMS] }`) for verify commands whose exit code, output or failure to start a check judges. It runs in
 // its own layer, so it does not register process.run twice. Other programs pass through to the harness. Behaviour travels
 // in argv:

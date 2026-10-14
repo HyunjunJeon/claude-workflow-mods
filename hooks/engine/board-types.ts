@@ -10,11 +10,15 @@ export type SectionBlock = { id: string; type: 'section'; title: string; text?: 
 export type CalloutBlock = { id: string; type: 'callout'; tone: CalloutTone; title?: string; text: string }
 export type TableBlock = { id: string; type: 'table'; title?: string; columns: string[]; rows: string[][] }
 // lines is the file's text when the block was drawn, so the board keeps showing what was discussed after the file changes.
-export type CodePeekBlock = { id: string; type: 'code_peek'; title?: string; path: string; start: number; end: number; lines: string[]; note?: string }
+// ref is the git ref the host read the file at (git show <ref>:<path>); absent means the worktree file, so a block can quote a past version.
+export type CodePeekBlock = { id: string; type: 'code_peek'; title?: string; path: string; ref?: string; start: number; end: number; lines: string[]; note?: string }
 // code is a snippet the model proposes; nothing reads it back from a file, so it carries its text directly.
 export type CodeBlock = { id: string; type: 'code'; title?: string; language?: string; code: string; note?: string }
 // lines is the run artifact's text when the block was drawn, so the quote survives the run checkpoint's later edits.
 export type TraceBlock = { id: string; type: 'trace'; title?: string; run: string; node: string; part: TracePart; lines: string[]; note?: string }
+// lines is the output of git diff <ref> [-- <path>] when the block was drawn, so the quote survives later commits and edits.
+// ref may be a range (main..feature); path is project-relative and scopes the diff to one file, absent means the whole diff.
+export type DiffBlock = { id: string; type: 'diff'; title?: string; ref: string; path?: string; lines: string[]; note?: string }
 export type FlowNode = { id: string; label: string; kind?: FlowNodeKind; note?: string }
 export type FlowEdge = { from: string; to: string; label?: string }
 export type FlowBlock = { id: string; type: 'flow'; title?: string; nodes: FlowNode[]; edges: FlowEdge[] }
@@ -22,12 +26,14 @@ export type SequenceParticipant = { id: string; label: string }
 export type SequenceStep = { from: string; to: string; label: string; kind?: SequenceStepKind }
 export type SequenceBlock = { id: string; type: 'sequence'; title?: string; participants: SequenceParticipant[]; steps: SequenceStep[] }
 
-export type Block = SectionBlock | CalloutBlock | TableBlock | CodePeekBlock | CodeBlock | TraceBlock | FlowBlock | SequenceBlock
+export type Block = SectionBlock | CalloutBlock | TableBlock | CodePeekBlock | CodeBlock | TraceBlock | DiffBlock | FlowBlock | SequenceBlock
 export type BlockType = Block['type']
 
-// What the model sends: a block without its id. Two kinds also lose their lines, which the host fills: a code peek's from the
-// file, a trace's from the run checkpoint. A code block keeps its text, because nothing reads it back from anywhere.
+// What the model sends: a block without its id. Three kinds also lose their lines, which the host fills: a code peek's from the
+// file (or from git when it names a ref), a trace's from the run checkpoint, a diff's from git. A code block keeps its text, because
+// nothing reads it back from anywhere.
 export type CodePeekInput = Omit<CodePeekBlock, 'id' | 'lines'>
+export type DiffInput = Omit<DiffBlock, 'id' | 'lines'>
 export type BlockInput =
   | Omit<SectionBlock, 'id'>
   | Omit<CalloutBlock, 'id'>
@@ -35,6 +41,7 @@ export type BlockInput =
   | CodePeekInput
   | Omit<CodeBlock, 'id'>
   | Omit<TraceBlock, 'id' | 'lines'>
+  | DiffInput
   | Omit<FlowBlock, 'id'>
   | Omit<SequenceBlock, 'id'>
 

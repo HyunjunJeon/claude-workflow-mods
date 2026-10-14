@@ -1,7 +1,7 @@
-import type { CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../engine/board-types.ts'
+import type { CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, DiffBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../engine/board-types.ts'
 import { ACCENT, clean, fit, fitTail, width, type Line, type Segment } from './text.ts'
 
-// The text blocks of a board (section, callout, table, code_peek, code, trace) as terminal lines. Every returned line is at most
+// The text blocks of a board (section, callout, table, code_peek, code, trace, diff) as terminal lines. Every returned line is at most
 // `columns` cells wide and holds no control characters, because block text comes from the model and the files it read.
 
 export type CalloutLabels = Record<CalloutTone, string>
@@ -209,8 +209,11 @@ function noteLines(note: string | undefined, columns: number): Line[] {
   return wrapText(note ?? '', columns).map((part): Line => [faint(part)])
 }
 
+// A file read from git names its ref after the path (`src/a.ts@main:8-10`), so a quote of a past version is not mistaken for
+// the worktree file, and the line range still ends the label.
 export function codePeekLines(block: CodePeekBlock, columns: number): Line[] {
-  const header = sourceHeader(`${block.path}:${block.start}-${block.end}`, block.title, columns)
+  const file = block.ref ? `${block.path}@${block.ref}` : block.path
+  const header = sourceHeader(`${file}:${block.start}-${block.end}`, block.title, columns)
   return clipAll([header, ...numberedLines(block.lines, block.start, columns), ...noteLines(block.note, columns)], columns)
 }
 
@@ -224,5 +227,12 @@ export function codeLines(block: CodeBlock, columns: number): Line[] {
 // The run id stays out of the header: the block header above it is the place for ids, and a run id is long.
 export function traceLines(block: TraceBlock, columns: number, parts: Record<TracePart, string>): Line[] {
   const header = sourceHeader(`${block.node}${TITLE_SEPARATOR}${parts[block.part]}`, block.title, columns)
+  return clipAll([header, ...numberedLines(block.lines, 1, columns), ...noteLines(block.note, columns)], columns)
+}
+
+// The header spells the git arguments (`main..feature -- src/a.ts`), so a scoped diff reads as the command that produced it.
+// The rows are the diff's own lines, numbered from 1 like a trace, because the pane has no colour for + and - lines.
+export function diffLines(block: DiffBlock, columns: number): Line[] {
+  const header = sourceHeader(block.path ? `${block.ref} -- ${block.path}` : block.ref, block.title, columns)
   return clipAll([header, ...numberedLines(block.lines, 1, columns), ...noteLines(block.note, columns)], columns)
 }
