@@ -3,8 +3,8 @@ import { fail, type Result } from './types.ts'
 import { projectPath } from './verification.ts'
 import type {
   Block, BlockInput, BlockType, Board, BoardEdit, BoardFile, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, CodePeekInput,
-  DiffBlock, DiffInput, FlowBlock, FlowEdge, FlowNode, FlowNodeKind, RunLink, SectionBlock, SequenceBlock, SequenceParticipant,
-  SequenceStep, SequenceStepKind, TableBlock, TraceBlock, TracePart,
+  BoardRefBlock, DiffBlock, DiffInput, FlowBlock, FlowEdge, FlowNode, FlowNodeKind, RunLink, SectionBlock, SequenceBlock,
+  SequenceParticipant, SequenceStep, SequenceStepKind, TableBlock, TraceBlock, TracePart,
 } from './board-types.ts'
 
 // The limits keep one block readable in a pane: the Board layouts wrap and clip at these sizes, and a board stays small enough to
@@ -38,6 +38,7 @@ const MAX_PARTICIPANTS = 8
 const PARTICIPANT_LABEL_MAX = 24
 const MAX_STEPS = 40
 const STEP_LABEL_MAX = 60
+const STEP_NOTE_MAX = 80
 const BOARD_ID_MAX = 64
 // A result board names its run and at most one block per fact slot; the host fills four slots today, and 8 leaves room without
 // letting a stored file grow the link without bound.
@@ -47,8 +48,10 @@ const MAX_FACTS = 8
 const FACT_KEY = /^[a-z]{1,16}$/
 const REF_ID = /^[A-Za-z0-9_.-]{1,32}$/
 const BLOCK_ID = /^b([1-9][0-9]*)$/
+// What register.ts hands out as a board_id: board_<time in base 36>_<random in base 36>. A board_ref only ever names one.
+const BOARD_ID = /^board_[0-9a-z]+_[0-9a-z]+$/
 
-const BLOCK_TYPES: readonly BlockType[] = ['section', 'callout', 'table', 'code_peek', 'code', 'trace', 'diff', 'flow', 'sequence']
+const BLOCK_TYPES: readonly BlockType[] = ['section', 'callout', 'table', 'code_peek', 'code', 'trace', 'diff', 'flow', 'sequence', 'board_ref', 'divider']
 // The kinds whose lines the host fills: a code_peek's from a file or a git ref, a trace's from the run checkpoint, a diff's from git.
 const HOSTED_TYPES: readonly BlockType[] = ['code_peek', 'trace', 'diff']
 const BLOCK_FIELDS: Record<BlockType, readonly string[]> = {
@@ -61,22 +64,27 @@ const BLOCK_FIELDS: Record<BlockType, readonly string[]> = {
   diff: ['title', 'ref', 'path', 'note'],
   flow: ['title', 'nodes', 'edges'],
   sequence: ['title', 'participants', 'steps'],
+  board_ref: ['title', 'board'],
+  divider: [],
 }
 const TRACE_PARTS: readonly TracePart[] = ['output', 'answer', 'error', 'verification']
 const CALLOUT_TONES: readonly CalloutTone[] = ['info', 'decision', 'risk', 'warning']
 const FLOW_KINDS: readonly FlowNodeKind[] = ['process', 'decision', 'terminal']
 const STEP_KINDS: readonly SequenceStepKind[] = ['call', 'return', 'async', 'note']
+// A solid edge has no style at all, so the one value that is stored is the exception.
+const EDGE_STYLES: readonly NonNullable<FlowEdge['style']>[] = ['dashed']
 const FLOW_NODE_FIELDS = ['id', 'label', 'kind', 'note']
-const FLOW_EDGE_FIELDS = ['from', 'to', 'label']
+const FLOW_EDGE_FIELDS = ['from', 'to', 'label', 'style']
 const PARTICIPANT_FIELDS = ['id', 'label']
-const STEP_FIELDS = ['from', 'to', 'label', 'kind']
+const STEP_FIELDS = ['from', 'to', 'label', 'kind', 'note']
 
-const EDIT_OPS: readonly BoardEdit['op'][] = ['insert', 'update', 'replace', 'remove']
+const EDIT_OPS: readonly BoardEdit['op'][] = ['insert', 'update', 'replace', 'remove', 'move']
 const EDIT_FIELDS: Record<BoardEdit['op'], readonly string[]> = {
   insert: ['op', 'block', 'afterId'],
   update: ['op', 'id', 'changes'],
   replace: ['op', 'id', 'block'],
   remove: ['op', 'id'],
+  move: ['op', 'id', 'afterId'],
 }
 const FIXED_FIELDS = [
   ['id', 'ids never change'],
@@ -92,7 +100,13 @@ type Fields = Record<string, unknown>
 type TraceInput = Omit<TraceBlock, 'id' | 'lines'>
 // The three kinds whose lines the host fills: a code_peek's from a file or a git ref, a trace's from the run checkpoint, a diff's from git.
 type Hosted = CodePeekInput | TraceInput | DiffInput
-type Sources = { peeks: ReadonlyMap<string, string[]>; traces: ReadonlyMap<string, string[]>; diffs: ReadonlyMap<string, string[]> }
+// boardIds are the board_ids of the session; a caller that leaves them out knows of no board, so it can draw no board_ref.
+type Sources = {
+  peeks: ReadonlyMap<string, string[]>
+  traces: ReadonlyMap<string, string[]>
+  diffs: ReadonlyMap<string, string[]>
+  boardIds?: ReadonlySet<string>
+}
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string }
 
 function good<T>(value: T): Parsed<T> {
@@ -340,7 +354,9 @@ function parseFlowEdge(raw: unknown, at: string, known: ReadonlySet<string>): Pa
   if (from.value === to.value) return bad(at, `joins ${from.value} to itself; draw a loop as a note`)
   const label = optionalText(fields.value.label, child(at, 'label'), FLOW_LABEL_MAX)
   if (!label.ok) return label
-  return good({ from: from.value, to: to.value, ...(label.value ? { label: label.value } : {}) })
+  const style = optionalOneOf(fields.value.style, child(at, 'style'), EDGE_STYLES)
+  if (!style.ok) return style
+  return good({ from: from.value, to: to.value, ...(label.value ? { label: label.value } : {}), ...(style.value ? { style: style.value } : {}) })
 }
 
 // findCycle walks dependsOn, so an edge from -> to becomes "to depends on from"; the path it returns reads in edge direction.
@@ -388,7 +404,9 @@ function parseStep(raw: unknown, at: string, known: ReadonlySet<string>): Parsed
   if (!label.ok) return label
   const kind = optionalOneOf(fields.value.kind, child(at, 'kind'), STEP_KINDS)
   if (!kind.ok) return kind
-  return good({ from: from.value, to: to.value, label: label.value, ...(kind.value ? { kind: kind.value } : {}) })
+  const note = optionalText(fields.value.note, child(at, 'note'), STEP_NOTE_MAX)
+  if (!note.ok) return note
+  return good({ from: from.value, to: to.value, label: label.value, ...(kind.value ? { kind: kind.value } : {}), ...(note.value ? { note: note.value } : {}) })
 }
 
 function parseSequence(raw: Fields): Parsed<Omit<SequenceBlock, 'id'>> {
@@ -403,6 +421,17 @@ function parseSequence(raw: Fields): Parsed<Omit<SequenceBlock, 'id'>> {
   const steps = items(raw.steps, 'steps', 1, MAX_STEPS, (step, at) => parseStep(step, at, known))
   if (!steps.ok) return steps
   return good({ type: 'sequence', ...(title.value ? { title: title.value } : {}), participants: participants.value, steps: steps.value })
+}
+
+// The shape only: whether the board exists is the session's to say, and a stored ref outlives a board that retention pruned. applyEdits
+// asks boardLink for that.
+function parseBoardRef(raw: Fields): Parsed<Omit<BoardRefBlock, 'id'>> {
+  const title = optionalText(raw.title, 'title', TITLE_MAX)
+  if (!title.ok) return title
+  const board = requiredText(raw.board, 'board', 1, BOARD_ID_MAX)
+  if (!board.ok) return board
+  if (!BOARD_ID.test(board.value)) return bad('board', 'must be a board_id such as board_m1x9k2_a8f3bc, as create and list return it')
+  return good({ type: 'board_ref', board: board.value, ...(title.value ? { title: title.value } : {}) })
 }
 
 // Validates and normalises what the model sends (strings trimmed except a code snippet, empty optional fields dropped). A block
@@ -423,6 +452,9 @@ function parseBlockInput(raw: unknown): Parsed<BlockInput> {
     case 'diff': return parseDiff(fields.value)
     case 'flow': return parseFlow(fields.value)
     case 'sequence': return parseSequence(fields.value)
+    case 'board_ref': return parseBoardRef(fields.value)
+    // A rule has nothing to say: BLOCK_FIELDS gives it no field, so fieldsOf has already refused every one.
+    case 'divider': return good({ type: 'divider' })
   }
 }
 
@@ -518,6 +550,11 @@ export function newBoard(input: { boardId: string; sessionId: string; title: str
   return { ok: true, value: { boardId: input.boardId, sessionId: input.sessionId, title: title.value, createdAt: input.now, updatedAt: input.now, nextId: 1, blocks: [] } }
 }
 
+// An insert places its block after afterId and a move places the block it names there; either appends when afterId is absent.
+function optionalAfterId(raw: unknown): Parsed<string | undefined> {
+  return raw === undefined ? good(undefined) : requiredText(raw, 'afterId', 1, BOARD_ID_MAX)
+}
+
 function parseEdit(raw: unknown): Parsed<BoardEdit> {
   if (!isRecord(raw)) return bad('edit', 'must be an object')
   const op = oneOf(raw.op, 'op', EDIT_OPS)
@@ -527,13 +564,17 @@ function parseEdit(raw: unknown): Parsed<BoardEdit> {
   if (op.value === 'insert') {
     const block = parseBlockInput(fields.value.block)
     if (!block.ok) return block
-    const afterId = fields.value.afterId === undefined ? good(undefined) : requiredText(fields.value.afterId, 'afterId', 1, BOARD_ID_MAX)
+    const afterId = optionalAfterId(fields.value.afterId)
     if (!afterId.ok) return afterId
     return good({ op: 'insert', block: block.value, ...(afterId.value === undefined ? {} : { afterId: afterId.value }) })
   }
   const id = requiredText(fields.value.id, 'id', 1, BOARD_ID_MAX)
   if (!id.ok) return id
   if (op.value === 'remove') return good({ op: 'remove', id: id.value })
+  if (op.value === 'move') {
+    const afterId = optionalAfterId(fields.value.afterId)
+    return afterId.ok ? good({ op: 'move', id: id.value, ...(afterId.value === undefined ? {} : { afterId: afterId.value }) }) : afterId
+  }
   if (op.value === 'replace') {
     const block = parseBlockInput(fields.value.block)
     return block.ok ? good({ op: 'replace', id: id.value, block: block.value }) : block
@@ -635,7 +676,7 @@ export function diffsNeeded(board: Board, edits: BoardEdit[]): DiffRequest[] {
   return [...found.values()]
 }
 
-type Draft = { blocks: Block[]; nextId: number; inserted: string[] }
+type Draft = { boardId: string; blocks: Block[]; nextId: number; inserted: string[] }
 type Op<K extends BoardEdit['op']> = Extract<BoardEdit, { op: K }>
 
 function refuse<T>(at: string, message: string): Result<T> {
@@ -646,8 +687,22 @@ function unknownBlock<T>(at: string, id: string, blocks: Block[]): Result<T> {
   return fail('unknown_block', `${at}: no block ${id}; this board holds ${blocks.length === 0 ? 'no blocks' : blocks.map(block => block.id).join(', ')}`)
 }
 
+// A board_ref must name another board of the session: the board it is drawn on would make the button select itself.
+function boardLink(input: BlockInput, draft: Draft, sources: Sources): Parsed<BlockInput> {
+  if (input.type !== 'board_ref') return good(input)
+  if (input.board === draft.boardId) return bad('board', 'cannot point at its own board; link another board of this session')
+  if (sources.boardIds?.has(input.board) !== true) return bad('board', `no board ${input.board} in this session; list returns the boards`)
+  return good(input)
+}
+
+// What an insert or a replace draws: the block as the model sent it, its shape checked, and a board_ref's target looked up.
+function drawnBlock(block: BlockInput, draft: Draft, sources: Sources): Parsed<BlockInput> {
+  const input = parseBlockInput(block)
+  return input.ok ? boardLink(input.value, draft, sources) : input
+}
+
 function insertBlock(draft: Draft, edit: Op<'insert'>, at: string, sources: Sources): Result<Draft> {
-  const input = parseBlockInput(edit.block)
+  const input = drawnBlock(edit.block, draft, sources)
   if (!input.ok) return refuse(at, input.message)
   let position = draft.blocks.length
   if (edit.afterId !== undefined) {
@@ -659,7 +714,7 @@ function insertBlock(draft: Draft, edit: Op<'insert'>, at: string, sources: Sour
   const id = `b${draft.nextId}`
   const block = assemble(id, input.value, hosted => hostedLines(hosted, sources))
   if (!block.ok) return refuse(at, block.message)
-  return { ok: true, value: { blocks: draft.blocks.toSpliced(position, 0, block.value), nextId: draft.nextId + 1, inserted: [...draft.inserted, id] } }
+  return { ok: true, value: { ...draft, blocks: draft.blocks.toSpliced(position, 0, block.value), nextId: draft.nextId + 1, inserted: [...draft.inserted, id] } }
 }
 
 // The lines a host-filled block keeps through an update, or undefined when the update changes what they are read from.
@@ -679,6 +734,9 @@ function updateBlock(draft: Draft, edit: Op<'update'>, at: string, sources: Sour
   }
   const input = parseBlockInput({ ...omit(existing, 'id', 'lines'), ...edit.changes })
   if (!input.ok) return refuse(at, input.message)
+  // Only a new target is looked up: a title change must not fail because the board it links to has since been pruned.
+  const linked = 'board' in edit.changes ? boardLink(input.value, draft, sources) : input
+  if (!linked.ok) return refuse(at, linked.message)
   const kept = keptLines(existing, edit.changes)
   const block = assemble(existing.id, input.value, hosted => (kept === undefined ? hostedLines(hosted, sources) : good(kept)))
   if (!block.ok) return refuse(at, block.message)
@@ -688,7 +746,7 @@ function updateBlock(draft: Draft, edit: Op<'update'>, at: string, sources: Sour
 function replaceBlock(draft: Draft, edit: Op<'replace'>, at: string, sources: Sources): Result<Draft> {
   const index = draft.blocks.findIndex(block => block.id === edit.id)
   if (index === -1) return unknownBlock(at, edit.id, draft.blocks)
-  const input = parseBlockInput(edit.block)
+  const input = drawnBlock(edit.block, draft, sources)
   if (!input.ok) return refuse(at, input.message)
   const block = assemble(edit.id, input.value, hosted => hostedLines(hosted, sources))
   if (!block.ok) return refuse(at, block.message)
@@ -700,18 +758,34 @@ function removeBlock(draft: Draft, edit: Op<'remove'>, at: string): Result<Draft
   return { ok: true, value: { ...draft, blocks: draft.blocks.filter(block => block.id !== edit.id) } }
 }
 
+// The block leaves the list before afterId is looked up, so the position is right whether afterId sits before or after it.
+function moveBlock(draft: Draft, edit: Op<'move'>, at: string): Result<Draft> {
+  const moving = draft.blocks.find(block => block.id === edit.id)
+  if (moving === undefined) return unknownBlock(at, edit.id, draft.blocks)
+  if (edit.afterId === edit.id) return refuse(at, 'afterId: a block cannot be placed after itself')
+  const rest = draft.blocks.filter(block => block.id !== edit.id)
+  let position = rest.length
+  if (edit.afterId !== undefined) {
+    const index = rest.findIndex(block => block.id === edit.afterId)
+    if (index === -1) return unknownBlock(at, edit.afterId, draft.blocks)
+    position = index + 1
+  }
+  return { ok: true, value: { ...draft, blocks: rest.toSpliced(position, 0, moving) } }
+}
+
 function applyEdit(draft: Draft, edit: BoardEdit, at: string, sources: Sources): Result<Draft> {
   switch (edit.op) {
     case 'insert': return insertBlock(draft, edit, at, sources)
     case 'update': return updateBlock(draft, edit, at, sources)
     case 'replace': return replaceBlock(draft, edit, at, sources)
     case 'remove': return removeBlock(draft, edit, at)
+    case 'move': return moveBlock(draft, edit, at)
   }
 }
 
 // All or nothing: each edit builds a new block list from the last, so a refusal returns before the given board is touched.
 export function applyEdits(board: Board, edits: BoardEdit[], context: Sources & { now: number }): Result<{ board: Board; inserted: string[] }> {
-  let draft: Draft = { blocks: board.blocks, nextId: board.nextId, inserted: [] }
+  let draft: Draft = { boardId: board.boardId, blocks: board.blocks, nextId: board.nextId, inserted: [] }
   for (const [index, edit] of edits.entries()) {
     const next = applyEdit(draft, edit, `edits[${index}]`, context)
     if (!next.ok) return next

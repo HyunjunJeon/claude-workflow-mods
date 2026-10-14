@@ -43,6 +43,39 @@ test('a diamond draws one box per node with its glyph, incoming edges and edge l
   for (const line of lines) expect(width(line)).toBeLessThanOrEqual(110)
 })
 
+// The same diamond with the branch into Reject and the edge out of it marked optional.
+const WITH_DASHED: FlowBlock = {
+  ...DIAMOND,
+  edges: [
+    { from: 'start', to: 'check' },
+    { from: 'check', to: 'yes', label: 'yes' },
+    { from: 'check', to: 'no', label: 'no', style: 'dashed' },
+    { from: 'yes', to: 'end' },
+    { from: 'no', to: 'end', style: 'dashed' },
+  ],
+}
+
+test('a dashed edge marks its source in the box it leads into and a solid edge stays plain', async () => {
+  const joined = flowLines(WITH_DASHED, 110, LABELS).map(text).join('\n')
+  expect(joined).toContain('← ╌Valid? (no)')
+  expect(joined).toContain('← Apply, ╌Reject')
+  expect(joined).toContain('← Valid? (yes)')
+  expect(joined).not.toContain('╌Valid? (yes)')
+  expect(joined).not.toContain('╌Apply')
+  expect(flowLines(DIAMOND, 110, LABELS).map(text).join('\n')).not.toContain('╌')
+})
+
+test('the list draws a dashed edge with a dashed arrow and a solid edge with a plain one', async () => {
+  const lines = flowLines(WITH_DASHED, 30, LABELS).map(text)
+  expect(lines.slice(5)).toEqual([
+    'Begin → Valid?',
+    'Valid? → Apply (yes)',
+    'Valid? ⇢ Reject (no)',
+    'Apply → Finish',
+    'Reject ⇢ Finish',
+  ])
+})
+
 test('a pane too narrow for the branches side by side lists nodes then edges', async () => {
   const lines = flowLines(DIAMOND, 30, LABELS)
   expect(lines.map(text)).toEqual([

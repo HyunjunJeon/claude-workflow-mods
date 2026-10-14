@@ -58,15 +58,32 @@ function lifelineRow(layout: Layout): Cell[] {
 }
 
 // Text next to a lifeline on the side with more room; the right side wins a tie. It stops at the neighbouring lifeline.
-function beside(row: Cell[], lane: Lane, textFor: (room: number) => string): void {
+function beside(row: Cell[], lane: Lane, textFor: (room: number) => string, style: Style = PLAIN): void {
   const right = lane.after - lane.x - 1
   const left = lane.x - lane.before - 1
   if (right >= left) {
-    paint(row, lane.x + 1, textFor(right), PLAIN)
+    paint(row, lane.x + 1, textFor(right), style)
     return
   }
   const text = textFor(left)
-  paint(row, lane.x - width(text), text, PLAIN)
+  paint(row, lane.x - width(text), text, style)
+}
+
+// A step's note is a dim line of its own under the step, on the side of the lifeline the step used, so the two
+// lines stay together. A step with no note, or an empty one, adds none.
+function noteBeside(note: string | undefined, lane: Lane, layout: Layout): Line[] {
+  if (!note) return []
+  const row = lifelineRow(layout)
+  beside(row, lane, room => fit(note, room), DIM)
+  return [toLine(row)]
+}
+
+// Under an arrow the note spans the cells between the two lifelines, like the label above it.
+function noteUnder(note: string | undefined, first: number, last: number, layout: Layout): Line[] {
+  if (!note) return []
+  const row = lifelineRow(layout)
+  paint(row, first, fit(note, last - first + 1), DIM)
+  return [toLine(row)]
 }
 
 // Board files are read from disk, so a step naming an unknown participant draws nothing rather than a wrong lane.
@@ -78,14 +95,14 @@ function stepLines(step: SequenceStep, number: number, layout: Layout): Line[] {
     const row = lifelineRow(layout)
     const prefix = `${number}. `
     beside(row, from, room => `${prefix}[${fit(step.label, room - width(prefix) - 2)}]`)
-    return [toLine(row)]
+    return [toLine(row), ...noteBeside(step.note, from, layout)]
   }
   const to = layout.lanes.get(step.to)
   if (!to) return []
   if (from === to) {
     const row = lifelineRow(layout)
     beside(row, from, room => fit(`↺ ${number}. ${step.label}`, room))
-    return [toLine(row)]
+    return [toLine(row), ...noteBeside(step.note, from, layout)]
   }
   const first = Math.min(from.x, to.x) + 1
   const last = Math.max(from.x, to.x) - 1
@@ -95,25 +112,28 @@ function stepLines(step: SequenceStep, number: number, layout: Layout): Line[] {
   const { shaft, left, right } = ARROWS[kind]
   for (let x = first; x <= last; x++) arrowRow[x] = { char: shaft, style: ARROW }
   arrowRow[to.x > from.x ? last : first] = { char: to.x > from.x ? right : left, style: ARROW }
-  return [toLine(labelRow), toLine(arrowRow)]
+  return [toLine(labelRow), toLine(arrowRow), ...noteUnder(step.note, first, last, layout)]
 }
 
 // Too narrow for lanes: the same information as a list, one line per step. A note keeps the brackets it has in the
 // diagram instead of a word like "note", because this file has no strings table and the pane switches language.
+// A step's note follows its label after a dash, the way a flow list shows a node's note.
 function listLines(block: SequenceBlock, columns: number): Line[] {
   const labels = new Map(block.participants.map(participant => [participant.id, participant.label]))
   const name = (id: string) => labels.get(id) ?? id
   const steps = block.steps.map((step, index) => {
     const kind = step.kind ?? 'call'
-    if (kind === 'note') return `${index + 1}. ${name(step.from)}: [${step.label}]`
-    return `${index + 1}. ${name(step.from)} ${ARROWS[kind].list} ${name(step.to)}: ${step.label}`
+    const note = step.note ? ` — ${step.note}` : ''
+    if (kind === 'note') return `${index + 1}. ${name(step.from)}: [${step.label}]${note}`
+    return `${index + 1}. ${name(step.from)} ${ARROWS[kind].list} ${name(step.to)}: ${step.label}${note}`
   })
   const participants = block.participants.map(participant => participant.label).join(', ')
   return [participants, ...steps].map(text => [{ text: fit(text, columns) }])
 }
 
 // A sequence diagram: one lane per participant, a lifeline down the middle of each, and per step a label line over
-// the arrow that joins two lifelines. A note or a step to the same participant takes one line beside its lifeline.
+// the arrow that joins two lifelines. A note or a step to the same participant takes one line beside its lifeline,
+// and a step's note field adds a dim line under the step.
 export function sequenceLines(block: SequenceBlock, columns: number): Line[] {
   const count = block.participants.length
   if (columns <= 0 || count === 0) return []

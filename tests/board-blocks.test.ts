@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import type { Block, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, DiffBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../hooks/engine/board-types.ts'
-import { calloutLines, codeLines, codePeekLines, diffLines, sectionLines, tableLines, traceLines, wrapText, type CalloutLabels } from '../hooks/ui/board-blocks.ts'
+import type { Block, BoardRefBlock, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, DiffBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../hooks/engine/board-types.ts'
+import { boardRefLines, calloutLines, codeLines, codePeekLines, diffLines, dividerLines, sectionLines, tableLines, traceLines, wrapText, type CalloutLabels } from '../hooks/ui/board-blocks.ts'
 import { buildBoardView } from '../hooks/ui/board-model.ts'
 import { width, type Line } from '../hooks/ui/text.ts'
 
@@ -18,6 +18,7 @@ const code = (body: string, extra: Partial<CodeBlock> = {}): CodeBlock => ({ id:
 const trace = (lines: string[], extra: Partial<TraceBlock> = {}): TraceBlock => ({ id: 'b6', type: 'trace', run: 'dag_mv6fveyq_y06sr2', node: 'board-render', part: 'output', lines, ...extra })
 const peek = (lines: string[], extra: Partial<CodePeekBlock> = {}): CodePeekBlock => ({ id: 'b4', type: 'code_peek', path: 'src/a.ts', start: 8, end: 7 + lines.length, lines, ...extra })
 const diff = (lines: string[], extra: Partial<DiffBlock> = {}): DiffBlock => ({ id: 'b7', type: 'diff', ref: 'main..feature', lines, ...extra })
+const boardRef = (board: string, extra: Partial<BoardRefBlock> = {}): BoardRefBlock => ({ id: 'b8', type: 'board_ref', board, ...extra })
 
 test('section shows its title in bold accent', () => {
   expect(sectionLines(section('body'), 40)[0]).toEqual([{ text: 'Plan', color: 'cyan', bold: true }])
@@ -263,6 +264,8 @@ test('every block fits a narrow pane without throwing', () => {
     traceLines(trace(['\tFAIL 값이 다릅니다', 'second'], { node: 'board-render', title: 'Trace', note: 'note text', part: 'verification' }), columns, PARTS_KO),
     codePeekLines(peek(['\tconst 값 = 1'], { ref: 'release/2026-10', title: 'Past', note: 'note text' }), columns),
     diffLines(diff(['@@ -1 +1 @@', '-\tconst 값 = 1', '+return'], { path: 'src/값.ts', title: 'Diff', note: 'note text' }), columns),
+    dividerLines(columns),
+    boardRefLines(boardRef('bd2', { title: '배포 계획 보드 Rollout' }), columns, '보드'),
   ]
   for (const columns of [1, 2, 3, 5, 8, 13, 21]) {
     for (const lines of blocks(columns)) {
@@ -284,6 +287,8 @@ test('control characters in block text never reach the output', () => {
     traceLines(trace([dirty], { node: dirty, title: dirty, note: dirty }), 40, PARTS_EN),
     codePeekLines(peek([dirty], { ref: dirty }), 40),
     diffLines(diff([dirty], { ref: dirty, path: dirty, title: dirty, note: dirty }), 40),
+    boardRefLines(boardRef(dirty, { title: dirty }), 40, dirty),
+    boardRefLines(boardRef(dirty), 40, 'Board'),
   ]
   for (const lines of rendered) expect(/[\x00-\x08\x0b-\x1f\x7f]/.test(texts(lines).join('\n'))).toBe(false)
 })
@@ -397,10 +402,11 @@ test('code and trace lines are empty when there is no room', () => {
 })
 
 // The pane draws these blocks through the board view, in the pane's language.
-const viewRows = (blocks: Block[], language: 'en' | 'ko') => {
+const viewOf = (blocks: Block[], language: 'en' | 'ko') => {
   const board = { boardId: 'bd1', sessionId: 's1', title: 'Trace board', createdAt: 1, updatedAt: 1, nextId: 3, blocks }
-  return buildBoardView({ boards: [board], columns: 60, language, page: 0 }).lines.map(text)
+  return buildBoardView({ boards: [board], columns: 60, language, page: 0 })
 }
+const viewRows = (blocks: Block[], language: 'en' | 'ko') => viewOf(blocks, language).lines.map(text)
 const CODE_AND_TRACE: Block[] = [
   { id: 'b1', type: 'code', language: 'ts', code: 'const a = 1' },
   { id: 'b2', type: 'trace', run: 'dag_x', node: 'build', part: 'verification', lines: ['exit 0'] },
@@ -434,4 +440,85 @@ test('the board view keeps diff as the block type and names the ref when the pan
 test('the board view puts a diff title after the block type in the header', () => {
   const rows = viewRows([{ id: 'b3', type: 'diff', ref: 'main', title: 'Scope', lines: ['+x'] }], 'ko')
   expect(rows.slice(0, 2)).toEqual(['[b3] diff · Scope', 'main · Scope'])
+})
+
+test('divider is one dim rule as wide as the pane', () => {
+  expect(dividerLines(12)).toEqual([[{ text: '────────────', dim: true }]])
+})
+
+test('divider lines are empty when there is no room', () => {
+  expect(dividerLines(0)).toEqual([])
+})
+
+test('board_ref shows an arrow, the Board label and the block title as a name', () => {
+  const lines = boardRefLines(boardRef('bd2', { title: 'Rollout plan' }), 40, 'Board')
+  expect(texts(lines)).toEqual(['→ Board: Rollout plan'])
+  expect(lines[0]).toEqual([
+    { text: '→ ', color: 'cyan' },
+    { text: 'Board: ', dim: true },
+    { text: 'Rollout plan', color: 'cyan', bold: true },
+  ])
+})
+
+test('board_ref without a title names the board by its id', () => {
+  expect(texts(boardRefLines(boardRef('bd2'), 40, 'Board'))).toEqual(['→ Board: bd2'])
+})
+
+test('board_ref with a blank title names the board by its id', () => {
+  expect(texts(boardRefLines(boardRef('bd2', { title: '   ' }), 40, 'Board'))).toEqual(['→ Board: bd2'])
+})
+
+test('board_ref takes its label from the strings it is given', () => {
+  expect(texts(boardRefLines(boardRef('bd2', { title: '배포 계획' }), 40, '보드'))).toEqual(['→ 보드: 배포 계획'])
+})
+
+test('board_ref stays one row and cuts a long name with an ellipsis', () => {
+  const lines = boardRefLines(boardRef('bd2', { title: 'A very long board title that cannot fit' }), 20, 'Board')
+  expect(texts(lines)).toEqual(['→ Board: A very lon…'])
+  expect(lineWidth(lines[0] ?? [])).toBe(20)
+})
+
+test('board_ref lines are empty when there is no room', () => {
+  expect(boardRefLines(boardRef('bd2'), 0, 'Board')).toEqual([])
+})
+
+// A ref row is a button: the pane gets it as a line action next to the block header's chip.
+const REF_AND_DIVIDER: Block[] = [
+  { id: 'b1', type: 'board_ref', board: 'bd2' },
+  { id: 'b2', type: 'divider' },
+  { id: 'b3', type: 'board_ref', board: 'bd3', title: 'Rollout' },
+]
+
+test('the board view draws a board_ref and a divider under their block headers in English', () => {
+  expect(viewRows(REF_AND_DIVIDER, 'en').slice(0, 8)).toEqual([
+    '[b1] board_ref', '→ Board: bd2', '', '[b2] divider', '─'.repeat(60), '', '[b3] board_ref · Rollout', '→ Board: Rollout',
+  ])
+})
+
+test('the board view draws a board_ref in Korean with the same headers', () => {
+  expect(viewRows(REF_AND_DIVIDER, 'ko').slice(0, 8)).toEqual([
+    '[b1] board_ref', '→ 보드: bd2', '', '[b2] divider', '─'.repeat(60), '', '[b3] board_ref · Rollout', '→ 보드: Rollout',
+  ])
+})
+
+test('the board view makes each board_ref row a button that goes to its board, besides the header chips', () => {
+  expect(viewOf(REF_AND_DIVIDER, 'en').lineActions).toEqual([
+    { line: 0, action: 'chip:b1' },
+    { line: 1, action: 'board:goto:bd2' },
+    { line: 3, action: 'chip:b2' },
+    { line: 6, action: 'chip:b3' },
+    { line: 7, action: 'board:goto:bd3' },
+  ])
+})
+
+test('the board view keeps the board_ref button on its row on a later page', () => {
+  const filler: Block[] = Array.from({ length: 30 }, (_, i) => ({ id: `s${i}`, type: 'section', title: `Step ${i}` }))
+  const board = { boardId: 'bd1', sessionId: 's1', title: 'Long board', createdAt: 1, updatedAt: 1, nextId: 99, blocks: [...filler, ...REF_AND_DIVIDER] }
+  const page = buildBoardView({ boards: [board], columns: 60, language: 'en', page: 1 })
+  const row = page.lines.map(text).indexOf('→ Board: bd2')
+  expect(row > 0).toBe(true)
+  expect(page.lineActions?.filter(button => button.action.startsWith('board:goto:'))).toEqual([
+    { line: row, action: 'board:goto:bd2' },
+    { line: row + 6, action: 'board:goto:bd3' },
+  ])
 })

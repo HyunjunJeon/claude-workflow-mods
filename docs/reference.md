@@ -600,6 +600,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `update` | `{op, id, changes}` | 그 블록에 `changes`의 필드를 덮어쓴 뒤 블록 전체를 다시 검사합니다. 배열 필드(`rows`, `nodes` 등)는 통째로 바뀝니다. `changes`에는 필드가 하나 이상 있어야 하며, 빈 문자열 `""`은 선택 텍스트 필드를 지웁니다. `id`, `type`, `lines`는 바꿀 수 없습니다 |
 | `replace` | `{op, id, block}` | 같은 id로 블록을 통째로 바꿉니다. 다른 종류로도 바꿀 수 있습니다 |
 | `remove` | `{op, id}` | 블록을 지웁니다 |
+| `move` | `{op, id, afterId?}` | 블록을 `afterId` 바로 뒤로 옮기고, 없으면 맨 끝으로 옮깁니다. 없는 id나 `afterId`가 자기 자신인 경우는 거부합니다 |
 
 ### 블록 종류
 
@@ -614,8 +615,10 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `code` | `code` (1-4,000자, 40줄까지·줄 하나는 240자까지), `language?` (20자까지), `note?` (200자까지), `title?` (80자까지). 아래 **code·trace** 설명 |
 | `trace` | `run`, `node`, `part` (`output`, `answer`, `error`, `verification` 중 하나), `note?` (200자까지), `title?` (80자까지). 아래 **code·trace** 설명 |
 | `diff` | `ref` (1-64자, 필수), `path?` (300자까지), `note?` (200자까지), `title?` (80자까지). 아래 **diff** 설명 |
-| `flow` | `nodes` (1-24개), `edges` (0-48개), `title?` (80자까지). 노드는 `id`, `label` (1-40자), `kind?` (`process`, `decision`, `terminal`), `note?` (80자까지)이고, 간선은 `from`, `to`, `label?` (40자까지)입니다. `edges`는 비어 있어도 `[]`로 써야 합니다 |
-| `sequence` | `participants` (2-8명), `steps` (1-40개), `title?` (80자까지). 참여자는 `id`, `label` (1-24자)이고, 단계는 `from`, `to`, `label` (1-60자), `kind?` (`call`, `return`, `async`, `note`)입니다 |
+| `flow` | `nodes` (1-24개), `edges` (0-48개), `title?` (80자까지). 노드는 `id`, `label` (1-40자), `kind?` (`process`, `decision`, `terminal`), `note?` (80자까지)이고, 간선은 `from`, `to`, `label?` (40자까지), `style?` (`dashed` — 임시·비동기 관계에)입니다. `edges`는 비어 있어도 `[]`로 써야 합니다 |
+| `sequence` | `participants` (2-8명), `steps` (1-40개), `title?` (80자까지). 참여자는 `id`, `label` (1-24자)이고, 단계는 `from`, `to`, `label` (1-60자), `kind?` (`call`, `return`, `async`, `note`), `note?` (80자까지 — 단계 아래 흐린 줄로 그립니다)입니다 |
+| `board_ref` | `board` (이 세션의 다른 보드 id), `title?` (80자까지). 아래 **board_ref·divider** 설명 |
+| `divider` | 필드 없음. 아래 **board_ref·divider** 설명 |
 
 **블록 id**: 블록 id는 `b1`, `b2`처럼 `b<n>`이고, 보드마다 세는 카운터(`nextId`)가 붙입니다. 카운터는 늘기만 하므로 지운 블록의 id를 다른 블록이 이어받는 일이 없습니다. 패널은 블록마다 `[b3] flow · 제목` 머리글을 보여 주기 때문에, 사용자가 "b3을 고쳐 줘"라고 말하면 그 블록 하나를 가리킵니다. 머리글은 누르면 블록을 프롬프트에 칩으로 넣는 버튼이기도 합니다([블록 칩](#블록-칩)).
 
@@ -647,6 +650,10 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 - diff가 비어 있거나(`... is empty; nothing differs`) git이 읽지 못하면(알 수 없는 `ref`, git 실행 실패, 저장소 밖 경로) `invalid_board_edit`로 거부하고 보드는 그대로입니다.
 - `trace`와 같은 규칙으로 저장합니다. 40줄까지만 저장하고 넘으면 앞의 39줄과 `… +N more lines` 한 줄로 자르며, 줄 하나는 240자까지만 저장합니다. 그릴 때 읽은 줄이 남고, 새로 읽으려면 `update`로 `ref`나 `path`를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다. `get`은 `lines` 대신 줄 수 `lineCount`를 돌려줍니다. 같은 `edit` 호출에서 방금 `insert`한 `diff`의 `ref`·`path`를 `update`로 바꾸면 `code_peek`처럼 `could not read …`로 실패합니다.
 - 패널의 머리글 줄은 git 인자 그대로 `<ref>`(예: `main`), `path`가 있으면 `<ref> -- <path>`(예: `main..feature -- src/a.ts`)이고, 줄은 `trace`처럼 1부터 번호를 매깁니다. 패널은 `+`·`-` 줄에 색을 입히지 않습니다. `export`는 `` `ref · path` `` 한 줄 뒤에 `diff` 코드 펜스를 씁니다. 파일 내용 일부가 `code_peek`처럼 `.claude/dag/boards/`에 복사됩니다.
+
+**board_ref·divider**: `board_ref`는 같은 세션의 다른 보드를 가리키는 링크 블록입니다. `board`에는 `create`/`list`가 돌려주는 `board_id`를 쓰고, 편집 시점에 세션에 존재하는 보드여야 하며 자기 보드는 가리킬 수 없습니다(없으면 `invalid_board_edit`). 보드는 지우는 동작이 없으므로 링크가 끊길 일이 없습니다. 패널에서는 `→ Board: <title 또는 board_id>` 줄이 버튼이라 누르면 그 보드로 선택이 바뀌고, `export`에서는 대상을 가리키는 인용 줄이 됩니다. `divider`는 필드가 없는 가로 구분선입니다. `update`로 바꿀 필드가 없으므로 내용 변경은 `replace`로만 합니다. `export`에서는 `---`입니다.
+
+**점선 간선과 단계 `note`**: flow 간선의 `style?: 'dashed'`는 연결선 도형 자체가 아니라 글자로 표시됩니다 — 상자 보기에서는 도착 노드의 들어오는 간선 목록에 `╌` 접두사가 붙고, 좁은 목록 보기에서는 화살표가 `⇢`가 됩니다(연결선 도형은 DAG 패널과 같은 그리기를 공유합니다). `export`의 mermaid에서는 `-.->`로 씁니다. sequence 단계의 `note?`는 그 단계 아래(화살표 아래나 lifeline 옆)에 흐린 줄로 그려지고, `export`에서는 `Note over <from>,<to>: <note>`가 됩니다.
 
 ### 보드 섹션
 

@@ -1,4 +1,4 @@
-import type { FlowBlock, FlowNode } from '../engine/board-types.ts'
+import type { FlowBlock, FlowEdge, FlowNode } from '../engine/board-types.ts'
 import { graphFits, graphLines, perRowFor } from './graph-layout.ts'
 import { frontiersOf, type GraphModel, type GraphNode } from './graph-model.ts'
 import { fit, type Line } from './text.ts'
@@ -10,6 +10,12 @@ const KIND_GLYPHS = { decision: '◇', process: '□', terminal: '○' }
 const glyphOf = (node: FlowNode) => KIND_GLYPHS[node.kind ?? 'process']
 
 const edgeLabel = (label: string | undefined) => (label ? ` (${label})` : '')
+
+// The connectors between the boxes are drawn by graph-layout from from/to pairs alone and stay solid, so a dashed edge
+// shows in the text instead: the dash of a sequence diagram's return shaft before its source in the box it leads into,
+// and the dashed arrow a sequence list uses for an async step in this list.
+const DASH = '╌'
+const arrowOf = (edge: FlowEdge) => (edge.style === 'dashed' ? '⇢' : '→')
 
 function nameOf(block: FlowBlock): (id: string) => string {
   const labels = new Map(block.nodes.map(node => [node.id, node.label]))
@@ -28,7 +34,7 @@ function modelOf(block: FlowBlock, labels: FlowLabels): GraphModel {
     color: '',
     activity: '',
     tail: '',
-    incoming: block.edges.filter(edge => edge.to === node.id).map(edge => `${nameFor(edge.from)}${edgeLabel(edge.label)}`),
+    incoming: block.edges.filter(edge => edge.to === node.id).map(edge => `${edge.style === 'dashed' ? DASH : ''}${nameFor(edge.from)}${edgeLabel(edge.label)}`),
     bare: true,
     selected: false,
     expanded: false,
@@ -48,7 +54,7 @@ function modelOf(block: FlowBlock, labels: FlowLabels): GraphModel {
 function listLines(block: FlowBlock, columns: number): Line[] {
   const nameFor = nameOf(block)
   const nodeTexts = block.nodes.map(node => `${glyphOf(node)} ${node.label}${node.note ? ` — ${node.note}` : ''}`)
-  const edgeTexts = block.edges.map(edge => `${nameFor(edge.from)} → ${nameFor(edge.to)}${edgeLabel(edge.label)}`)
+  const edgeTexts = block.edges.map(edge => `${nameFor(edge.from)} ${arrowOf(edge)} ${nameFor(edge.to)}${edgeLabel(edge.label)}`)
   return [...nodeTexts, ...edgeTexts].map(text => [{ text: fit(text, columns) }])
 }
 

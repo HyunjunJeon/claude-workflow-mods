@@ -20,13 +20,30 @@ export type TraceBlock = { id: string; type: 'trace'; title?: string; run: strin
 // ref may be a range (main..feature); path is project-relative and scopes the diff to one file, absent means the whole diff.
 export type DiffBlock = { id: string; type: 'diff'; title?: string; ref: string; path?: string; lines: string[]; note?: string }
 export type FlowNode = { id: string; label: string; kind?: FlowNodeKind; note?: string }
-export type FlowEdge = { from: string; to: string; label?: string }
+// style is absent for the solid default; 'dashed' marks an optional or asynchronous link, so the solid edge stays bare.
+export type FlowEdge = { from: string; to: string; label?: string; style?: 'dashed' }
 export type FlowBlock = { id: string; type: 'flow'; title?: string; nodes: FlowNode[]; edges: FlowEdge[] }
 export type SequenceParticipant = { id: string; label: string }
-export type SequenceStep = { from: string; to: string; label: string; kind?: SequenceStepKind }
+// note is a short aside under the step's label, for detail that would crowd the arrow.
+export type SequenceStep = { from: string; to: string; label: string; kind?: SequenceStepKind; note?: string }
 export type SequenceBlock = { id: string; type: 'sequence'; title?: string; participants: SequenceParticipant[]; steps: SequenceStep[] }
+// board is the board_id of another board in the same session; the pane draws the block as a button that selects it.
+export type BoardRefBlock = { id: string; type: 'board_ref'; board: string; title?: string }
+// A rule between groups of blocks; it carries no content.
+export type DividerBlock = { id: string; type: 'divider' }
 
-export type Block = SectionBlock | CalloutBlock | TableBlock | CodePeekBlock | CodeBlock | TraceBlock | DiffBlock | FlowBlock | SequenceBlock
+export type Block =
+  | SectionBlock
+  | CalloutBlock
+  | TableBlock
+  | CodePeekBlock
+  | CodeBlock
+  | TraceBlock
+  | DiffBlock
+  | FlowBlock
+  | SequenceBlock
+  | BoardRefBlock
+  | DividerBlock
 export type BlockType = Block['type']
 
 // What the model sends: a block without its id. Three kinds also lose their lines, which the host fills: a code peek's from the
@@ -44,12 +61,16 @@ export type BlockInput =
   | DiffInput
   | Omit<FlowBlock, 'id'>
   | Omit<SequenceBlock, 'id'>
+  | Omit<BoardRefBlock, 'id'>
+  | Omit<DividerBlock, 'id'>
 
+// move reorders a block after afterId and changes nothing else about it; the engine decides where an absent afterId puts it.
 export type BoardEdit =
   | { op: 'insert'; block: BlockInput; afterId?: string }
   | { op: 'update'; id: string; changes: Record<string, unknown> }
   | { op: 'replace'; id: string; block: BlockInput }
   | { op: 'remove'; id: string }
+  | { op: 'move'; id: string; afterId?: string }
 
 // The run a result board reports, and for each fact slot (summary, nodes, graph, writes, ...) the id of the block that holds it, so the
 // next settle of the same run replaces those blocks in place. A fact's block may be gone: the model is free to remove it.

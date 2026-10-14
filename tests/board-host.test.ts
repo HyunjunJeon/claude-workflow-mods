@@ -631,6 +631,110 @@ test('a settled run\'s decisions table holds the run\'s records and not another 
   expect(rows.map(row => row[0])).toEqual(['routing'])
 })
 
+const REF = (board: string, title?: string) => ({ op: 'insert', block: { type: 'board_ref', board, ...(title ? { title } : {}) } })
+
+test('a board_ref insert naming another board of the session is saved with that board_id', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const target = await create($, 'Interview')
+  const source = await create($, 'Plan')
+
+  const edited = await board($, { action: 'edit', board_id: source, edits: [REF(target, 'What was asked')] })
+  expect(edited).toEqual({ isError: false, value: { board_id: source, blocks: [{ id: 'b1', type: 'board_ref' }], inserted: ['b1'] } })
+  expect(savedBoards(h).find(saved => saved.boardId === source)?.blocks).toEqual([{ id: 'b1', type: 'board_ref', board: target, title: 'What was asked' }])
+})
+
+test('a board_ref naming a board the session does not hold is refused with invalid_board_edit and nothing is saved', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const source = await create($, 'Plan')
+
+  // board_gone_abc123 has a board_id's shape, so only the lookup in the session's boards refuses it; board_missing has not.
+  for (const missing of ['board_gone_abc123', 'board_missing']) {
+    const refused = await board($, { action: 'edit', board_id: source, edits: [REF(missing)] })
+    expect(refused.isError).toBe(true)
+    expect(refused.value.error).toMatchObject({ code: 'invalid_board_edit', message: expect.stringContaining('edits[0]: board') })
+  }
+  expect(savedBoards(h)[0]?.blocks).toEqual([])
+})
+
+// The person is on board "Plan", which links "Interview" through a board_ref.
+async function linkedBoards($: Engine): Promise<{ target: string; source: string }> {
+  const target = await create($, 'Interview')
+  const source = await create($, 'Plan')
+  await board($, { action: 'edit', board_id: source, edits: [REF(target)] })
+  await command($, 'inspect board')
+  return { target, source }
+}
+
+test('pressing a board_ref button selects the board it names and the Board section shows that board', async ($, on) => {
+  harness(on)
+  await boot($)
+  const { target } = await linkedBoards($)
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  expect(await ui.find({ type: 'Text', text: 'Plan (2/2)', in: 'inspector' })).toBeDefined()
+
+  await ui.press({ key: `board:goto:${target}` })
+  expect(await ui.find({ type: 'Text', text: 'Interview (1/2)', in: 'inspector' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a board_ref pressed on a later page opens its board on the first page', async ($, on) => {
+  harness(on)
+  await boot($)
+  // One edit call takes at most 20 edits, so each board gets its 30 sections in two calls.
+  const parts = Array.from({ length: 15 }, (_, index) => ({ op: 'insert', block: { type: 'section', title: `Part ${index}`, text: 'Words.' } }))
+  const target = await create($, 'Interview')
+  const source = await create($, 'Plan')
+  for (const id of [target, source]) {
+    await board($, { action: 'edit', board_id: id, edits: parts })
+    await board($, { action: 'edit', board_id: id, edits: parts })
+  }
+  expect((await board($, { action: 'edit', board_id: source, edits: [REF(target)] })).isError).toBe(false)
+  await command($, 'inspect board')
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  while (await ui.find({ type: 'Button', key: 'page:next', in: 'inspector' })) await ui.press({ key: 'page:next' })
+  expect(await ui.find({ type: 'Button', key: 'page:prev', in: 'inspector' })).toBeDefined()
+
+  await ui.press({ key: `board:goto:${target}` })
+  expect(await ui.find({ type: 'Text', text: 'Interview (1/2)', in: 'inspector' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'page:prev', in: 'inspector' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'page:next', in: 'inspector' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a goto action naming a board the session does not hold leaves the shown board as it was', async ($, on) => {
+  harness(on)
+  await boot($)
+  const { target } = await linkedBoards($)
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  // The shown board is not the one changed last, which is what an unknown selection would fall back to.
+  await ui.press({ key: `board:goto:${target}` })
+
+  await ui.post({ action: 'board:goto:board_gone_abc123' }, { in: 'inspector' })
+  expect(await ui.find({ type: 'Text', text: 'Interview (1/2)', in: 'inspector' })).toBeDefined()
+  await ui.unmount()
+})
+
+// A result board is redrawn at every settle by replacing its fact blocks, so a ref the model added next to them has to stay.
+test('a board_ref on a result board survives the redraw when the run settles again', { options: { auto_recovery: false } }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const interview = await create($, 'Interview')
+  h.control.exitCode = 1
+  const runId = await start($, WRITING)
+  await finish($, h)
+  const result = resultBoardOf(h)
+  const drawn = await board($, { action: 'edit', board_id: result.boardId, edits: [REF(interview)] })
+  expect(drawn.isError).toBe(false)
+
+  h.control.exitCode = 0
+  await dag($, { action: 'retry', run_id: runId })
+  await finish($, h, 'agent-2')
+
+  expect(resultBoardOf(h).blocks.filter(block => block.type === 'board_ref')).toEqual([{ id: 'b5', type: 'board_ref', board: interview }])
+})
+
 test('accepting a handoff copies the source session\'s boards under the accepting session id', async ($, on) => {
   const h = harness(on)
   await boot($)

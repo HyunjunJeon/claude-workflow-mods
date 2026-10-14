@@ -2338,7 +2338,8 @@ async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): 
     if (!lines.ok) return err(lines.error)
     diffs.set(diffKey(request), lines.value)
   }
-  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks, traces, diffs })
+  const boardIds = new Set(boards.map(candidate => candidate.boardId))
+  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks, traces, diffs, boardIds })
   if (!applied.ok) return err(applied.error)
   const edited = applied.value.board
   await saveBoards($, boards.map(candidate => (candidate.boardId === edited.boardId ? edited : candidate)))
@@ -2421,7 +2422,7 @@ async function drawResultBoard($: EngineInterface, run: Run): Promise<SettleBoar
     }
     const previous = linked?.run?.facts ?? {}
     const { edits, insertedSlots } = factEdits(facts, previous, board.blocks.map(block => block.id))
-    const applied = applyEdits(board, edits, { now, peeks: new Map(), traces: new Map(), diffs: new Map() })
+    const applied = applyEdits(board, edits, { now, peeks: new Map(), traces: new Map(), diffs: new Map(), boardIds: new Set(boards.map(candidate => candidate.boardId)) })
     if (!applied.ok) throw new Error(applied.error.message)
     const drawnBoard: Board = { ...applied.value.board, run: { runId: run.runId, facts: factLink(previous, edits, insertedSlots, applied.value.inserted) } }
     await saveBoards($, linked ? boards.map(candidate => (candidate.boardId === drawnBoard.boardId ? drawnBoard : candidate)) : [...boards, drawnBoard])
@@ -2985,6 +2986,13 @@ async function inspectorAction($: EngineInterface, action: string): Promise<void
   else if (action === 'board:prev' || action === 'board:next') {
     selectedBoardId = adjacentBoardId(boards, selectedBoardId, action === 'board:next' ? 1 : -1)
     inspectorPage = 0
+  } else if (action.startsWith('board:goto:')) {
+    // A board_ref button names a board of this session; a stale or forged id selects nothing.
+    const target = action.slice('board:goto:'.length)
+    if (boards.some(candidate => candidate.boardId === target)) {
+      selectedBoardId = target
+      inspectorPage = 0
+    }
   } else if (action === 'decision:back') selectedDecisionId = undefined
   else if (action.startsWith('decision:')) selectedDecisionId = action.slice('decision:'.length)
   else if (action.startsWith('chip:')) await citeBlock($, action.slice('chip:'.length))

@@ -1,8 +1,9 @@
-import type { CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, DiffBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../engine/board-types.ts'
+import type { BoardRefBlock, CalloutBlock, CalloutTone, CodeBlock, CodePeekBlock, DiffBlock, SectionBlock, TableBlock, TraceBlock, TracePart } from '../engine/board-types.ts'
 import { ACCENT, clean, fit, fitTail, width, type Line, type Segment } from './text.ts'
 
-// The text blocks of a board (section, callout, table, code_peek, code, trace, diff) as terminal lines. Every returned line is at most
-// `columns` cells wide and holds no control characters, because block text comes from the model and the files it read.
+// The text blocks of a board (section, callout, table, code_peek, code, trace, diff, board_ref, divider) as terminal lines. Every
+// returned line is at most `columns` cells wide and holds no control characters, because block text comes from the model and the
+// files it read.
 
 export type CalloutLabels = Record<CalloutTone, string>
 
@@ -16,6 +17,8 @@ const TABLE_RULE_JOIN = '─┼─'
 const CODE_SEPARATOR = ' │ '
 const TITLE_SEPARATOR = ' · '
 const TAB = '  '
+const RULE = '─'
+const REF_ARROW = '→ '
 // A narrower column shows too little of a cell to tell the rows apart.
 const MIN_CELL = 4
 
@@ -235,4 +238,16 @@ export function traceLines(block: TraceBlock, columns: number, parts: Record<Tra
 export function diffLines(block: DiffBlock, columns: number): Line[] {
   const header = sourceHeader(block.path ? `${block.ref} -- ${block.path}` : block.ref, block.title, columns)
   return clipAll([header, ...numberedLines(block.lines, 1, columns), ...noteLines(block.note, columns)], columns)
+}
+
+// A rule across the whole pane between groups of blocks. It carries no model text, so it needs no clip.
+export function dividerLines(columns: number): Line[] {
+  return columns > 0 ? [[faint(RULE.repeat(columns))]] : []
+}
+
+// One row, because the pane draws the row as a button that selects the board. The engine stores only the id of the target board,
+// so a board_ref names it by the block's title and falls back to the id when no title is set.
+export function boardRefLines(block: BoardRefBlock, columns: number, label: string): Line[] {
+  const name = block.title?.trim() || block.board
+  return clipAll([[{ text: REF_ARROW, color: ACCENT }, faint(`${label}: `), strong(name, { color: ACCENT })]], columns)
 }

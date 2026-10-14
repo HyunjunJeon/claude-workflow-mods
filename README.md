@@ -87,8 +87,8 @@ DAG로 실행하면 진행 알림이 나오고, 실행이 끝나면 노드별 �
 /dag inspect board          패널을 보드 화면으로 열기
 ```
 
-보드는 `section`, `callout`, `table`, `code_peek`, `code`, `trace`, `diff`, `flow`, `sequence` 아홉 가지 블록으로 이루어집니다.
-`code_peek`은 파일의 몇 줄을 그릴 때의 내용 그대로 보여 주고(`ref`를 주면 워킹 트리 대신 그 git ref 시점의 줄), `code`는 모델이 제안하는 코드 조각을, `trace`는 이 세션 실행의 노드 산출물(출력·답변·오류·검증 보고서)을 그릴 때의 내용 그대로 인용합니다. `diff`는 호스트가 `git diff <ref>`(`path`가 있으면 그 파일만)로 읽은 변경을 인용합니다. `flow`에는 순환하는 간선을 그릴 수 없습니다.
+보드는 `section`, `callout`, `table`, `code_peek`, `code`, `trace`, `diff`, `flow`, `sequence`, `board_ref`, `divider` 열한 가지 블록으로 이루어집니다.
+`code_peek`은 파일의 몇 줄을 그릴 때의 내용 그대로 보여 주고(`ref`를 주면 워킹 트리 대신 그 git ref 시점의 줄), `code`는 모델이 제안하는 코드 조각을, `trace`는 이 세션 실행의 노드 산출물(출력·답변·오류·검증 보고서)을 그릴 때의 내용 그대로 인용합니다. `diff`는 호스트가 `git diff <ref>`(`path`가 있으면 그 파일만)로 읽은 변경을 인용합니다. `flow`에는 순환하는 간선을 그릴 수 없고, 간선에 `style: 'dashed'`를 주면 점선 관계로 표시되며 sequence의 단계에는 `note`를 달 수 있습니다. `board_ref`는 같은 세션의 다른 보드를 가리키는 링크(패널에서 누르면 그 보드로 갑니다)이고 `divider`는 가로 구분선입니다. `edit`의 `move` 연산은 블록을 `afterId` 뒤로 옮깁니다.
 보드는 세션마다 `.claude/dag/boards/`에 저장하며, 다른 산출물처럼 보관 기간(`retention_days`)이 지나면 정리합니다. `/dag accept`로 실행을 인계받은 세션은 원래 세션의 보드도 함께 가져옵니다.
 `/dag-workflow:interview`와 `/dag-workflow:pm`은 질문하는 동안 모호함 표와 설계 트리, 제품 결정·미룬 결정·미해결 항목 표를 보드에 그리고 라운드마다 갱신하며, 보드를 보여 줄 수 없으면 대화에 출력합니다.
 계획 스킬도 `start` 전에 제안 정의의 형태를 `flow` 블록 하나로 계획 보드에 그리므로, `start_approval`로 보류된 실행의 승인 블록이 가리키는 보드는 보통 승인하려는 그래프 자체입니다.

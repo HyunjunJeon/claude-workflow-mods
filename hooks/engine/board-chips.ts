@@ -12,7 +12,7 @@ const NOT_IN_A_LABEL = /[\p{Cc}\u2028\u2029[\]]/gu
 // The text a block header puts into the prompt box. The id leads so the model can find the block, and the name
 // is the title, else the type, so the person can tell chips apart.
 export function chipLabel(block: Block): string {
-  const title = (block.title ?? '').replace(NOT_IN_A_LABEL, '').trim()
+  const title = (('title' in block ? block.title : undefined) ?? '').replace(NOT_IN_A_LABEL, '').trim()
   const name = Array.from(title === '' ? block.type : title)
   const shown = name.length > CHIP_NAME_MAX ? `${name.slice(0, CHIP_NAME_MAX - 1).join('')}…` : name.join('')
   return `[${block.id} · ${shown}]`

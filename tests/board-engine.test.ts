@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from '../hooks/engine/board-spec.ts'
 import { applyEdits, boardForModel, diffKey, diffsNeeded, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded } from '../hooks/engine/board.ts'
 import { boardToMarkdown } from '../hooks/engine/board-export.ts'
-import type { Block, BlockInput, Board, BoardEdit, BoardFile, TracePart } from '../hooks/engine/board-types.ts'
+import type { Block, BlockInput, Board, BoardEdit, BoardFile, FlowEdge, TracePart } from '../hooks/engine/board-types.ts'
 import { TOOL_DESCRIPTION_LIMIT } from '../hooks/engine/tool-spec.ts'
 import type { Result } from '../hooks/engine/types.ts'
 
@@ -21,8 +21,9 @@ function apply(
   peeks: ReadonlyMap<string, string[]> = NO_PEEKS,
   traces: ReadonlyMap<string, string[]> = NO_TRACES,
   diffs: ReadonlyMap<string, string[]> = NO_DIFFS,
+  boardIds?: ReadonlySet<string>,
 ) {
-  return applyEdits(board, edits, { now: NOW, peeks, traces, diffs })
+  return applyEdits(board, edits, { now: NOW, peeks, traces, diffs, boardIds })
 }
 
 function insert(block: BlockInput, afterId?: string): BoardEdit {
@@ -56,7 +57,7 @@ function refused<T>(result: Result<T>) {
 
 const section = { type: 'section', title: 'Why', text: 'Because' } satisfies BlockInput
 const callout = { type: 'callout', tone: 'risk', title: 'Watch', text: 'A loop never ends' } satisfies BlockInput
-const flowOf = (edges: { from: string; to: string }[]): BlockInput => ({
+const flowOf = (edges: FlowEdge[]): BlockInput => ({
   type: 'flow',
   nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }],
   edges,
@@ -854,7 +855,7 @@ test('parseEdits takes 1 to 20 edits', () => {
 test('parseEdits refuses an unknown op, a missing field and an unknown field, naming the edit', () => {
   const unknownOp = refused(parseEdits([{ op: 'remove', id: 'b1' }, { op: 'delete', id: 'b1' }]))
   expect(unknownOp.code).toBe('invalid_board_edit')
-  expect(unknownOp.message).toBe('edits[1]: op: must be one of insert, update, replace, remove')
+  expect(unknownOp.message).toBe('edits[1]: op: must be one of insert, update, replace, remove, move')
   expect(refused(parseEdits([{ op: 'remove' }])).message).toContain('edits[0]: id')
   expect(refused(parseEdits([{ op: 'insert' }])).message).toContain('edits[0]: block')
   expect(refused(parseEdits([{ op: 'insert', block: { type: 'section', title: 'x' }, after_id: 'b1' }])).message).toContain('edits[0]: after_id: unknown field')
@@ -1199,4 +1200,336 @@ test('the board tool description and schema name the diff block and the ref fiel
   expect(BOARD_TOOL_DESCRIPTION).toContain('code_peek {path, ref?')
   expect(BOARD_TOOL_DESCRIPTION).toContain('diff {ref, path?')
   expect(BOARD_TOOL_DESCRIPTION).toContain('quotes a git diff the host runs')
+})
+
+// A board_id looks like board_<time>_<random>; the session holds these three, and the board being edited is the first.
+const OWN_BOARD = 'board_m0_ownown'
+const OTHER_BOARD = 'board_m1_aaaaaa'
+const THIRD_BOARD = 'board_m2_bbbbbb'
+const MISSING_BOARD = 'board_zz_missing'
+const SESSION_BOARDS: ReadonlySet<string> = new Set([OWN_BOARD, OTHER_BOARD, THIRD_BOARD])
+const NO_BOARDS: ReadonlySet<string> = new Set()
+const ownBoard = (blocks: Block[] = []): Board => ({ ...boardOf(blocks), boardId: OWN_BOARD })
+const linkTo = (board: string, title?: string): BlockInput => ({ type: 'board_ref', board, ...(title ? { title } : {}) })
+const divider: BlockInput = { type: 'divider' }
+// Applies edits as a host that knows the three boards of the session would.
+const applyInSession = (board: Board, edits: BoardEdit[], boardIds: ReadonlySet<string> = SESSION_BOARDS) =>
+  apply(board, edits, NO_PEEKS, NO_TRACES, NO_DIFFS, boardIds)
+
+test('insert adds a board_ref to another board of the session, trimming its title', () => {
+  const { board } = accepted(applyInSession(ownBoard(), [insert(linkTo(OTHER_BOARD, '  Result  '))]))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'board_ref', board: OTHER_BOARD, title: 'Result' }])
+})
+
+test('a board_ref without a title keeps only its board', () => {
+  const { board } = accepted(applyInSession(ownBoard(), [insert(linkTo(OTHER_BOARD)), insert({ type: 'board_ref', board: THIRD_BOARD, title: '   ' })]))
+  expect(board.blocks).toEqual([{ id: 'b1', type: 'board_ref', board: OTHER_BOARD }, { id: 'b2', type: 'board_ref', board: THIRD_BOARD }])
+})
+
+test('a board_ref to a board the session does not hold is refused, naming the board and the list action', () => {
+  const error = refused(applyInSession(ownBoard(), [insert(linkTo(MISSING_BOARD))]))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('edits[0]: board:')
+  expect(error.message).toContain(MISSING_BOARD)
+  expect(error.message).toContain('list')
+})
+
+test('a board_ref is refused when the caller knows of no boards, whether it passes none or an empty set', () => {
+  const missing = refused(apply(ownBoard(), [insert(linkTo(OTHER_BOARD))]))
+  expect(missing.code).toBe('invalid_board_edit')
+  expect(missing.message).toContain(OTHER_BOARD)
+  expect(refused(applyInSession(ownBoard(), [insert(linkTo(OTHER_BOARD))], NO_BOARDS)).code).toBe('invalid_board_edit')
+})
+
+test('a board_ref cannot point at the board it is drawn on, even when the session lists that board', () => {
+  const error = refused(applyInSession(ownBoard(), [insert(linkTo(OWN_BOARD))]))
+  expect(error.code).toBe('invalid_board_edit')
+  expect(error.message).toContain('edits[0]: board:')
+  expect(error.message).toContain('own board')
+})
+
+test('a board_ref refused later in the edits changes nothing, and the error names that edit', () => {
+  const start = ownBoard()
+  const error = refused(applyInSession(start, [insert(linkTo(OTHER_BOARD)), insert(linkTo(MISSING_BOARD))]))
+  expect(error.message.startsWith('edits[1]: board:')).toBe(true)
+  expect(start.blocks).toEqual([])
+})
+
+test('a board_ref board must look like a board_id, and only board and title are fields', () => {
+  for (const board of ['board_1', 'main', '', 'Board_a_b', 'board_a_', 'board__b', '../board_a_b', 'board_a_b_c', `board_a_${'b'.repeat(60)}`, 7, null]) {
+    const error = refused(parseEdits([{ op: 'insert', block: { type: 'board_ref', board } }]))
+    expect(error.code).toBe('invalid_board_edit')
+    expect(error.message).toContain('edits[0]: board:')
+  }
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'board_ref' } }])).message).toContain('edits[0]: board:')
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'board_ref', board: OTHER_BOARD, text: 'x' } }])).message).toContain('edits[0]: text: unknown field')
+  expect(refused(parseEdits([{ op: 'insert', block: { type: 'board_ref', board: OTHER_BOARD, title: 't'.repeat(81) } }])).message).toContain('edits[0]: title')
+  expect(accepted(parseEdits([{ op: 'insert', block: { type: 'board_ref', board: OTHER_BOARD } }]))).toHaveLength(1)
+})
+
+test('update of a board_ref board checks the target again, and of its title does not', () => {
+  const start = ownBoard([{ id: 'b1', type: 'board_ref', board: OTHER_BOARD }])
+  const titled = accepted(applyInSession(start, [{ op: 'update', id: 'b1', changes: { title: 'Result' } }], NO_BOARDS)).board
+  expect(titled.blocks).toEqual([{ id: 'b1', type: 'board_ref', board: OTHER_BOARD, title: 'Result' }])
+  const moved = accepted(applyInSession(start, [{ op: 'update', id: 'b1', changes: { board: THIRD_BOARD } }])).board
+  expect(moved.blocks).toEqual([{ id: 'b1', type: 'board_ref', board: THIRD_BOARD }])
+  const missing = refused(applyInSession(start, [{ op: 'update', id: 'b1', changes: { board: MISSING_BOARD } }]))
+  expect(missing.message).toContain('edits[0]: board:')
+  expect(missing.message).toContain(MISSING_BOARD)
+  expect(refused(applyInSession(start, [{ op: 'update', id: 'b1', changes: { board: OWN_BOARD } }])).message).toContain('own board')
+  expect(refused(applyInSession(start, [{ op: 'update', id: 'b1', changes: { board: 'main' } }])).message).toContain('edits[0]: board:')
+})
+
+test('replace turns a section into a board_ref and checks its target', () => {
+  const start = ownBoard([{ id: 'b1', ...section }])
+  const replaced = accepted(applyInSession(start, [{ op: 'replace', id: 'b1', block: linkTo(OTHER_BOARD, 'Result') }])).board
+  expect(replaced.blocks).toEqual([{ id: 'b1', type: 'board_ref', board: OTHER_BOARD, title: 'Result' }])
+  expect(refused(applyInSession(start, [{ op: 'replace', id: 'b1', block: linkTo(MISSING_BOARD) }])).message).toContain('edits[0]: board:')
+  expect(refused(applyInSession(start, [{ op: 'replace', id: 'b1', block: linkTo(OWN_BOARD) }])).message).toContain('own board')
+})
+
+test('insert adds a divider that holds no field', () => {
+  const { board } = accepted(apply(boardOf(), [insert(section), insert(divider), insert(callout)]))
+  expect(board.blocks).toEqual([{ id: 'b1', ...section }, { id: 'b2', type: 'divider' }, { id: 'b3', ...callout }])
+})
+
+test('a divider refuses every field on insert, and an update to it has nothing to change', () => {
+  const field = refused(parseEdits([{ op: 'insert', block: { type: 'divider', title: 'x' } }]))
+  expect(field.message).toContain('edits[0]: title: unknown field')
+  const start = boardOf([{ id: 'b1', type: 'divider' }])
+  for (const changes of [{ title: 'x' }, { text: '' }, { board: OTHER_BOARD }]) {
+    const error = refused(apply(start, [{ op: 'update', id: 'b1', changes }]))
+    expect(error.code).toBe('invalid_board_edit')
+    expect(error.message).toContain('unknown field')
+  }
+  expect(refused(apply(start, [{ op: 'update', id: 'b1', changes: { type: 'divider' } }])).message).toContain('type: cannot be changed')
+  expect(refused(parseEdits([{ op: 'update', id: 'b1', changes: {} }])).message).toContain('edits[0]: changes')
+})
+
+test('parseBoardFile reads back a board_ref and a divider, and keeps a ref whose board is gone', () => {
+  const drawn = accepted(applyInSession(ownBoard(), [insert(section), insert(linkTo(OTHER_BOARD, 'Result')), insert(divider)])).board
+  const file: BoardFile = { schemaVersion: 1, sessionId: 'sess', boards: [drawn] }
+  expect(accepted(parseBoardFile(JSON.stringify(file), 'sess'))).toEqual(file)
+})
+
+test('parseBoardFile checks a stored board_ref and a stored divider again', () => {
+  const drawn = accepted(applyInSession(ownBoard(), [insert(linkTo(OTHER_BOARD)), insert(divider)])).board
+  const text = JSON.stringify({ schemaVersion: 1, sessionId: 'sess', boards: [drawn] })
+  const notAnId = refused(parseBoardFile(text.replace(`"board":"${OTHER_BOARD}"`, '"board":"main"'), 'sess'))
+  expect(notAnId.code).toBe('invalid_board_file')
+  expect(notAnId.message).toContain('boards[0].blocks[0].board')
+  const withField = refused(parseBoardFile(text.replace('{"id":"b2","type":"divider"}', '{"id":"b2","type":"divider","title":"x"}'), 'sess'))
+  expect(withField.message).toContain('boards[0].blocks[1].title')
+})
+
+test('a flow edge may be dashed, and a solid edge stays bare', () => {
+  const flow: BlockInput = {
+    type: 'flow',
+    nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }],
+    edges: [{ from: 'a', to: 'b' }, { from: 'a', to: 'c', label: 'maybe', style: 'dashed' }],
+  }
+  const { board } = accepted(apply(boardOf(), [insert(flow)]))
+  expect(board.blocks).toEqual([{ id: 'b1', ...flow }])
+  const edges = board.blocks[0]?.type === 'flow' ? board.blocks[0].edges : []
+  expect(edges.map(edge => Object.keys(edge))).toEqual([['from', 'to'], ['from', 'to', 'label', 'style']])
+})
+
+test('a flow edge style is dashed or absent, and anything else is refused naming the field', () => {
+  const nodes = [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }]
+  for (const style of ['solid', 'dotted', 'DASHED', '', 1, null]) {
+    const error = refused(parseEdits([{ op: 'insert', block: { type: 'flow', nodes, edges: [{ from: 'a', to: 'b', style }] } }]))
+    expect(error.code).toBe('invalid_board_edit')
+    expect(error.message).toBe('edits[0]: edges[0].style: must be one of dashed')
+  }
+})
+
+test('a dashed edge still joins nodes without repeating or looping', () => {
+  const twice = refused(apply(boardOf(), [insert(flowOf([{ from: 'a', to: 'b' }, { from: 'a', to: 'b', style: 'dashed' }]))]))
+  expect(twice.message).toContain('a -> b is drawn twice')
+  const loop = refused(apply(boardOf(), [insert(flowOf([{ from: 'a', to: 'b' }, { from: 'b', to: 'a', style: 'dashed' }]))]))
+  expect(loop.message).toContain('cycle')
+})
+
+const calls = [{ id: 'user', label: 'User' }, { id: 'hook', label: 'Hook' }]
+const sequenceWith = (step: Record<string, unknown>) => parseEdits([{ op: 'insert', block: { type: 'sequence', participants: calls, steps: [{ from: 'user', to: 'hook', label: 'prompt', ...step }] } }])
+
+test('a sequence step may carry a note of at most 80 characters, trimmed, and an empty one is dropped', () => {
+  const noted: BlockInput = { type: 'sequence', participants: calls, steps: [{ from: 'user', to: 'hook', label: 'prompt', kind: 'call', note: 'sent before the gate' }] }
+  expect(accepted(apply(boardOf(), [insert(noted)])).board.blocks).toEqual([{ id: 'b1', ...noted }])
+  const trimmed = accepted(sequenceWith({ note: '  short  ' }))[0]
+  expect(trimmed?.op === 'insert' && trimmed.block.type === 'sequence' ? trimmed.block.steps : []).toEqual([{ from: 'user', to: 'hook', label: 'prompt', note: 'short' }])
+  const blank = accepted(sequenceWith({ note: '   ' }))[0]
+  expect(blank?.op === 'insert' && blank.block.type === 'sequence' ? Object.keys(blank.block.steps[0] ?? {}) : []).toEqual(['from', 'to', 'label'])
+  expect(accepted(sequenceWith({ note: 'n'.repeat(80) }))).toHaveLength(1)
+})
+
+test('a sequence step note over 80 characters or not text is refused naming the step', () => {
+  const long = refused(sequenceWith({ note: 'n'.repeat(81) }))
+  expect(long.code).toBe('invalid_board_edit')
+  expect(long.message).toBe('edits[0]: steps[0].note: must be at most 80 characters, got 81')
+  for (const note of [5, ['x']]) expect(refused(sequenceWith({ note })).message).toBe('edits[0]: steps[0].note: must be a string')
+})
+
+const threeSections = () => boardOf([{ id: 'b1', type: 'section', title: 'One' }, { id: 'b2', type: 'section', title: 'Two' }, { id: 'b3', type: 'section', title: 'Three' }])
+const orderOf = (board: Board) => board.blocks.map(block => block.id)
+const move = (id: string, afterId?: string): BoardEdit => (afterId === undefined ? { op: 'move', id } : { op: 'move', id, afterId })
+
+test('move places a block directly after the given block, whether that block comes before or after it', () => {
+  expect(orderOf(accepted(apply(threeSections(), [move('b1', 'b3')])).board)).toEqual(['b2', 'b3', 'b1'])
+  expect(orderOf(accepted(apply(threeSections(), [move('b3', 'b1')])).board)).toEqual(['b1', 'b3', 'b2'])
+  expect(orderOf(accepted(apply(threeSections(), [move('b1', 'b2')])).board)).toEqual(['b2', 'b1', 'b3'])
+})
+
+test('move without afterId puts the block at the end', () => {
+  expect(orderOf(accepted(apply(threeSections(), [move('b1')])).board)).toEqual(['b2', 'b3', 'b1'])
+  expect(orderOf(accepted(apply(threeSections(), [move('b2')])).board)).toEqual(['b1', 'b3', 'b2'])
+})
+
+test('move changes only the order: the block, its id, nextId and the inserted list stay as they were', () => {
+  const start = threeSections()
+  const { board, inserted } = accepted(apply(start, [move('b2', 'b3')]))
+  expect(board.blocks).toEqual([start.blocks[0], start.blocks[2], start.blocks[1]])
+  expect(board.nextId).toBe(start.nextId)
+  expect(board.updatedAt).toBe(NOW)
+  expect(inserted).toEqual([])
+})
+
+test('a move that changes nothing is still a valid edit', () => {
+  const start = threeSections()
+  expect(orderOf(accepted(apply(start, [move('b2', 'b1')])).board)).toEqual(['b1', 'b2', 'b3'])
+  expect(orderOf(accepted(apply(start, [move('b3')])).board)).toEqual(['b1', 'b2', 'b3'])
+  expect(orderOf(accepted(apply(boardOf([{ id: 'b1', ...section }]), [move('b1')])).board)).toEqual(['b1'])
+})
+
+test('move refuses an unknown id, an unknown afterId and a block placed after itself, naming the edit', () => {
+  const unknownId = refused(apply(threeSections(), [move('b9', 'b1')]))
+  expect(unknownId.code).toBe('unknown_block')
+  expect(unknownId.message).toContain('edits[0]')
+  expect(unknownId.message).toContain('b9')
+  const unknownAfter = refused(apply(threeSections(), [move('b1', 'b9')]))
+  expect(unknownAfter.code).toBe('unknown_block')
+  expect(unknownAfter.message).toContain('b9')
+  const itself = refused(apply(threeSections(), [move('b2', 'b2')]))
+  expect(itself.code).toBe('invalid_board_edit')
+  expect(itself.message).toContain('edits[0]: afterId')
+})
+
+test('moves run in order inside one atomic apply, and a bad one changes nothing', () => {
+  const start = threeSections()
+  const drawn = accepted(apply(start, [insert(callout), move('b4', 'b1'), move('b1')])).board
+  expect(orderOf(drawn)).toEqual(['b4', 'b2', 'b3', 'b1'])
+  const error = refused(apply(start, [move('b1'), move('b1', 'b9')]))
+  expect(error.message.startsWith('edits[1]: ')).toBe(true)
+  expect(orderOf(start)).toEqual(['b1', 'b2', 'b3'])
+})
+
+test('parseEdits reads a move with its id and an optional afterId, and refuses a missing id or a stray field', () => {
+  expect(accepted(parseEdits([{ op: 'move', id: ' b1 ', afterId: 'b2' }, { op: 'move', id: 'b3' }]))).toEqual([{ op: 'move', id: 'b1', afterId: 'b2' }, { op: 'move', id: 'b3' }])
+  expect(refused(parseEdits([{ op: 'move' }])).message).toContain('edits[0]: id')
+  expect(refused(parseEdits([{ op: 'move', id: 'b1', after_id: 'b2' }])).message).toContain('edits[0]: after_id: unknown field')
+  expect(refused(parseEdits([{ op: 'move', id: 'b1', block: section }])).message).toContain('edits[0]: block: unknown field')
+  expect(refused(parseEdits([{ op: 'move', id: 'b1', afterId: '' }])).message).toContain('edits[0]: afterId')
+})
+
+test('a move asks the host to read nothing', () => {
+  const board = threeSections()
+  expect(peeksNeeded(board, [move('b1', 'b2')])).toEqual([])
+  expect(tracesNeeded(board, [move('b1')])).toEqual([])
+  expect(diffsNeeded(board, [move('b1')])).toEqual([])
+})
+
+test('the markdown export draws a divider as a rule and a board_ref as a quote naming the board', () => {
+  const board: Board = boardOf([
+    { id: 'b1', ...section },
+    { id: 'b2', type: 'divider' },
+    { id: 'b3', type: 'board_ref', board: OTHER_BOARD, title: 'Result\nof run' },
+    { id: 'b4', type: 'board_ref', board: THIRD_BOARD },
+  ])
+  expect(boardToMarkdown(board)).toBe([
+    '# Plan',
+    '',
+    '<!-- b1 -->',
+    '## Why',
+    'Because',
+    '',
+    '<!-- b2 -->',
+    '---',
+    '',
+    '<!-- b3 -->',
+    '> Board: [Result of run]',
+    '',
+    '<!-- b4 -->',
+    `> Board: [${THIRD_BOARD}]`,
+    '',
+  ].join('\n'))
+})
+
+test('the markdown export draws a dashed flow edge as a dotted mermaid arrow, labelled or not, and a solid edge as before', () => {
+  const board: Board = boardOf([{
+    id: 'b1',
+    type: 'flow',
+    nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }],
+    edges: [{ from: 'a', to: 'b', label: 'ok' }, { from: 'a', to: 'c', style: 'dashed' }, { from: 'b', to: 'c', label: 'maybe', style: 'dashed' }],
+  }])
+  expect(boardToMarkdown(board)).toBe([
+    '# Plan',
+    '',
+    '<!-- b1 -->',
+    '```mermaid',
+    'flowchart LR',
+    'a["A"]',
+    'b["B"]',
+    'c["C"]',
+    'a -->|ok| b',
+    'a -.-> c',
+    'b -.->|maybe| c',
+    '```',
+    '',
+  ].join('\n'))
+})
+
+test('the markdown export puts a step note on a Note over line after its step, and leaves a step without one alone', () => {
+  const board: Board = boardOf([{
+    id: 'b1',
+    type: 'sequence',
+    participants: [{ id: 'user', label: 'User' }, { id: 'hook', label: 'Hook' }],
+    steps: [
+      { from: 'user', to: 'hook', label: 'prompt', note: 'before the gate\nruns' },
+      { from: 'hook', to: 'user', label: 'verdict', kind: 'return' },
+      { from: 'hook', to: 'hook', label: 'route', kind: 'note', note: 'cached' },
+    ],
+  }])
+  expect(boardToMarkdown(board)).toBe([
+    '# Plan',
+    '',
+    '<!-- b1 -->',
+    '```mermaid',
+    'sequenceDiagram',
+    'participant user as "User"',
+    'participant hook as "Hook"',
+    'user->>hook: prompt',
+    'Note over user,hook: before the gate runs',
+    'hook-->>user: verdict',
+    'Note over hook,hook: route',
+    'Note over hook,hook: cached',
+    '```',
+    '',
+  ].join('\n'))
+})
+
+test('the schema and the description name board_ref, divider, move, dashed edges and step notes, and the schema lists what the engine accepts', () => {
+  const { op, block } = BOARD_INPUT_SCHEMA.properties.edits.items.properties
+  expect(refused(parseEdits([{ op: 'delete', id: 'b1' }])).message).toBe(`edits[0]: op: must be one of ${op.enum.join(', ')}`)
+  expect(op.enum).toContain('move')
+  expect(block.properties.type.enum).toEqual(expect.arrayContaining(['board_ref', 'divider']))
+  expect(block.properties.board.description).toContain('board_ref')
+  const style = block.properties.edges.items.properties.style
+  const nodes = [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }]
+  for (const value of style.enum) expect(accepted(parseEdits([{ op: 'insert', block: { type: 'flow', nodes, edges: [{ from: 'a', to: 'b', style: value }] } }]))).toHaveLength(1)
+  expect(block.properties.steps.items.properties.note.description).toContain('80')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('board_ref {board} links another board of this session')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('divider {}')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('{op:"move", id, afterId?}')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('style? dashed')
+  expect(BOARD_TOOL_DESCRIPTION).toContain('note? 80}]}')
 })

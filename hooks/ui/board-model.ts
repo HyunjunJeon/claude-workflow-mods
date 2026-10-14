@@ -1,5 +1,5 @@
 import type { Block, Board, TracePart } from '../engine/board-types.ts'
-import { calloutLines, codeLines, codePeekLines, diffLines, sectionLines, tableLines, traceLines, type CalloutLabels } from './board-blocks.ts'
+import { boardRefLines, calloutLines, codeLines, codePeekLines, diffLines, dividerLines, sectionLines, tableLines, traceLines, type CalloutLabels } from './board-blocks.ts'
 import { flowLines, type FlowLabels } from './flow-layout.ts'
 import type { Language } from './i18n.ts'
 import type { InspectorAction, InspectorLineAction, InspectorModel } from './inspector-model.ts'
@@ -34,6 +34,7 @@ type BoardStrings = {
   tones: CalloutLabels
   parts: Record<TracePart, string>
   flow: FlowLabels
+  refLabel: string
 }
 
 const EN: BoardStrings = {
@@ -50,6 +51,7 @@ const EN: BoardStrings = {
   tones: { info: 'info', decision: 'decision', risk: 'risk', warning: 'warning' },
   parts: { output: 'output', answer: 'answer', error: 'error', verification: 'verification' },
   flow: { sameFrontier: 'Same frontier', more: '+{n} more' },
+  refLabel: 'Board',
 }
 
 const KO: BoardStrings = {
@@ -66,6 +68,7 @@ const KO: BoardStrings = {
   tones: { info: '정보', decision: '결정', risk: '위험', warning: '주의' },
   parts: { output: '출력', answer: '답변', error: '오류', verification: '검증' },
   flow: { sameFrontier: '같은 층', more: '+{n}개 더' },
+  refLabel: '보드',
 }
 
 const dim = (text: string): Line => [{ text, dim: true }]
@@ -120,17 +123,23 @@ function renderBlock(block: Block, columns: number, t: BoardStrings): Line[] {
     case 'diff': return diffLines(block, columns)
     case 'flow': return flowLines(block, columns, t.flow)
     case 'sequence': return sequenceLines(block, columns)
+    case 'board_ref': return boardRefLines(block, columns, t.refLabel)
+    case 'divider': return dividerLines(columns)
   }
 }
 
-// The header is the first line of a block's lines.
-type BlockLines = { id: string; lines: Line[] }
-// `headers` holds one button per block header on the page, indexed into `lines`.
-type Page = { lines: Line[]; headers: InspectorLineAction[] }
+// The header is the first line of a block's lines. `buttons` are the other rows that press, by index into `lines`.
+type BlockLines = { id: string; lines: Line[]; buttons: InspectorLineAction[] }
+// `buttons` holds one per block header on the page and one per pressable row inside a block, indexed into `lines`.
+type Page = { lines: Line[]; buttons: InspectorLineAction[] }
 
 function blockLines(block: Block, columns: number, t: BoardStrings): BlockLines {
-  const header = `[${block.id}] ${block.type}${block.title ? `${HEADER_SEPARATOR}${block.title}` : ''}`
-  return { id: block.id, lines: [dim(header), ...renderBlock(block, columns, t)] }
+  // A divider has no title field, so `in` is how the header finds one that exists.
+  const title = 'title' in block ? block.title : undefined
+  const header = `[${block.id}] ${block.type}${title ? `${HEADER_SEPARATOR}${title}` : ''}`
+  // The ref row follows the header, so it is line 1 of the block; pressing it selects the board it names.
+  const buttons = block.type === 'board_ref' ? [{ line: 1, action: `board:goto:${block.board}` }] : []
+  return { id: block.id, lines: [dim(header), ...renderBlock(block, columns, t)], buttons }
 }
 
 const chip = (blockId: string, line: number): InspectorLineAction => ({ line, action: `chip:${blockId}` })
@@ -138,23 +147,24 @@ const chip = (blockId: string, line: number): InspectorLineAction => ({ line, ac
 // Whole blocks fill a page in order, a blank line between them. A block taller than a page stands alone, cut short.
 function pack(blocks: readonly BlockLines[], t: BoardStrings): Page[] {
   const pages: Page[] = []
-  let current: Page = { lines: [], headers: [] }
-  for (const { id, lines } of blocks) {
+  let current: Page = { lines: [], buttons: [] }
+  for (const { id, lines, buttons } of blocks) {
     if (lines.length > PAGE_LINES) {
       if (current.lines.length > 0) pages.push(current)
       pages.push({
         lines: [...lines.slice(0, PAGE_LINES - 1), dim(t.moreLines(lines.length - (PAGE_LINES - 1)))],
-        headers: [chip(id, 0)],
+        buttons: [chip(id, 0)],
       })
-      current = { lines: [], headers: [] }
+      current = { lines: [], buttons: [] }
       continue
     }
     if (current.lines.length > 0 && current.lines.length + 1 + lines.length > PAGE_LINES) {
       pages.push(current)
-      current = { lines: [], headers: [] }
+      current = { lines: [], buttons: [] }
     }
     if (current.lines.length > 0) current.lines.push([])
-    current.headers.push(chip(id, current.lines.length))
+    const start = current.lines.length
+    current.buttons.push(chip(id, start), ...buttons.map(({ line, action }) => ({ line: start + line, action })))
     current.lines.push(...lines)
   }
   if (current.lines.length > 0) pages.push(current)
@@ -197,5 +207,5 @@ function boardView(board: Board, index: number, count: number, input: BoardViewI
   // The count stays visible when a long board title is cut.
   const suffix = ` (${index + 1}/${count})`
   const title = fit(board.title, Math.max(0, input.columns - width(suffix))) + suffix
-  return { title, lines, actions, ...(shownPage ? { lineActions: shownPage.headers } : {}) }
+  return { title, lines, actions, ...(shownPage ? { lineActions: shownPage.buttons } : {}) }
 }

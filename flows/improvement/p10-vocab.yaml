@@ -14,6 +14,12 @@
 # skills README.md docs .claude-plugin` prints nothing, and no other session edits this checkout.
 # Run it with:  /dag run flows/improvement/p10-vocab.yaml   (a rerun after it settles needs a new key)
 # Do not /reload-plugins while this run is active.
+# Run log: the first run (dag_mv7h80gd_2ejonk) completed through board-host's work, then board-host failed its tsc
+# gate on an unowned consumer — board-chips.ts's `block.title` breaks on DividerBlock (title-less). The fix the
+# worker verified (`'title' in block ? …`) was applied manually, as were the boardIds feed on the result-board path,
+# board-docs and the commit. render-graphs drew dashed edges as text affordances (╌ prefix in box view, ⇢ in the
+# list) because real connectors live in shared graph-layout.ts outside its writes — kept: it leaves the DAG pane's
+# output byte-identical.
 #
 # Run plan (components -> waves):
 #   wave 1: board-contract (types every other node imports)

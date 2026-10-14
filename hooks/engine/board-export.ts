@@ -1,5 +1,6 @@
 import type {
-  Block, Board, CalloutBlock, CodeBlock, CodePeekBlock, DiffBlock, FlowBlock, FlowNode, FlowNodeKind, SectionBlock, SequenceBlock, SequenceStep, TableBlock, TraceBlock,
+  Block, Board, BoardRefBlock, CalloutBlock, CodeBlock, CodePeekBlock, DiffBlock, FlowBlock, FlowEdge, FlowNode, FlowNodeKind, SectionBlock, SequenceBlock, SequenceStep,
+  TableBlock, TraceBlock,
 } from './board-types.ts'
 
 // What a board becomes when it leaves the pane: one markdown document the model can read back or quote. Each block keeps its
@@ -20,6 +21,8 @@ function blockLines(block: Block): string[] {
     case 'diff': return diffLines(block)
     case 'flow': return flowLines(block)
     case 'sequence': return sequenceLines(block)
+    case 'board_ref': return boardRefLines(block)
+    case 'divider': return ['---']
   }
 }
 
@@ -81,6 +84,11 @@ function diffLines(block: DiffBlock): string[] {
   return [...titled(block), `\`${scope}\``, ...fenced(block.lines, 'diff'), ...noted(block.note)]
 }
 
+// The title the model gave the link, or the board_id when it gave none, so a reader of the export sees which board the pane would select.
+function boardRefLines(block: BoardRefBlock): string[] {
+  return [`> Board: [${oneLine(block.title ?? block.board)}]`]
+}
+
 // A quote ends a mermaid label, so it becomes the other quote.
 function mermaidLabel(label: string): string {
   return oneLine(label).replace(/"/g, "'")
@@ -101,12 +109,18 @@ function flowNode(node: FlowNode): string {
   return `${node.id}${open}"${mermaidLabel(node.label)}"${close}`
 }
 
+// A dashed edge is a dotted arrow, which mermaid writes -.-> and labels the same way as a solid one.
+function flowEdge(edge: FlowEdge): string {
+  const arrow = edge.style === 'dashed' ? '-.->' : '-->'
+  return edge.label ? `${edge.from} ${arrow}|${mermaidLabel(edge.label)}| ${edge.to}` : `${edge.from} ${arrow} ${edge.to}`
+}
+
 function flowLines(block: FlowBlock): string[] {
-  const edges = block.edges.map(edge => (edge.label ? `${edge.from} -->|${mermaidLabel(edge.label)}| ${edge.to}` : `${edge.from} --> ${edge.to}`))
+  const edges = block.edges.map(flowEdge)
   return [...titled(block), ...mermaid(['flowchart LR', ...block.nodes.map(flowNode), ...edges])]
 }
 
-function sequenceStep(step: SequenceStep): string {
+function sequenceMessage(step: SequenceStep): string {
   const label = mermaidLabel(step.label)
   switch (step.kind) {
     case 'note': return `Note over ${step.from},${step.to}: ${label}`
@@ -117,7 +131,13 @@ function sequenceStep(step: SequenceStep): string {
   }
 }
 
+// A step's note is an aside on its own line, drawn the way a note step is, so it stays under the arrow it explains.
+function sequenceStep(step: SequenceStep): string[] {
+  const message = sequenceMessage(step)
+  return step.note ? [message, `Note over ${step.from},${step.to}: ${mermaidLabel(step.note)}`] : [message]
+}
+
 function sequenceLines(block: SequenceBlock): string[] {
   const participants = block.participants.map(participant => `participant ${participant.id} as "${mermaidLabel(participant.label)}"`)
-  return [...titled(block), ...mermaid(['sequenceDiagram', ...participants, ...block.steps.map(sequenceStep)])]
+  return [...titled(block), ...mermaid(['sequenceDiagram', ...participants, ...block.steps.flatMap(sequenceStep)])]
 }
