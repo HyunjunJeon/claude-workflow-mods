@@ -7,7 +7,9 @@ import { classifyToolResults, verificationOf, type NodeVerificationReport, type 
 import { shapeOf, type ShapeMetrics } from './shape.ts'
 
 const REPO = realpathSync(new URL('..', import.meta.url).pathname)
-const MAIN_TOOLS = ['mcp__dag-workflow__dag', 'Skill', 'Read', 'Write', 'Edit', 'Bash', 'TaskStop', 'ToolSearch', 'LSP']
+// The board tool is allowed too because the planning doctrine has the model draw the proposed DAG on the plan board
+// before start; without it every scenario only exercises the "start without the board" fallback.
+const MAIN_TOOLS = ['mcp__dag-workflow__dag', 'mcp__dag-workflow__board', 'Skill', 'Read', 'Write', 'Edit', 'Bash', 'TaskStop', 'ToolSearch', 'LSP']
 
 type Options = { list: boolean; only?: string[]; concurrency: number; model: string; timeoutMin: number; keep: boolean; enforcement?: string }
 
