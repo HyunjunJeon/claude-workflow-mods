@@ -14,6 +14,9 @@
 # session edits this checkout.
 # Run it with:  /dag run flows/improvement/p9-plan-graph.yaml   (a rerun after it settles needs a new key)
 # Do not /reload-plugins while this run is active.
+# Run log: the first run (dag_mv7gy6oq_3x1y12) completed plan-doctrine, then died at the wave boundary — the driver's
+# headless session unbound between the solo node finishing and the next spawn, so plan-docs could not start
+# ("$.tool.call is not available in this mode"). plan-docs, the review gates and the commit were finished manually.
 #
 # Run plan: plan-doctrine (the skill text) -> plan-docs (reference) -> review-spec, review-standards, commit.
 # Two tiny lanes in sequence: the doctrine edit is the whole feature; docs follow it. Categories: standard for the
