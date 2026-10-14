@@ -1,0 +1,120 @@
+# Board P6: the planning skill draws the proposed DAG on the board before start.
+# Continues the whiteboard borrow — "diagrams that lead to code" in the literal sense: the user sees the shape of the
+# DAG they are about to approve, on the plan board the approval block's `Plan board:` line already names.
+# Decisions (2026-10-14): Q1 the planning SKILL draws the graph (model-drawn, not host-drawn), so this run is a
+# doctrine change and the DAG-shape eval must be re-run afterwards — see "After the run" below; Q2 the model draws a
+# `flow` block mirroring the definition it is about to `start` (nodes -> flow nodes, dependsOn -> edges); Q3 no host
+# changes — the approval block's plan-board line already picks the session's latest-edited non-result board.
+# After the run: doctrine edits shift DAG shapes, so re-run the eval once this commit lands —
+# `bun eval/run.ts --list` for the scenarios, then `bun eval/run.ts` (real headless `claude -p` sessions; it spends
+# account usage, so run it deliberately, not inside this DAG). The P2 run recorded the same split ("eval 재실행은
+# 별도").
+#
+# PREREQUISITE: `git status --short -- hooks tests skills README.md docs .claude-plugin` prints nothing, and no other
+# session edits this checkout.
+# Run it with:  /dag run flows/improvement/p9-plan-graph.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan: plan-doctrine (the skill text) -> plan-docs (reference) -> review-spec, review-standards, commit.
+# Two tiny lanes in sequence: the doctrine edit is the whole feature; docs follow it. Categories: standard for the
+# doctrine (model-facing contract text where a stray sentence changes real runs), writing for docs.
+
+key: improve-p9-plan-graph-1
+name: Board P6 - planning draws the proposed DAG on the plan board
+goal: >
+  The planning doctrine teaches the model to draw the proposed definition's shape as a `flow` block on the session's
+  plan board before `start` — one flow node per definition node and one edge per dependsOn — so a run held for
+  approval shows its graph through the approval block's plan-board line; docs/reference.md records the behaviour.
+review:
+  request: |
+    whiteboard 차용 6차. planning 스킬이 계획 DAG를 보드에 그림.
+    Agreed decisions for P6: Q1 model-drawn via the planning skill (doctrine change; shape eval rerun happens
+    separately after commit); Q2 a flow block mirroring the definition's nodes and dependsOn; Q3 no host changes —
+    the existing plan-board line already names the latest-edited non-result board.
+    Out of scope: host-drawn graphs, eval rerun inside this DAG, board_ref/divider/dashed extras (p10).
+  rules:
+    - AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "docs(planning): draw the proposed DAG on the plan board before start"
+    paths:
+      - skills/planning/SKILL.md
+      - skills/planning/references/planning.md
+      - README.md
+      - docs/reference.md
+nodes:
+  - id: plan-doctrine
+    label: Doctrine - draw the proposed DAG on the board before start
+    category: standard
+    load_skills:
+      - dag-workflow:anti-slop
+    writes:
+      - skills/planning/SKILL.md
+      - skills/planning/references/planning.md
+    verify:
+      - kind: file
+        path: skills/planning/SKILL.md
+        contains: "flow"
+      - kind: file
+        path: skills/planning/references/planning.md
+        contains: "flow"
+    prompt: |
+      TASK: Teach the planning doctrine that the model draws the proposed DAG's shape on the session's plan board
+      before `start`, in skills/planning/SKILL.md and skills/planning/references/planning.md.
+      CONTEXT: this is model-facing contract text — every sentence steers real runs, so be surgical. Read both files
+      first: SKILL.md's "Before `start`, state one concise run plan" section (~line 47) is the natural home, and
+      planning.md is the deep reference whose section order mirrors SKILL.md. Read the board tool's vocabulary
+      (section/callout/table/code_peek/code/trace/flow/sequence — hooks/engine/board-spec.ts has the field limits)
+      and the approval behaviour in docs/reference.md (승인 블록의 계획 보드 줄 section): the approval block names the
+      session's most recently edited non-result board, so drawing the graph keeps that pointer honest.
+      DELIVERABLE — one short doctrine addition, written in both files' existing voice:
+      (1) Before `start` (and before `amend` when the shape changed), draw the proposed definition on the plan board:
+          create `Plan: <run name>` with the board tool when the session has no non-result board yet, otherwise draw
+          on the existing plan board. One `flow` block: a flow node per definition node (short flow id, `label` =
+          the node id within its 40-char limit, `kind` = `terminal` for nodes nothing depends on, `process`
+          otherwise) and an edge per `dependsOn`. When the definition changes while planning, `replace` or `update`
+          that flow rather than stacking a second one. This is a SHOULD, not a gate: a session whose board tool is
+          unavailable still starts — the doctrine already carries an "edit refused twice -> continue without the
+          board" rule for interview/pm; reuse that spirit here in one clause.
+      (2) Say why in one line: the approval block's plan-board line then names this board, so the user reviewing a
+          held run sees the DAG's shape before approving.
+      (3) Keep the rest of the doctrine untouched — no changes to gates, verify contract, or skill loading rules.
+      SCOPE: the two files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: run `command claude plugin test .` — exit 0 with 0 failing (the change is prose; the suite must stay
+      green).
+      STOP WHEN: both files carry the doctrine and the suite is green.
+      In ## Output quote the added sentences (both files) and name where each landed.
+
+  - id: plan-docs
+    label: Record the plan-graph behaviour in the Korean reference
+    category: writing
+    dependsOn:
+      - plan-doctrine
+    load_skills:
+      - dag-workflow:anti-slop
+    writes:
+      - docs/reference.md
+      - README.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "flow"
+      - kind: file
+        path: README.md
+        contains: "flow"
+    prompt: |
+      TASK: Record the plan-graph behaviour in the Korean docs: docs/reference.md (승인 블록의 계획 보드 줄 section)
+      and README.md (보드로 구조 보기 or the approval paragraph it lives near).
+      CONTEXT: read the 승인 블록의 계획 보드 줄 section of docs/reference.md — it currently explains the approval
+      block's `Plan board:` line names the latest-edited non-result board. The new behaviour: the planning doctrine
+      has the model draw the proposed DAG's shape as a `flow` block on that board before `start`, so the named board
+      usually shows the graph being approved. Match the terse Korean reference style.
+      DELIVERABLE:
+      (1) reference.md: extend that section — planning doctrine이 `start` 전에 제안 정의의 모양을 `flow` 블록으로
+          계획 보드에 그리므로(노드마다 flow 노드 하나, dependsOn마다 간선 하나 — 도구를 못 쓰면 생략하고 시작),
+          가리키는 보드가 보통 승인할 그래프를 보여 준다는 한두 줄. Do not rewrite the section.
+      (2) README.md: one line in the 보드로 구조 보기 section — 계획 스킬이 `start` 전에 제안 DAG의 모양을 보드에
+          그려 승인 블록의 계획 보드 줄이 그 보드를 가리키게 한다는 내용.
+      SCOPE: docs/reference.md and README.md. Read anything. Never commit or push.
+      VERIFY: the file checks pass.
+      STOP WHEN: both docs mention the flow-on-plan-board behaviour.

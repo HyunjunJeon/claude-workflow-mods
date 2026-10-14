@@ -1,0 +1,305 @@
+# Board P7: vocabulary extras — board_ref links, divider, dashed flow edges, sequence step notes, move op.
+# Continues the whiteboard borrow — the remaining useful vocabulary after P4 (trace/code/decisions/export/handoff,
+# flows/improvement/p7-board-trace.yaml) and P5 (git cite, p8-git-cite.yaml). A bundle of small, mostly independent
+# additions that each touch the same few files, so they ride one run rather than five.
+# Decisions (2026-10-14): Q1 `board_ref` points at another of this session's boards and the pane renders it as a
+# button that selects that board (boards are never deleted, so a ref cannot dangle); Q2 existence is validated at
+# edit time against the session's board ids, which the host hands to applyEdits — an unknown id is
+# invalid_board_edit, forward references must name an already-created board; Q3 `move {id, afterId?}` reorders within
+# one board (afterId absent -> end, mirroring insert); Q4 flow edges gain `style?: 'dashed'` for tentative or
+# feedback paths and sequence steps gain `note?` (80 chars, like flow node notes).
+#
+# PREREQUISITE: P5 (p8-git-cite) has settled — this definition assumes code_peek.ref and the diff block exist and
+# extends the same applyEdits sources it built (the run is sequential by design). `git status --short -- hooks tests
+# skills README.md docs .claude-plugin` prints nothing, and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p10-vocab.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan (components -> waves):
+#   wave 1: board-contract (types every other node imports)
+#   wave 2: board-engine (validation + applyEdits + export switch), render-blocks (divider + board_ref + button),
+#           render-graphs (dashed edges + step notes) — three lanes, disjoint writes
+#   wave 3: board-host (boardIds feed + the goto action)
+#   wave 4: board-docs
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: trivial for the contract and both render lanes; standard for board-engine (five additions through one
+# parser) and board-host; writing for docs.
+# Note on the type union: board-contract widens Block/BlockInput, so the whole project cannot typecheck until
+# board.ts, board-export.ts and the pane renderers handle the new members. No node before board-host gets a
+# whole-project tsc check; the suite stays green throughout because it exercises behaviour, not types.
+
+key: improve-p10-vocab-1
+name: Board P7 - board_ref, divider, dashed edges, step notes, move
+goal: >
+  The board tool gains a `board_ref` block linking to another of the session's boards (rendered as a button that
+  selects it), a `divider` block, `style?: 'dashed'` on flow edges, `note?` on sequence steps and a `move` edit op
+  for reordering blocks; the markdown export covers the new kinds; tests, README.md and docs/reference.md are
+  updated.
+review:
+  request: |
+    whiteboard 차용 7차. board_ref, divider, dashed edges, step notes, move.
+    Agreed decisions for P7: Q1 board_ref links within the session, rendered as a navigation button; Q2 the target
+    must exist at edit time (invalid_board_edit otherwise); Q3 move {id, afterId?} reorders, afterId absent -> end;
+    Q4 flow edges gain style?: 'dashed', sequence steps gain note? (80 chars).
+    Out of scope: deleting boards, refs to other sessions' boards, section folding, automatic result-board diffs.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "feat(board): add board_ref, divider, dashed edges, step notes and move"
+    paths:
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - hooks/engine/board-export.ts
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - hooks/ui/flow-layout.ts
+      - hooks/ui/sequence-layout.ts
+      - hooks/register.ts
+      - tests/board-engine.test.ts
+      - tests/board-blocks.test.ts
+      - tests/board-export.test.ts
+      - tests/board-host.test.ts
+      - tests/flow-layout.test.ts
+      - tests/sequence-layout.test.ts
+      - README.md
+      - docs/reference.md
+nodes:
+  - id: board-contract
+    label: New vocabulary block types and the move op
+    category: trivial
+    writes:
+      - hooks/engine/board-types.ts
+    verify:
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, --strict, --noEmit, hooks/engine/board-types.ts]
+    prompt: |
+      TASK: Extend hooks/engine/board-types.ts with the vocabulary bundle:
+        export type BoardRefBlock = { id: string; type: 'board_ref'; board: string /* target board_id */; title?: string }
+        export type DividerBlock = { id: string; type: 'divider' }
+      Add `style?: 'dashed'` to FlowEdge (undefined or 'dashed' only — the solid default stays bare), `note?: string`
+      to SequenceStep, and a `{ op: 'move', id: string, afterId?: string }` variant to the BoardEdit union. Add both
+      blocks to Block and their inputs (minus id) to BlockInput. Follow the file's existing comment style.
+      SCOPE: hooks/engine/board-types.ts only. Do not touch consumers; they land in their own nodes.
+      VERIFY: `bunx -p typescript@5 tsc --strict --noEmit hooks/engine/board-types.ts` exits 0.
+      STOP WHEN: tsc is clean and all five additions exist.
+
+  - id: board-engine
+    label: Validation, boardIds, move semantics and the tool spec
+    category: standard
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - hooks/engine/board-export.ts
+      - tests/board-engine.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "boardIds"
+      - kind: file
+        path: hooks/engine/board-spec.ts
+        contains: "board_ref"
+      - kind: file
+        path: tests/board-engine.test.ts
+        contains: "move"
+    prompt: |
+      TASK: Teach the board engine the five vocabulary additions in hooks/engine/board.ts, document them in
+      hooks/engine/board-spec.ts (BOARD_TOOL_DESCRIPTION under 2048 chars — tests enforce), and cover the new block
+      types in hooks/engine/board-export.ts's blockLines switch (tsc demands exhaustiveness).
+      CONTEXT: read hooks/engine/board.ts first — BLOCK_FIELDS/BLOCK_TYPES, parseEdits' edit-op handling, applyEdits'
+      Sources/options shape, fieldsOf's unknown-field rule, and how code_peek validates a board-side reference
+      (none — board_ref is the first block that references another board). tests/board-engine.test.ts has the
+      conventions.
+      DELIVERABLE:
+      (1) board_ref {board, title?}: `board` matches the board_id shape /^board_[0-9a-z]+_[0-9a-z]+$/ and must name
+          a board that exists — add `boardIds: ReadonlySet<string>` to the options applyEdits accepts (alongside
+          peeks/traces/diffs); an absent set means no refs are allowed (every board_ref is refused, which keeps pure
+          callers honest). update of `board` revalidates membership. A board_ref may NOT point at its own board.
+      (2) divider {}: no fields at all (fieldsOf with an empty list — an update to a divider has nothing to change,
+          refuse it the way updates to unset fields already fail).
+      (3) FlowEdge.style: oneOf 'dashed' (absent = solid). SequenceStep.note: optional 1-80.
+      (4) move op: {op:'move', id, afterId?} — relocate the block directly after afterId, or to the end when absent;
+          unknown id / unknown afterId / afterId === id are refused; a move that changes nothing is still a valid
+          edit. Order inside the same atomic applyEdits.
+      (5) board-spec.ts: enum gains 'board_ref' and 'divider'; the description gains one line each (`board_ref
+          {board} links another board of this session`, `divider` as a visual break, `move` op, dashed style, step
+          note) — compress prose to fit 2048.
+      (6) board-export.ts: divider -> `---`; board_ref -> a `> Board: [<title or board_id>]` quote line naming the
+          target; dashed edges render in mermaid (`-.->`) and sequence step notes as `Note over` lines like the
+          existing note kind.
+      (7) tests/board-engine.test.ts: parse/validation per addition, unknown-board refusal, self-refusal, move
+          reorders (end + after a given id), dashed edge and step note accepted, export lines.
+      SCOPE: the four files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: run `command claude plugin test .` — exit 0 with 0 failing.
+      STOP WHEN: the suite is green and every deliverable exists.
+      In ## Output give the new parser names and every new test name.
+
+  - id: render-blocks
+    label: Pane renderers for divider and board_ref
+    category: trivial
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - tests/board-blocks.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/board-blocks.ts
+        contains: "board_ref"
+      - kind: file
+        path: tests/board-blocks.test.ts
+        contains: "divider"
+    prompt: |
+      TASK: Render the `divider` and `board_ref` blocks in the Board section: hooks/ui/board-blocks.ts gets their
+      line renderers and hooks/ui/board-model.ts gives board_ref a button that selects its target.
+      CONTEXT: read hooks/ui/board-blocks.ts (per-type line renderers — boardModel/boardView dispatch on block
+      type), board-model.ts (headers, the chip button model — how a block line becomes a button with an action
+      string), i18n.ts and text.ts (Line/Segment, glyphs, ACCENT, dim). Check how the existing `board:next` /
+      `board:prev` pane actions reach register.ts — the board_ref button needs a parallel action like
+      `board:goto:<board_id>` emitted in the same shape the model already carries buttons in.
+      DELIVERABLE:
+      (1) divider: a full-width `─` rule (use the glyphs text.ts provides, dim it). Header stays the same as every
+          block's (`[b4] divider`) and both new types get entries in the type label map — EN and KO strings if the
+          map is localised (`divider` / `구분선`, `board_ref` / `보드 링크`).
+      (2) board_ref: a line like `→ Board: <title>` — show the block's `title` when set, else the board id (the
+          engine stores only the id; the host cannot show another board's title). Render it as a button carrying
+          action `board:goto:<board_id>` in whatever shape the pane model passes button actions. Header stays
+          `[b5] board_ref`.
+      (3) tests/board-blocks.test.ts: the divider rule line, the ref line with and without title, the button's
+          action string, EN and KO headers.
+      SCOPE: the three files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: run `command claude plugin test .` — exit 0 with 0 failing.
+      STOP WHEN: the suite is green and the renderers exist.
+      In ## Output give the button action format you chose and every new test name.
+
+  - id: render-graphs
+    label: Dashed flow edges and sequence step notes
+    category: trivial
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/flow-layout.ts
+      - hooks/ui/sequence-layout.ts
+      - tests/flow-layout.test.ts
+      - tests/sequence-layout.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/flow-layout.ts
+        contains: "dashed"
+      - kind: file
+        path: hooks/ui/sequence-layout.ts
+        contains: "note"
+    prompt: |
+      TASK: Draw the two diagram additions in the Board section: hooks/ui/flow-layout.ts renders `style: 'dashed'`
+      edges distinctly and hooks/ui/sequence-layout.ts renders a step's `note`.
+      CONTEXT: read flow-layout.ts (the terminal edge drawing — the glyph set it picks from) and sequence-layout.ts
+      (how steps draw, including the existing `note` step kind if one exists), plus their test files. The engine
+      already accepts `style?: 'dashed'` on FlowEdge and `note?: string` on SequenceStep from the contract — check
+      hooks/engine/board-types.ts for the exact fields.
+      DELIVERABLE:
+      (1) flow-layout: a dashed edge draws with a distinct glyph (e.g. ┄ or ╌ — pick the nearest existing glyph
+          convention; do not add a colour unless one exists in text.ts).
+      (2) sequence-layout: a step's `note` draws as a dim line under the step (or to its right, matching how the
+          layout already handles a `note` step kind — if the step kind and the new field overlap, the field wins).
+      (3) tests: flow-layout.test.ts gets a dashed-edge case; sequence-layout.test.ts gets a step-note case.
+      SCOPE: the four files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: run `command claude plugin test .` — exit 0 with 0 failing.
+      STOP WHEN: the suite is green and both renderers exist.
+
+  - id: board-host
+    label: boardIds feed and the goto action
+    category: standard
+    dependsOn:
+      - board-engine
+      - render-blocks
+      - render-graphs
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/board-host.test.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        contains: "boardIds"
+      - kind: file
+        path: hooks/register.ts
+        contains: "board:goto"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+    prompt: |
+      TASK: Wire the vocabulary's two host touchpoints into hooks/register.ts: feed the session's board ids into
+      applyEdits so board_ref validates membership, and handle the `board:goto:<board_id>` pane action.
+      CONTEXT: read editBoard (where applyEdits gets peeks/traces/diffs), the pane action dispatch around
+      `board:next`/`board:prev` (handlePaneKey / inspectorAction area ~line 2937), selectedBoardId, and openBoard.
+      Engine now takes `boardIds` in applyEdits options — check hooks/engine/board.ts for the exact field name.
+      DELIVERABLE:
+      (1) editBoard: pass `boardIds: new Set(boards.map(b => b.boardId))` into applyEdits' options (and the second
+          applyEdits call site if one exists — the result-board path uses an empty-board context; give it the same
+          set so a result board could hold a ref).
+      (2) `board:goto:<id>` action: when the pane emits it, set selectedBoardId to the named board if this session
+          holds it (ignore unknown ids silently — the button only exists on a rendered ref), then let the normal
+          redraw happen; mirror whatever page/selection bookkeeping board:next does.
+      (3) tests/board-host.test.ts: a board_ref insert naming an existing board succeeds, naming `board_missing`
+          fails invalid_board_edit, and a goto action on a rendered ref selects the target board (follow the
+          existing pane-mount tests for pressing buttons — PANE + ui.press({key}) as in the chip tests).
+      SCOPE: the two files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exit 0 with 0 failing; `bunx -p typescript@5 tsc -p . --noEmit` exit 0.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+      In ## Output name where the action is dispatched and every new test name.
+
+  - id: board-docs
+    label: Document the vocabulary in the Korean docs
+    category: writing
+    dependsOn:
+      - board-engine
+      - render-blocks
+      - render-graphs
+      - board-host
+    load_skills:
+      - dag-workflow:anti-slop
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "board_ref"
+      - kind: file
+        path: docs/reference.md
+        contains: "move"
+      - kind: file
+        path: README.md
+        contains: "board_ref"
+    prompt: |
+      TASK: Update the Korean user docs for the vocabulary bundle: README.md (보드로 구조 보기) and
+      docs/reference.md (보드 section — block table, edit-op table, 블록 설명 paragraphs).
+      CONTEXT: read the 보드 section of docs/reference.md first — the 블록 종류 table, the edit `op` table, and the
+      per-kind paragraphs. Match the terse Korean reference style.
+      DELIVERABLE:
+      (1) reference.md block table: add `board_ref` (`board` = 대상 board_id, 세션에 존재해야 하고 자기 보드는 안 됨,
+          `title?`) and `divider` (필드 없음); flow row gains `style?` (`dashed`); sequence row gains `note?` (80자).
+          Edit-op table: add `move` (`{op, id, afterId?}` — afterId 뒤로 옮기고 없으면 맨 끝). A short paragraph or
+          bullet: board_ref는 패널에서 누르면 그 보드로 가는 버튼이고, export에서는 대상을 가리키는 인용 줄.
+      (2) README.md: the block list and one line for refs/divider/move.
+      SCOPE: README.md and docs/reference.md. Read anything. Never commit or push.
+      VERIFY: the file checks pass.
+      STOP WHEN: both docs cover the five additions.

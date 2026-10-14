@@ -1,0 +1,288 @@
+# Board P5: the board cites git — code_peek at a ref and a diff block.
+# Continues the whiteboard borrow (its "diagrams that lead to code" and semantic diff axes, terminal edition). P4
+# (flows/improvement/p7-board-trace.yaml, 6b555d7+a292671+1fa19e8) made the board cite the run; this phase makes it
+# cite the repository at a ref: `code_peek` gains `ref?` (the host reads `git show <ref>:<path>`) and a `diff` block
+# quotes `git diff <ref> [-- <path>]` the host ran.
+# Decisions (2026-10-14): Q1 both `code_peek.ref` and a `diff` block in one run (P5 scope); Q2 the plan DAG is
+# model-drawn by the planning skill and lives in the NEXT run (p9) because doctrine changes need a shape eval rerun;
+# Q3 sequential P5 -> P6 -> P7 runs, not one bundled run. The result-board automatic diff slot was declined — diff is
+# model-drawn only.
+# Later runs: p9 (plan DAG on the approval board, planning skill draws it, eval rerun), p10 (board_ref, divider,
+# dashed edges, sequence step notes, move op).
+#
+# PREREQUISITE: `git status --short -- hooks tests skills README.md docs .claude-plugin` prints nothing, and no other
+# session edits this checkout.
+# Run it with:  /dag run flows/improvement/p8-git-cite.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+#
+# Run plan (components -> waves):
+#   wave 1: board-contract (the types every other node imports)
+#   wave 2: board-engine (validation + the export switch), board-render (two lanes, disjoint writes)
+#   wave 3: board-host (wires git reads into register.ts)
+#   wave 4: board-docs
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: trivial for the contract and the renderer lane (small, self-contained pure modules); standard for
+# board-engine (validation rules, the diffsNeeded counterpart of tracesNeeded and the export switch); hard for
+# board-host (git process calls and the harness knob meeting in register.ts); writing for docs.
+# Wave-2 nodes declare only file checks: parallel lanes edit tests/ at once, so a whole-project tsc could fail on a
+# sibling's half-written file. Each worker still runs the suite itself; board-host and review-spec run it on the
+# whole result.
+# Note on the type union: board-contract widens Block/BlockInput, so the whole project cannot typecheck until
+# board.ts, board-export.ts and the pane renderers handle the new member. No node before board-host gets a
+# whole-project tsc check; the suite stays green throughout because it exercises behaviour, not types.
+
+key: improve-p8-git-cite-1
+name: Board P5 - code_peek at a git ref and a diff block
+goal: >
+  The board tool's code_peek gains an optional `ref` field (the host reads `git show <ref>:<path>` instead of the
+  worktree file) and a `diff` block quotes `git diff <ref> [-- <path>]` whose lines the host fills from git like a
+  code_peek; the pane renders diff blocks and names the ref on host-filled blocks; the markdown export covers both;
+  tests, README.md and docs/reference.md are updated.
+review:
+  request: |
+    whiteboard 차용 5차. code_peek ref, diff 블록.
+    Agreed decisions for P5: Q1 both code_peek.ref and a diff block in this run; Q2 the plan DAG stays with the
+    planning skill in the next run (shape eval rerun needed); Q3 sequential runs. No automatic diff slot on the
+    result board — model-drawn only.
+    Out of scope: plan DAG on the approval board (p9), board_ref links, divider/dashed edges/move op (p10), a
+    result-board auto-diff slot.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "feat(board): cite git refs and diffs from board blocks"
+    paths:
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - hooks/engine/board-export.ts
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - hooks/register.ts
+      - tests/board-engine.test.ts
+      - tests/board-blocks.test.ts
+      - tests/board-export.test.ts
+      - tests/board-host.test.ts
+      - tests/control-harness.ts
+      - README.md
+      - docs/reference.md
+nodes:
+  - id: board-contract
+    label: Ref and diff block types
+    category: trivial
+    writes:
+      - hooks/engine/board-types.ts
+    verify:
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, --strict, --noEmit, hooks/engine/board-types.ts]
+    prompt: |
+      TASK: Extend hooks/engine/board-types.ts so the board can quote git. Add `ref?: string` to CodePeekBlock and to
+      CodePeekInput (the git ref the host reads the file at; absent means the worktree, today's behaviour). Add a new
+      block kind:
+        export type DiffBlock = {
+          id: string
+          type: 'diff'
+          title?: string
+          ref: string    // git ref or range the host diffs, e.g. HEAD~2 or main..feature
+          path?: string  // optional project-relative file to scope the diff to
+          lines: string[] // host-filled from `git diff`
+          note?: string
+        }
+      Add DiffBlock to the Block union and a DiffInput (same fields minus id) to BlockInput. Keep the comments that
+      explain which fields are host-filled (code_peek: file lines; trace: run artifact; diff: git output; code: model
+      text). Follow the file's existing comment style — the why, not the what.
+      SCOPE: hooks/engine/board-types.ts only. Do not touch consumers; they land in their own nodes.
+      VERIFY: `bunx -p typescript@5 tsc --strict --noEmit hooks/engine/board-types.ts` exits 0.
+      STOP WHEN: tsc is clean and both union members exist.
+
+  - id: board-engine
+    label: Ref and diff validation, diffsNeeded and the tool spec
+    category: standard
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/board.ts
+      - hooks/engine/board-spec.ts
+      - hooks/engine/board-export.ts
+      - tests/board-engine.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/board.ts
+        contains: "diffsNeeded"
+      - kind: file
+        path: hooks/engine/board-spec.ts
+        contains: "diff"
+      - kind: file
+        path: tests/board-engine.test.ts
+        contains: "diff"
+    prompt: |
+      TASK: Teach the board engine the `ref` field and the `diff` block in hooks/engine/board.ts, document both in
+      hooks/engine/board-spec.ts (BOARD_TOOL_DESCRIPTION stays under 2048 characters — tests enforce it), and cover
+      the diff case in hooks/engine/board-export.ts's blockLines switch (tsc demands it be exhaustive).
+      CONTEXT: read hooks/engine/board.ts first — parseEdits, BLOCK_FIELDS/BLOCK_TYPES, parseCodePeek, parseTrace,
+      peekKey/peeksNeeded, traceKey/tracesNeeded, hostedLines, storedLines/storedTraceLines, applyEdits' Sources and
+      boardForModel. tests/board-engine.test.ts has the conventions (helpers runText, NO_PEEKS, NO_TRACES, apply).
+      DELIVERABLE:
+      (1) ref: `ref?: string` on code_peek input, validated by a REF constant — the pattern
+          /^[A-Za-z0-9_@][A-Za-z0-9_.\/~^{}@-]{0,63}$/ (a git ref or a..b range; argv-safe by construction, no leading
+          dash). peekKey must incorporate ref (e.g. `path@ref:start-end`, worktree as before) so two edits quoting
+          different refs resolve separately. peeksNeeded triggers re-resolution when an update changes ref (add 'ref'
+          to the field list it checks), and a code_peek holding a stale ref re-reads on update the way path/start/end
+          changes do today.
+      (2) diff: parseDiff for {type:'diff', ref (required, same REF rule), path? (projectPath rules — same validator
+          as code_peek's path), title?, note?}. diffKey(diff) like traceKey (e.g. `ref::path` with the path optional
+          part). diffsNeeded(board, edits) mirrors tracesNeeded: collect requests from insert/replace diff blocks and
+          from update changes touching ref or path on an existing diff block. Hosted union gains the diff input;
+          Sources gains `diffs: ReadonlyMap<string, string[]>`; hostedLines handles it with the same rules as
+          tracedLines (missing key -> `could not read ...`, empty -> refused, >40 lines -> first 39 + `… +N more
+          lines`, each line cut to 240). storedDiffLines for parseBoardFile like storedTraceLines. boardForModel
+          returns lineCount for diff blocks too.
+      (3) board-spec.ts: the BLOCK_SCHEMA type enum gains 'diff'; add `ref` and a scoped `path`/`diff` field
+          descriptions; the description gains a diff line (`diff {ref, path?} quotes a git diff the host runs`) and
+          mentions ref on code_peek, staying under the 2048 limit — compress prose, never drop a rule.
+      (4) board-export.ts: blockLines handles 'diff' — title, a `` `<ref>` `` (+ ` · <path>`) line and the lines in a
+          diff fence (use the `diff` info string on the fence like `code` uses language).
+      (5) tests/board-engine.test.ts: parse/validation cases (bad ref, missing ref, path with .. refused), peekKey
+          ref separation, diffsNeeded collection including the update path, missing/empty diff refused, truncation
+          marker, stored diff survives a board-file round trip, export emits a diff fence.
+      SCOPE: the four files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: run `command claude plugin test .` — exit 0 with 0 failing.
+      STOP WHEN: the suite is green and every deliverable exists.
+      In ## Output give the new helper names, the ref regex, and every new test name.
+
+  - id: board-render
+    label: Pane renderers for ref labels and the diff block
+    category: trivial
+    dependsOn:
+      - board-contract
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/ui/board-blocks.ts
+      - hooks/ui/board-model.ts
+      - tests/board-blocks.test.ts
+    verify:
+      - kind: file
+        path: hooks/ui/board-blocks.ts
+        contains: "diff"
+      - kind: file
+        path: tests/board-blocks.test.ts
+        contains: "diff"
+    prompt: |
+      TASK: Render the `diff` block and name refs in the Board section: hooks/ui/board-blocks.ts gets a diffLines
+      renderer and hooks/ui/board-model.ts shows the ref on host-filled blocks.
+      CONTEXT: read hooks/ui/board-blocks.ts (the per-type line renderers — codePeekLines/traceLines/codeLines and
+      how titles and notes are drawn), hooks/ui/board-model.ts (block header `[b3] <type> · <title>` and the
+      typeLabel map), hooks/ui/i18n.ts and hooks/ui/text.ts (Line/Segment, width, fit). boardForModel hands a diff
+      block's lineCount instead of lines — check how code_peek/trace headers handle it.
+      DELIVERABLE:
+      (1) diffLines: like codeLines — title line if any, the captured lines in the pane's code style (follow the
+          existing code/trace renderers; do not invent a colour for + / - unless one already exists in text.ts),
+          note line last.
+      (2) Headers: a code_peek holding `ref` shows it (`code_peek · path@ref` in the header or title area — match how
+          path is shown today); a diff header reads `diff · <ref>` plus path when scoped. Add a `diff` entry to the
+          type label map — both EN and KO strings if the map is localised; diff stays 'diff' in Korean.
+      (3) tests/board-blocks.test.ts: a diff block renders its lines and ref/path label, a code_peek with ref shows
+          it, English and Korean headers.
+      SCOPE: the three files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: run `command claude plugin test .` — exit 0 with 0 failing.
+      STOP WHEN: the suite is green and the renderers exist.
+
+  - id: board-host
+    label: Git reads for ref and diff plus the harness git knob
+    category: hard
+    dependsOn:
+      - board-engine
+      - board-render
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/board-host.test.ts
+      - tests/control-harness.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        contains: "diffsNeeded"
+      - kind: file
+        path: tests/control-harness.ts
+        contains: "git"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+    prompt: |
+      TASK: Wire the git reads into hooks/register.ts: resolve `code_peek.ref` via `git show`, resolve `diff` blocks
+      via `git diff`, and give tests a way to answer git calls.
+      CONTEXT: register.ts owns all host I/O — read editBoard (peeks/traces loops), readPeek, readTrace, and
+      `$.process.run` usage elsewhere (the handoff lock mkdir/rmdir). Engine exports consumed: diffsNeeded, diffKey,
+      DiffRequest (read hooks/engine/board.ts for the exact names and shapes). In tests, control-harness.ts's
+      process.run handler answers exit 0 with empty stdout; verify commands use the inline PROGRAMS plugin pattern —
+      check tests/AGENTS.md and the PROGRAMS block.
+      DELIVERABLE:
+      (1) readPeek: when request.ref is set, run `$.process.run(['git', 'show', `${request.ref}:${request.path}`])`
+          with the project root as cwd (match how other process calls pass cwd — check the API or existing usage);
+          exit != 0 -> fail('invalid_board_edit', `code_peek <path>@<ref>: git show could not read it (<stderr or
+          exit>)`). Without ref keep today's fs.read path (worktree).
+      (2) readDiff($, request): `['git', 'diff', request.ref]` or with `['--', request.path]` appended when path is
+          set; exit != 0 -> fail('invalid_board_edit', `diff <ref>[ <path>]: ...`). Empty stdout -> ok([]) so the
+          engine's empty-artifact refusal names the diff. Split stdout on /\r?\n/, drop a final empty line.
+      (3) editBoard: collect `diffsNeeded(board, edits)` like traces, fill `Map<diffKey, string[]>` and pass `diffs`
+          into applyEdits' options (signature may already include it from board-engine).
+      (4) tests/control-harness.ts: add a `git` knob — `control.git = new Map<string, string>()` keyed by the argv
+          after 'git' joined with ' ' (e.g. `show HEAD~1:src/a.ts`, `diff main -- src/b.ts`); a git argv whose key is
+          absent answers exit 128 with a short stderr, a present key answers exit 0 with that stdout. Keep every
+          existing knob untouched.
+      (5) tests/board-host.test.ts: a code_peek with ref reads `git show` output into saved lines; a git failure
+          refuses with invalid_board_edit; a diff insert resolves `git diff` lines into the saved board; a diff of an
+          unknown ref or an empty diff refuses; an update moving a diff's ref re-reads.
+      SCOPE: the three files in writes. Read anything. Never commit, push, install or reload plugins.
+      VERIFY: `command claude plugin test .` exit 0 with 0 failing; `bunx -p typescript@5 tsc -p . --noEmit` exit 0.
+      STOP WHEN: both commands exit 0 and every behaviour above has a test.
+      In ## Output give the helper names, the argv shapes, the harness knob, and every new test name.
+
+  - id: board-docs
+    label: Document ref and diff in the Korean docs
+    category: writing
+    dependsOn:
+      - board-engine
+      - board-render
+      - board-host
+    load_skills:
+      - dag-workflow:anti-slop
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "diff"
+      - kind: file
+        path: docs/reference.md
+        contains: "ref"
+      - kind: file
+        path: README.md
+        contains: "diff"
+    prompt: |
+      TASK: Update the Korean user docs for code_peek.ref and the diff block: README.md (the 보드로 구조 보기 section)
+      and docs/reference.md (the 보드 section — block table, code_peek bullets, board action notes).
+      CONTEXT: read the 보드 section of docs/reference.md first (블록 종류 table, code_peek bullets, 보드 도구 액션
+      table) and the 보드로 구조 보기 section of README.md. Match the terse Korean reference style — limits in
+      parentheses, English field names in code ticks, behaviour notes as bullets.
+      DELIVERABLE:
+      (1) reference.md block table: code_peek row gains `ref?`; add a `diff` row (`ref` 필수, `path?`, `note?`,
+          `title?`). The code_peek bullet list gains a ref bullet — `ref`가 있으면 워킹 트리 대신 `git show <ref>:<path>`
+          로 읽고, ref·path·start·end 변경이 재해석을 부른다, `a..b` 같은 범위도 된다. Add a `diff` bullet paragraph:
+          호스트가 `git diff <ref>`(`path`가 있으면 `-- <path>`)를 실행해 줄을 저장한다; 빈 diff와 읽기 실패는
+          invalid_board_edit; trace와 같은 40줄·240자·마커 규칙; `get`은 diff도 lineCount를 돌려준다.
+      (2) README.md: the block list gains `diff` and the code_peek sentence mentions `ref`(git ref 시점의 줄).
+      SCOPE: README.md and docs/reference.md. Read anything. Never commit or push.
+      VERIFY: the file checks pass.
+      STOP WHEN: both docs cover ref and diff.
