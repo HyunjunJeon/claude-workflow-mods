@@ -10,17 +10,6 @@ Include the components, waves and their sizes, edges and their data, and a one-l
 Name the verification node, or both review nodes for a code-changing run.
 If conditions require a change, state a revised plan instead of changing nodes without explanation.
 
-Then draw the definition's shape on the session's plan board with the board tool (`mcp__dag-workflow__board`; load it with ToolSearch `select:mcp__dag-workflow__board` when it is deferred), before `start` and before an `amend` that changes the shape.
-The approval block of a held run names the session's most recently edited board that is not a result board, so drawing on it shows the user the DAG's shape before they approve and keeps that pointer honest.
-`create` a board titled `Plan: <run name>` (at most 80 characters) when the session has no board besides result boards; otherwise draw on the existing one.
-Insert ONE `flow` block with a flow node per definition node and one edge per `dependsOn` entry, from the dependency to the dependent:
-
-- Node: a short id (`n1`, `n2`; at most 32 characters of letters, digits, `_`, `-`, `.`), `label` the definition's node id cut to 40 characters, and `kind` `terminal` for a node nothing depends on, `process` for the rest.
-- Limits: a flow holds at most 24 nodes and 48 edges. For a wider definition, fold the parallel lanes of one wave into a single flow node whose label names them.
-- Changes: when the definition changes while planning, `replace` or `update` that flow by its block id (`get` the board when you do not know it) rather than stacking a second one.
-
-This is a SHOULD, not a gate. If the tool is unavailable or an edit is refused twice, start without the board, as the interview and PM skills do.
-
 ## Decomposition doctrine
 
 **TOPOLOGY LOCK first.** List the 1-6 top-level components before writing nodes.

@@ -53,16 +53,6 @@ Before `start`, state one concise run plan:
 
 Execute that plan.
 
-Before `start`, and before an `amend` that changes the shape, also draw the proposed definition on the session's plan board.
-The approval block of a held run names the session's most recently edited board that is not a result board, so drawing on it shows the user the DAG's shape before they approve.
-
-- If `mcp__dag-workflow__board` is deferred, load it with ToolSearch `select:mcp__dag-workflow__board`.
-- `create` a board titled `Plan: <run name>` when the session has no board besides result boards; otherwise draw on the existing one.
-- Insert ONE `flow` block: a flow node per definition node (a short id, `label` the node id cut to 40 characters, `kind` `terminal` when nothing depends on it, else `process`) and one edge per `dependsOn`, from the dependency to the dependent.
-- When the definition changes while planning, `replace` or `update` that flow; never stack a second one.
-
-This is a should, not a gate: if the tool is unavailable or an edit is refused twice, start without the board.
-
 ## Alignment
 
 After reading the reference and before writing the run plan, ask at most one round of questions.
