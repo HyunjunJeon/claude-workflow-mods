@@ -43,7 +43,9 @@ Wall time over the 8 scenarios: 1410s → 1480s.
 - Board tool calls per session: 0 in all 8 (plan-graph-baseline: 2-4 in every session). No session loaded the board tool through ToolSearch either, so no denied board attempt hides behind the narrower MAIN_TOOLS. The only `mcp__dag-workflow__board` strings in the transcripts are the deferred-tool listing.
 - The order is now `Skill planning` → (optional `start dryRun` → `start preview_id`) → run, with no board step between planning and start.
 - diamond-app and research-write each made the dryRun → preview_id pair; every other session made one `start`.
-- Harness note: the transcript's `starts` count reads 2 for single-edit, map-reduce-docs, pipeline-stats, debug-fix and wide-harvest, but each of those sessions has one distinct `start` tool_use id; the host wrote the same tool_use row twice, and readTranscript counts rows, not ids.
+- Harness note: the transcript's `starts` count reads 2 for single-edit, map-reduce-docs, pipeline-stats, debug-fix and wide-harvest, but each of those sessions has one distinct `start` tool_use id; the host wrote the same tool_use row twice, and readTranscript counts rows, not ids. The tool refusals column has the same
+  overcount where a result row repeats: single-edit, diamond-app and debug-fix each show 2 but hold one distinct erroring
+  tool_use id. Shape, nodes, depth and verified/total come from the run checkpoints and are not affected.
 
 ## Sources
 - shard-1: eval/results/20261015131959.json — single-edit, parallel-files
