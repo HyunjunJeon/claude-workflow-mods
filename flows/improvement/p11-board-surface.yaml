@@ -1,0 +1,409 @@
+# Board/DAG split: judge a board surface per prompt; stop drawing plan and result boards.
+# Why: the board was called on every DAG run by two doctrine hooks, not by the model's choice. The planning skill drew a
+# plan board before every start/amend (2-3 calls per run; read only by the approval block, and start_approval defaults to
+# off), and the settle message had the model add a "Verified result" section and open the result board (2 more calls; the
+# pane flipped from the DAG to the board after each run). Measured 2026-10-15: board 24 / dag 25 calls in one
+# solo-ultra-work session; headless eval runs (no pane) drew plan boards even for the single-edit fixture.
+# Decisions (2026-10-15): the DAG decides how much work and who does it; the board decides what shape the answer takes.
+# Q1 one Jev call carries a second question, surface: chat|board, next to mode (not a 3-way mode: MODE_CONFIDENCE 0.8
+#    was measured on a binary choice); asked only under enforcement auto, when Jev is asked at all, interactive, with a pane.
+# Q2 board needs an answer with several parts and no file change asked.
+# Q3 the run record belongs to the DAG pane: the automatic result board is removed (reverses P3 Q1 of 2026-10-13); a run
+#    started in a board turn gets board lines in its settle message instead.
+# Q4 the planning doctrine stops drawing the plan board; the eval rerun and its baseline are a separate step.
+# Q5 openBoard keeps switching the pane to the board when no run is unsettled (the user's choice).
+#
+# PREREQUISITE: `git status --short -- hooks tests skills README.md docs .claude-plugin` prints nothing, and no other
+# session edits this checkout.
+# Run it with:  /dag run flows/improvement/p11-board-surface.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active.
+# First run: dag_mv98q02x_59i5n6 (2026-10-15).
+#
+# Run plan (components -> waves):
+#   wave 1: jev-surface, protocol-text, decision-kind, settle-board, docs-planning, docs-readme
+#   wave 2: host-surface
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: trivial for the three pure lanes; standard for settle-board (removes one feature across the host, the
+# formatter, the board types and their tests; one removal slice, so its files-lint warning is expected) and host-surface
+# (one new judgment through the 3959-line host); writing for both docs lanes.
+# Wave-1 lanes declare file checks only, because the full suite and tsc can go red on a sibling's half-written file;
+# host-surface runs the full gate.
+
+key: improve-p11-board-surface-1
+name: Board/DAG split - board surface per prompt
+goal: >
+  Under enforcement auto, one Jev call per user prompt also judges where the answer is shown (surface chat or board), a
+  confident board turn tells the model to answer on a board, the plugin no longer draws result boards at settle, and the
+  planning doctrine no longer draws a plan board, so the DAG lifecycle never calls the board tool on its own; tests,
+  README.md, docs/reference.md and the planning skill match.
+review:
+  request: |
+    이전에 개발한 Board 를 더 우선시해서 쓰이는 경향이 있음.
+    DAG, Board 두개의 기능을 적절하게 분리시켜놓는게 좋을 것 같은데 어떻게 생각해?
+    자동으로 쓰이길 원하는데 그러면 Board 가 하는 기능과 DAG 가 하는 기능이 명확히 분리되어 있고 서로 장점이 있어야할 것 같음
+    승인
+    Agreed design (2026-10-15): DAG decides how much work and who does it; the board decides what shape the answer takes. Q1 one Jev call carries a second question, surface: chat|board, next to mode: direct|dag; it is asked only under enforcement auto, when Jev is asked at all, in an interactive session with a /dag pane. Q2 board needs an answer with several parts (structure, flow, comparison, what changed, a decision) and no file change asked. Q3 the run record (summary, node table, graph, writes, decisions) belongs to the DAG pane: the automatic result board is removed (reversing the 2026-10-13 P3 decision); a run started in a board turn gets board lines in its settle message instead. Q4 the planning doctrine stops drawing the plan board. Q5 (user answer: 자동 전환 유지) openBoard keeps switching the pane to the board when no run of the session is unsettled.
+    Out of scope: the eval rerun and its baseline; strict enforcement and turns decided without Jev (an unsettled run, no Jev backend) stay chat; persisting the surface across a resume; the interview and PM skills; the approval block's board line.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: "docs(planning): stop drawing the plan board before start"
+    paths:
+      - skills/planning
+  - message: "feat(routing): judge a board surface per prompt and stop drawing result boards"
+    paths:
+      - hooks
+      - tests
+      - README.md
+      - docs/reference.md
+      - flows/improvement/p11-board-surface.yaml
+nodes:
+  - id: jev-surface
+    label: Surface question in the Jev mode request
+    category: trivial
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/jev.ts
+      - tests/jev.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/jev.ts
+        contains: "SURFACE_CONFIDENCE"
+      - kind: file
+        path: hooks/engine/jev.ts
+        contains: "askSurface"
+      - kind: file
+        path: hooks/engine/jev.ts
+        contains: "A diagram and a few quoted lines"
+      - kind: file
+        path: tests/jev.test.ts
+        contains: "askSurface"
+    prompt: |
+      TASK: Add an optional surface question (chat or board) to the Jev mode request built in hooks/engine/jev.ts.
+
+      CONTEXT: Under enforcement auto the plugin asks Jev one question per user prompt, `mode` (direct or dag), built by modeRequest in hooks/engine/jev.ts (see MODE_CRITERIA and MODE_CONFIDENCE = 0.8 there). A second question in the same request will decide where the answer is shown: in chat, or on a board drawn in the /dag pane. The host (another node, later) passes askSurface = true only in an interactive session that has a /dag pane, so headless runs keep today's request byte-identical.
+
+      DELIVERABLE:
+      1. modeRequest(request, recent, previousReply?, askSurface = false). When askSurface is true, `questions` gets a second entry `surface` next to `mode`, of type 'choice', with these instructions and criteria verbatim. When askSurface is false, the returned request equals today's exactly.
+         instructions: 'Decide where the answer to the user\'s request in state.request is shown. Read state.recent and state.previousReply as for the mode question. Choose board only when the answer is understanding with several parts and the user did not ask to change files; otherwise choose chat.'
+         criteria (a module-level constant next to MODE_CRITERIA, named SURFACE_CRITERIA):
+         chat: 'The answer is short or linear: a fact, a yes or no, one value, flag or command, a status, or an explanation that fits in a few sentences; or the request asks to change files, run something or commit, so the result is the change itself.'
+         board: 'The request asks to understand something with several parts: how a system, flow or feature works across components or steps, a comparison of options, what a change did across files, or a decision with trade-offs; or it asks for research whose findings are the deliverable. A diagram and a few quoted lines would show it more clearly than prose.'
+      2. `export const SURFACE_CONFIDENCE = 0.8`, with a comment giving the why: the bar a board answer must clear; it copies MODE_CONFIDENCE because this question has no measurements yet, and a wrong surface costs a few tool calls, not safety.
+      3. answerModeRequest keeps calling modeRequest without askSurface: a popup answer never changes the surface.
+      4. Tests in tests/jev.test.ts: modeRequest without the flag has exactly the `mode` question and the same state as before; modeRequest(..., askSurface true) has `mode` and `surface`, and the surface criteria keys are exactly chat and board; answerModeRequest has no surface question.
+
+      SCOPE: edit hooks/engine/jev.ts and tests/jev.test.ts only. Other lanes edit hooks/engine/policy.ts, hooks/engine/board-spec.ts, hooks/engine/decisions.ts, hooks/ui/inspector-model.ts, hooks/register.ts, hooks/engine/format.ts, the board types, the planning skill, README.md and docs/reference.md at the same time; do not touch them. Code style: no semicolons, single quotes, 2-space indent, comments give the why; imports carry explicit .ts extensions; tests import from 'claude-code/testing' (see tests/AGENTS.md).
+
+      VERIFY: run `command claude plugin test .` and confirm every test in tests/jev.test.ts passes. A failure in a file another lane owns can come from its half-written work: name it in Output, do not fix it.
+
+      STOP WHEN: the four deliverables are in and tests/jev.test.ts passes.
+
+      In ## Output give: the exact modeRequest signature, the exported names, the question key `surface` and its two choice names, and the test result line for tests/jev.test.ts.
+
+  - id: protocol-text
+    label: Board protocol lines and board tool description
+    category: trivial
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/policy.ts
+      - hooks/engine/board-spec.ts
+      - tests/policy.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/policy.ts
+        contains: "TurnSurface"
+      - kind: file
+        path: hooks/engine/policy.ts
+        contains: "answer it on a board in this conversation"
+      - kind: file
+        path: hooks/engine/board-spec.ts
+        absent: "interview ledger, plan and result"
+      - kind: file
+        path: hooks/engine/board-spec.ts
+        contains: "interview and PM ledgers"
+      - kind: file
+        path: tests/policy.test.ts
+        contains: "The user wants the answer on a board"
+    prompt: |
+      TASK: Teach protocolFor in hooks/engine/policy.ts a board surface, and narrow the first sentence of the board tool description in hooks/engine/board-spec.ts.
+
+      CONTEXT: protocolFor(level, interactive = true, mode: TurnMode = 'dag') in hooks/engine/policy.ts builds the '[dag-workflow] ...' protocol text that rides on every prompt. Under enforcement auto, Jev will also judge a surface per user prompt (chat or board); the host (another node, later) passes it in. BOARD_TOOL ('mcp__dag-workflow__board') is exported from policy.ts. The board tool is deferred in sessions, so the model must load it with ToolSearch before its first call.
+
+      DELIVERABLE:
+      1. policy.ts: `export type TurnSurface = 'chat' | 'board'`; protocolFor(level, interactive = true, mode: TurnMode = 'dag', surface: TurnSurface = 'chat').
+      2. level 'auto', mode 'direct', surface 'board': these three lines (template literals where BOARD_TOOL appears), then the existing escalation line that starts '- If it turns out to need three or more', then the non-interactive line when it applies:
+         '[dag-workflow] This request asks to understand something: answer it on a board in this conversation; no DAG is needed.'
+         `- The board tool is ${BOARD_TOOL}; when it is deferred, load it with ToolSearch query "select:${BOARD_TOOL}". create a board titled after the topic in the user's language, draw a section (what and why), ONE diagram (flow for branches, sequence for who calls whom) and the few quoted lines that carry the mechanism (code_peek, diff or trace), call open once, then get the board back and check every block against what you read.`
+         '- Keep the chat reply to a few lines that point to the board. This is a should, not a gate: if the tool is unavailable, an edit is refused twice, or open replies shown: false, answer in chat instead.'
+      3. level 'auto', mode 'dag', surface 'board': today's dag text plus one line placed after the existing lines and before the non-interactive line:
+         `- The user wants the answer on a board: once the run settles and you have verified it, draw the findings on a board with ${BOARD_TOOL}; the settle message repeats how.`
+      4. surface 'chat' (the default) under every level, and surface 'board' under any level other than 'auto', return text byte-identical to today's.
+      5. board-spec.ts: in the first item of BOARD_TOOL_DESCRIPTION replace 'Use it for how something works, and for the interview ledger, plan and result.' with 'Use it when the user asks to understand something with several parts (how it works, a comparison, what changed, a decision) and for the interview and PM ledgers.' Change nothing else there. tests/board-engine.test.ts (owned by another lane; do not edit it) checks that the description stays within 2048 characters and still contains 'Board section (key b)'; check both by reading.
+      6. Tests in tests/policy.test.ts: direct+board contains 'answer it on a board in this conversation', the ToolSearch select line and the escalation line; dag+board contains the existing dag text and 'The user wants the answer on a board'; protocolFor('auto', true, 'direct') equals protocolFor('auto', true, 'direct', 'chat'); protocolFor('strict', true, 'dag', 'board') equals protocolFor('strict', true, 'dag', 'chat').
+
+      SCOPE: edit hooks/engine/policy.ts, hooks/engine/board-spec.ts and tests/policy.test.ts only. Other lanes edit hooks/engine/jev.ts, hooks/engine/decisions.ts, hooks/ui/inspector-model.ts, hooks/register.ts, hooks/engine/format.ts, the board types and tests/board-engine.test.ts, the planning skill and the docs at the same time; do not touch them. Code style: no semicolons, single quotes, 2-space indent, comments give the why; tests import from 'claude-code/testing'.
+
+      VERIFY: run `command claude plugin test .` and confirm every test in tests/policy.test.ts and tests/board-engine.test.ts passes. A failure in a file another lane owns can come from its half-written work: name it in Output, do not fix it.
+
+      STOP WHEN: the six deliverables are in and those two test files pass.
+
+      In ## Output give: the protocolFor signature, the exported TurnSurface type, the new board description sentence and its total length, and the test result lines.
+
+  - id: decision-kind
+    label: Surface decision kind and inspector labels
+    category: trivial
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/decisions.ts
+      - hooks/ui/inspector-model.ts
+      - tests/decisions.test.ts
+      - tests/inspector.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/decisions.ts
+        contains: "surface"
+      - kind: file
+        path: hooks/ui/inspector-model.ts
+        contains: "표시 방식"
+      - kind: file
+        path: tests/decisions.test.ts
+        contains: "surface"
+    prompt: |
+      TASK: Add a 'surface' decision kind to the decision log and to both inspector label tables.
+
+      CONTEXT: In hooks/engine/decisions.ts, DecisionRecord.kind is 'routing' | 'permission' | 'recovery' | 'mode', and the record validator (around line 53) accepts only those four. The host (another node, later) will persist one record per surface judgment: kind 'surface', proposed 'chat', selected 'chat' or 'board'. hooks/ui/inspector-model.ts holds the kind labels twice: EN around line 131 (`mode: 'mode'`) and KO around line 213 (`mode: '실행 방식'`). The project rule (AGENTS.md) forbids updating a UI string in only one of EN/KO.
+
+      DELIVERABLE:
+      1. decisions.ts: add 'surface' to the kind union and to the validator.
+      2. inspector-model.ts: label EN 'surface', KO '표시 방식'.
+      3. Tests in tests/decisions.test.ts: a decisions file holding a kind 'surface' record parses and keeps it; an unknown kind is still refused. If tests/inspector.test.ts checks kind labels, add the surface label there.
+
+      SCOPE: edit hooks/engine/decisions.ts, hooks/ui/inspector-model.ts, tests/decisions.test.ts and, only if it checks labels, tests/inspector.test.ts. Other lanes edit hooks/engine/jev.ts, hooks/engine/policy.ts, hooks/engine/board-spec.ts, hooks/register.ts, hooks/engine/format.ts, the board types, the planning skill and the docs at the same time; do not touch them. Code style: no semicolons, single quotes, 2-space indent; tests import from 'claude-code/testing'.
+
+      VERIFY: run `command claude plugin test .` and confirm every test in tests/decisions.test.ts and tests/inspector.test.ts passes. A failure in a file another lane owns can come from its half-written work: name it in Output, do not fix it.
+
+      STOP WHEN: the kind, both labels and the tests are in and those test files pass.
+
+      In ## Output give: the new kind union, both labels, and the test result lines.
+
+  - id: settle-board
+    label: Remove the result board; board-answer settle lines
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/engine/format.ts
+      - hooks/ui/result-board.ts
+      - hooks/engine/board-types.ts
+      - hooks/engine/board.ts
+      - hooks/engine/board-export.ts
+      - hooks/engine/board-chips.ts
+      - tests/result-board.test.ts
+      - tests/format.test.ts
+      - tests/board-host.test.ts
+      - tests/board-engine.test.ts
+      - tests/board-export.test.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        absent: "drawResultBoard"
+      - kind: file
+        path: hooks/engine/format.ts
+        absent: "SettleBoard"
+      - kind: file
+        path: hooks/engine/format.ts
+        contains: "the user wants the answer on a board"
+      - kind: file
+        path: hooks/engine/board-types.ts
+        absent: "RunLink"
+      - kind: file
+        path: hooks/ui
+        absent: "RESULT_SLOTS"
+      - kind: file
+        path: tests
+        absent: "ui/result-board.ts"
+      - kind: file
+        path: tests/format.test.ts
+        contains: "the user wants the answer on a board"
+    prompt: |
+      TASK: Remove the automatic result board and replace the settle message's board lines with board-answer lines that appear only when the host asks for them.
+
+      CONTEXT: Today, when a run settles, register.ts `announce` calls `drawResultBoard`, which uses hooks/ui/result-board.ts (RESULT_SLOTS: summary, nodes, graph, writes, decisions) to draw the run's facts on a board linked to the run through Board.run (type RunLink {runId, facts} in hooks/engine/board-types.ts), and settleMessage in hooks/engine/format.ts appends boardLines(SettleBoard) telling the model to add a 'Verified result' section and open the board. The user decided (2026-10-15) that the run record belongs to the DAG pane, which already shows the graph, node states, writes and decisions; the board is for answers the user asked to understand. So the result board goes away. A run started in a turn whose answer should go on a board (wired by another node later) gets board-answer lines instead.
+
+      DELIVERABLE:
+      1. Delete hooks/ui/result-board.ts and tests/result-board.test.ts. In hooks/register.ts remove drawResultBoard, resultDraws, factLink and the imports they used; announce no longer draws anything.
+      2. hooks/engine/format.ts: remove SettleBoard and the old boardLines. New signature: settleMessage(run, toolName, asked = new Map(), answerOnBoard = false). When answerOnBoard is true, add these two lines where the old board lines were (before the closing lines, so the 'prove every claim first' line stays last), with BOARD_TOOL interpolated:
+         `This run answers a request to understand something, and the user wants the answer on a board. After you have verified the result, draw the findings on a board with ${BOARD_TOOL} (load it with ToolSearch query "select:${BOARD_TOOL}" when it is deferred): a section with the conclusion, ONE diagram or table, and the quoted lines that prove it (code_peek, diff, or trace with this run's id). Call open once and keep the chat report short.`
+         'If the tool is unavailable, an edit is refused twice, or open replies shown: false, report the result in chat as before.'
+         When answerOnBoard is false, the message has no board lines at all. register.ts announce passes false for now.
+      3. hooks/engine/board-types.ts: remove RunLink and Board.run. hooks/engine/board.ts: a board file written before this change may carry `run: {runId, facts}` on a board; it must still load, with that field dropped, not refused. Remove limits and code that only served result boards. register.ts: latestBoardTitle uses the latest board of the session (no result-board filter); inheritBoards copies the source session's boards and no longer selects a board linked to the accepted run. Update board-export.ts or board-chips.ts only if they reference the removed field.
+      4. Keep openBoard as it is: the user chose to keep switching the pane to the board when no run of the session is unsettled.
+      5. Tests: tests/format.test.ts covers no board lines by default and the two lines when answerOnBoard is true; tests/board-host.test.ts covers that a settle draws no board and creates no board file, and that a boards file holding a board with an old `run` field loads; tests/board-engine.test.ts covers the parser dropping `run`. Remove tests that only exercised the result board.
+
+      SCOPE: edit only the files listed in this node's writes: hooks/register.ts, hooks/engine/format.ts, hooks/ui/result-board.ts (delete), hooks/engine/board-types.ts, hooks/engine/board.ts, hooks/engine/board-export.ts, hooks/engine/board-chips.ts, tests/result-board.test.ts (delete), tests/format.test.ts, tests/board-host.test.ts, tests/board-engine.test.ts, tests/board-export.test.ts. Other lanes edit hooks/engine/jev.ts, hooks/engine/policy.ts, hooks/engine/board-spec.ts, hooks/engine/decisions.ts, hooks/ui/inspector-model.ts, the planning skill, README.md and docs/reference.md at the same time; do not touch them. A later node wires the surface judgment into register.ts; do not add it. Code style: no semicolons, single quotes, 2-space indent, comments give the why; tests import from 'claude-code/testing' and use tests/control-harness.ts for hook tests (see tests/AGENTS.md).
+
+      VERIFY: run `command claude plugin test .` and `bunx -p typescript@5 tsc -p . --noEmit`; every test in the files you own must pass and tsc must report no error in a file you own. Errors in files other lanes own can come from their half-written work: name them in Output, do not fix them. Also run `grep -rn RunLink hooks tests` and `grep -rn result-board hooks tests` and expect no output.
+
+      STOP WHEN: the five deliverables are in and the checks above hold for your files.
+
+      In ## Output give: the settleMessage signature, every file changed or deleted, how an old `run` field is handled on load, and the test and tsc result lines.
+
+  - id: docs-planning
+    label: Drop the plan-board step from the planning doctrine
+    category: writing
+    writes:
+      - skills/planning/SKILL.md
+      - skills/planning/references/planning.md
+    verify:
+      - kind: file
+        path: skills/planning/SKILL.md
+        absent: "plan board"
+      - kind: file
+        path: skills/planning/SKILL.md
+        absent: "mcp__dag-workflow__board"
+      - kind: file
+        path: skills/planning/SKILL.md
+        contains: "Execute that plan."
+      - kind: file
+        path: skills/planning/references/planning.md
+        absent: "plan board"
+      - kind: file
+        path: skills/planning/references/planning.md
+        contains: "Before `start`, state one concise plan and execute it."
+    prompt: |
+      TASK: Remove the plan-board step from the planning doctrine in skills/planning/SKILL.md and skills/planning/references/planning.md.
+
+      CONTEXT: The doctrine currently tells the model to draw the proposed definition as one flow block on a 'Plan: <run name>' board before every start and shape-changing amend. That costs two or three board calls per run, and its only reader is the approval block of a held run (start_approval defaults to off). The /dag pane already draws a held run's graph. The user decided (2026-10-15) that the DAG lifecycle never calls the board tool on its own.
+
+      DELIVERABLE:
+      1. skills/planning/SKILL.md: delete the block that starts 'Before `start`, and before an `amend` that changes the shape, also draw the proposed definition on the session's plan board.' and ends 'This is a should, not a gate: if the tool is unavailable or an edit is refused twice, start without the board.' (currently lines 56-64), including its bullet list. Keep the run-plan block above it ('Before `start`, state one concise run plan:' ... 'Execute that plan.').
+      2. skills/planning/references/planning.md: delete the block from 'Then draw the definition's shape on the session's plan board' through 'start without the board, as the interview and PM skills do.' (currently lines 13-22), including its bullets. Keep lines 7-11 ('Reading does not replace planning.' ... 'If conditions require a change, state a revised plan instead of changing nodes without explanation.').
+      3. Add no replacement text about boards. Leave single blank lines between the remaining paragraphs.
+
+      SCOPE: edit those two files only; other lanes edit code, README.md and docs/reference.md at the same time.
+
+      VERIFY: `grep -n -i 'board' skills/planning/SKILL.md skills/planning/references/planning.md` prints nothing; `git diff --check -- skills/planning` prints nothing.
+
+      STOP WHEN: both blocks are gone and the two commands print nothing.
+
+      In ## Output give: the deleted line ranges of each file and the output of both commands.
+
+  - id: docs-readme
+    label: README and reference for the board surface
+    category: writing
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: README.md
+        absent: "결과 보드를 그리고"
+      - kind: file
+        path: README.md
+        absent: "계획 보드에 그리므로"
+      - kind: file
+        path: README.md
+        contains: "표시 방식"
+      - kind: file
+        path: docs/reference.md
+        absent: "### 결과 보드"
+      - kind: file
+        path: docs/reference.md
+        absent: "#결과-보드"
+      - kind: file
+        path: docs/reference.md
+        contains: "표시 방식"
+      - kind: command
+        argv: [git, diff, --check, --, README.md, docs/reference.md]
+    prompt: |
+      TASK: Update README.md and docs/reference.md (both in Korean; keep them Korean) for the new split between the DAG and the board.
+
+      CONTEXT (the behaviour other nodes implement in this run; describe exactly this):
+      - Roles: the DAG makes changes (parallel subagent nodes, isolated contexts, verification, recovery); the board shows answers the user asked to understand (diagrams, tables and quoted code that stay in the /dag pane, block chips that cite them back). The DAG lifecycle never calls the board tool on its own any more.
+      - New judgment 표시 방식 (surface): under enforcement auto, the same Jev call that decides 실행 방식 (direct or dag) also decides where the answer is shown: chat or board. It is asked only when Jev is asked at all (not while this session has an unsettled run, not without a Jev backend), only in an interactive session with a /dag pane, and board is applied only at confidence 0.8 or more. Board means: the request asks to understand something with several parts (how a system or flow works across components, a comparison of options, what a change did across files, a decision with trade-offs, or research whose findings are the deliverable) and asks for no file change. Under strict, guide or off, and on any other path, the surface is chat.
+      - direct + board: the protocol tells the model to answer on a board in the main conversation (load the board tool with ToolSearch, draw a section, one diagram and the quoted lines, open it, keep chat short), falling back to chat when the board cannot be used.
+      - dag + board: the run runs as usual; its settle message asks the model to draw the verified findings on a board and open it. This link between the run and the board is kept in memory only, so a resumed session reports such a run in chat.
+      - Each surface judgment is recorded in the decision log with kind `surface`, shown as '표시 방식' in the decisions inspector.
+      - Removed: the result board the plugin drew at settle (summary, node table, run graph, writes, decisions; the 'Verified result' section) — the DAG pane and its inspectors hold the run record. Removed: the planning skill's plan board drawn before start. A boards file written by an earlier version may carry a `run` field on a board; it is dropped on load.
+      - Kept: the interview and PM skills draw their ledgers on the board; the approval block of a held run points to the board this session changed last; when the model calls open and no run of the session is unsettled, the pane switches to the board (while a run is unsettled it stays on the DAG and a toast says the board changed).
+
+      DELIVERABLE:
+      1. README.md: in '### 보드로 구조 보기' explain when the board is used (the 표시 방식 judgment, the interview and PM skills, a direct request) and add a two-column comparison of what the DAG and the board each do and their strengths; delete the sentence about the planning skill drawing the plan board (starts '계획 스킬도 `start` 전에') and the one about the result board (starts '실행이 끝나면 플러그인이 요약'); keep the chips and export sentences. In the `auto` bullet of the enforcement section (starts '- **`auto` (기본):**'), add one sentence that the same judgment also decides 표시 방식.
+      2. docs/reference.md: delete the '### 결과 보드' section and every link to '#결과-보드'; in '### 승인 블록의 계획 보드 줄' the line now points to the board this session changed last (no result-board exception); in the `get` row of the board action table drop '(결과 보드는 `run`도)'; in the storage notes replace the result-board writes and the `run` field description with the one-line note that an older file's `run` field is dropped on load; add a subsection on 표시 방식 판단 next to the description of the auto mode decision, covering the conditions, the 0.8 bar, both surfaces, the dag + board settle lines, the in-memory limit and the `surface` decision kind.
+      3. Keep every other anchor link valid: after editing, every '](#...)' link in docs/reference.md and README.md must match a heading.
+
+      SCOPE: edit README.md and docs/reference.md only; other lanes edit code and the planning skill at the same time.
+
+      VERIFY: `git diff --check -- README.md docs/reference.md` prints nothing; `grep -n '결과 보드' README.md docs/reference.md` prints only lines that say the result board was removed, or nothing.
+
+      STOP WHEN: both files describe exactly the behaviour above and the checks hold.
+
+      In ## Output give: the headings you added or removed in each file and the output of both commands.
+
+  - id: host-surface
+    label: Wire the surface judgment into the host
+    category: standard
+    dependsOn:
+      - jev-surface
+      - protocol-text
+      - decision-kind
+      - settle-board
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: hooks/register.ts
+        contains: "boardAnswerRuns"
+      - kind: file
+        path: hooks/register.ts
+        contains: "SURFACE_CONFIDENCE"
+      - kind: file
+        path: tests/auto-mode.test.ts
+        contains: "the user wants the answer on a board"
+    prompt: |
+      TASK: Wire the surface judgment through hooks/register.ts so that, under enforcement auto, a confident board answer gives the turn the board protocol and a run started in that turn gets the board-answer settle message.
+
+      CONTEXT: The upstream nodes' Outputs give the exact names; re-check each against the code before relying on it. Expected: modeRequest(request, recent, previousReply?, askSurface) and SURFACE_CONFIDENCE in hooks/engine/jev.ts; TurnSurface and protocolFor(level, interactive, mode, surface) in hooks/engine/policy.ts; decision kind 'surface' in hooks/engine/decisions.ts; settleMessage(run, toolName, asked, answerOnBoard) in hooks/engine/format.ts. In hooks/register.ts today: `let turnMode` (near line 180), `let interactive` (near 187), `let paneSurface` (near 195), turnModeWithoutJev (near 919), judgeTurnMode (near 935, records a 'mode' decision through decisionOutcome(evaluation, choice, 'mode', MODE_CONFIDENCE) and persistDecisions), decideTurnMode (near 953), reconsiderAfterAnswer (near 963), announce (near 1366, calls settleMessage), and the prompt.submit handler (near 3519) that sets turnMode under auto and adds protocolFor(enforcement, interactive, turnMode) to the prompt context.
+
+      DELIVERABLE:
+      1. `let turnSurface: TurnSurface = 'chat'`. Under auto each user prompt resets it to 'chat' before deciding, as turnMode is reset; plugin prompts (settle, keep-alive, progress) keep it, as they keep the mode.
+      2. Ask the surface question only when Jev is asked at all (turnModeWithoutJev returned undefined) and `interactive && paneSurface`: pass askSurface to modeRequest. Read the 'surface' choice from the same evaluation: the surface is 'board' only when decisionOutcome(evaluation, choice, 'surface', SURFACE_CONFIDENCE) is 'applied' and the choice is 'board'; every other outcome is 'chat'. When the question was asked, persist one more decision record next to the mode record: kind 'surface', the same subject, proposed 'chat', selected the surface, source 'jev' when applied else 'baseline', and the same confidence, probabilities, latency and threshold fields the mode record carries. Add a debug line like the mode one.
+      3. reconsiderAfterAnswer leaves the surface as it is.
+      4. The prompt.submit handler passes turnSurface to protocolFor.
+      5. `const boardAnswerRuns = new Set<string>()`: when the model's dag tool `start` creates a new run (not a dry run, not a reused key) during a turn whose surface is 'board', add the run id. announce passes boardAnswerRuns.has(run.runId) as settleMessage's answerOnBoard. A comment says why it is not persisted: a resumed session reports such a run in chat. Runs from a /dag run the user typed never join it.
+      6. Keep openBoard as it is (the user chose to keep switching the pane to the board when no run of the session is unsettled).
+      7. Tests in tests/auto-mode.test.ts: extend its jevModel helper so the model answer can carry a surface choice too, and keep the existing tests unchanged:
+         a. interactive session with a pane, mode direct at 0.9 and surface board at 0.9: the prompt context carries 'answer it on a board in this conversation', and a decision record with kind 'surface' and selected 'board' is persisted;
+         b. surface board at 0.7: the context carries the plain direct text ('This request is small') and the surface record has selected 'chat';
+         c. a non-interactive session, or one without a pane: the mode request has no 'surface' question;
+         d. mode dag and surface board: a run started in that turn settles with a prompt that contains 'the user wants the answer on a board'; a run started in a chat turn settles without it.
+
+      SCOPE: edit hooks/register.ts and tests/auto-mode.test.ts. If an existing test in another file under tests/ breaks because of this wiring, fix it there and name the file in Output. Do not change hooks/engine/* or hooks/ui/*: if an upstream export is wrong, report it as `DAG_NODE_STATUS: failed: missing-input: <what>`. Code style: no semicolons, single quotes, 2-space indent, comments give the why; tests follow tests/AGENTS.md (control-harness, mock clock, no wall-clock waits).
+
+      VERIFY: `command claude plugin test .` exits 0; `bunx -p typescript@5 tsc -p . --noEmit` exits 0; `command claude plugin validate .` exits 0 (its existing '.catch' warnings are known).
+
+      STOP WHEN: the seven deliverables are in and the three commands exit 0.
+
+      In ## Output give: the total test count, every file changed, and the three commands' result lines.

@@ -22,17 +22,19 @@ const USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, c
 
 // Jev for these tests. The harness's HTTP answers 500, so each question goes on to the session model, answered here;
 // h.requests still records every HTTP attempt. The mode question gets `answer`; a routing question gets no answer and
-// keeps the definition's category. `down` fails the model call, and `slow` holds it past MODE_BUDGET_MS.
+// keeps the definition's category. When `surface` is set, a request that asks the surface question gets that answer too.
+// `down` fails the model call, and `slow` holds it past MODE_BUDGET_MS.
 function jevModel(on: On, h: Harness, answer: Answer = SMALL) {
-  const jev = { answer, backend: 'up' as Backend }
+  const jev = { answer, surface: undefined as Answer | undefined, backend: 'up' as Backend }
   h.control.httpStatus = 500
   on('model.complete', async ($, e) => {
     const request: Pick<JevRequest, 'questions'> = JSON.parse(e.prompt)
     if (!('mode' in request.questions)) return { value: { isAnswered: false, reason: 'empty-reply', usage: USAGE } }
     if (jev.backend === 'down') throw new Error('model down')
     if (jev.backend === 'slow') await h.clock.sleep(60_000)
-    const mode = { type: 'choice', ...jev.answer, probabilities: { [jev.answer.choice]: jev.answer.confidence } }
-    return { value: { isAnswered: true, text: JSON.stringify({ answers: { mode } }), usage: USAGE } }
+    const choiceOf = (given: Answer) => ({ type: 'choice', ...given, probabilities: { [given.choice]: given.confidence } })
+    const answers = { mode: choiceOf(jev.answer), ...(jev.surface ? { surface: choiceOf(jev.surface) } : {}) }
+    return { value: { isAnswered: true, text: JSON.stringify({ answers }), usage: USAGE } }
   })
   return jev
 }
@@ -66,9 +68,13 @@ function modeRequests(h: Harness): JevRequest[] {
   return h.requests.filter(request => 'mode' in request.questions)
 }
 
-function modeRecords(h: Harness): DecisionRecord[] {
+function decisionsOf(h: Harness, kind: DecisionRecord['kind']): DecisionRecord[] {
   const text = h.files.get(`${ROOT}/decisions/source.json`)
-  return text ? (JSON.parse(text).records as DecisionRecord[]).filter(record => record.kind === 'mode') : []
+  return text ? (JSON.parse(text).records as DecisionRecord[]).filter(record => record.kind === kind) : []
+}
+
+function modeRecords(h: Harness): DecisionRecord[] {
+  return decisionsOf(h, 'mode')
 }
 
 // The protocol each prompt carried, by name.
@@ -477,4 +483,215 @@ test('a declined popup asks Jev nothing and keeps the direct turn', async ($, on
   expect(reply.deny).toBe('The user declined to answer')
   expect(modeRequests(h)).toHaveLength(1)
   expect(await edit($)).toBeUndefined()
+})
+
+const BOARD = { choice: 'board', confidence: 0.9 }
+const CHAT = { choice: 'chat', confidence: 0.9 }
+const BOARD_PROTOCOL = 'answer it on a board in this conversation'
+// The sentence the dag protocol and the settle summary share: the user wants the answer on a board.
+const BOARD_SETTLE = 'the user wants the answer on a board'
+
+function surfaceRecords(h: Harness): DecisionRecord[] {
+  return decisionsOf(h, 'surface')
+}
+
+// The summaries the plugin sent into the conversation when runs settled.
+function settleTexts(h: Harness): string[] {
+  return h.submits.filter(submit => submit.origin === 'plugin').map(submit => submit.text)
+}
+
+test('a confident board answer gives a direct turn the board protocol and is recorded', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'How does a DAG run settle?')
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(Object.keys(modeRequests(h)[0]?.questions ?? {})).toEqual(['mode', 'surface'])
+  expect(h.submits[0]?.context[0]).toContain(BOARD_PROTOCOL)
+  expect(h.submits[0]?.context[0]).not.toBe(DIRECT)
+  // The mode is still direct: the main loop may edit, and a board is only where the answer goes.
+  expect(await edit($)).toBeUndefined()
+  expect(modeRecords(h)).toHaveLength(1)
+  expect(modeRecords(h)[0]).toMatchObject({ selected: 'direct', source: 'jev', outcome: 'applied' })
+  expect(surfaceRecords(h)).toHaveLength(1)
+  expect(surfaceRecords(h)[0]).toMatchObject({
+    kind: 'surface', subject: 'request', proposed: 'chat', selected: 'board', source: 'jev', outcome: 'applied',
+    backend: 'model', confidence: 0.9, probabilities: { board: 0.9 }, threshold: 0.8, sessionId: 'source',
+  })
+  expect(surfaceRecords(h)[0]?.stateHash).toBe(modeRecords(h)[0]?.stateHash)
+  expect(h.logs).toContain('dag-workflow: turn surface board: Jev applied (board at 0.9, bar 0.8)')
+})
+
+test('a board answer below the bar keeps the chat protocol and records the chat fallback', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = { choice: 'board', confidence: 0.7 }
+  await boot($, null)
+  await ask($, 'How does a DAG run settle?')
+  expect(h.submits[0]?.context[0]).toBe(DIRECT)
+  expect(h.submits[0]?.context[0]).toContain('This request is small')
+  expect(surfaceRecords(h)).toHaveLength(1)
+  expect(surfaceRecords(h)[0]).toMatchObject({
+    kind: 'surface', proposed: 'chat', selected: 'chat', source: 'baseline', outcome: 'low-confidence', confidence: 0.7, threshold: 0.8,
+  })
+})
+
+test('a reply with no surface answer, or a failed backend, answers in chat', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  await boot($, null)
+  // The mode question is answered and the surface question is not.
+  await ask($, 'How does a DAG run settle?')
+  expect(h.submits[0]?.context[0]).toBe(DIRECT)
+  expect(surfaceRecords(h)[0]).toMatchObject({ selected: 'chat', source: 'baseline', outcome: 'invalid-response' })
+  expect(surfaceRecords(h)[0]?.confidence).toBeUndefined()
+
+  jev.surface = BOARD
+  jev.backend = 'down'
+  await ask($, 'Compare the two settle paths')
+  expect(h.submits[1]?.context[0]).toBe(DIRECT)
+  expect(surfaceRecords(h)[1]).toMatchObject({ selected: 'chat', source: 'baseline', outcome: 'transport-error' })
+})
+
+test('each user prompt decides the surface anew and a plugin prompt keeps it', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'How does a DAG run settle?')
+  await relay($, 'Node a finished.')
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(h.submits[1]?.context[0]).toContain(BOARD_PROTOCOL)
+
+  jev.surface = CHAT
+  await ask($, 'Which flag turns the pane off?')
+  expect(h.submits[2]?.context[0]).toBe(DIRECT)
+  await relay($, 'Node b finished.')
+  expect(h.submits[3]?.context[0]).toBe(DIRECT)
+  expect(surfaceRecords(h).map(record => record.selected)).toEqual(['board', 'chat'])
+  expect(surfaceRecords(h)[1]).toMatchObject({ source: 'jev', outcome: 'applied' })
+
+  // A prompt that gets no confident answer does not inherit the board from the turn before.
+  jev.surface = BOARD
+  await ask($, 'How does a DAG run settle?')
+  jev.surface = undefined
+  await ask($, 'Compare the two settle paths')
+  expect(h.submits[5]?.context[0]).toBe(DIRECT)
+})
+
+test('the surface question is not asked in a non-interactive session', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await $.session.start({ surface: 'terminal', isInteractive: false, cwd: '/work' })
+  await ask($, 'How does a DAG run settle?')
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(Object.keys(modeRequests(h)[0]?.questions ?? {})).toEqual(['mode'])
+  expect(h.submits[0]?.context[0]).toContain('This request is small')
+  expect(h.submits[0]?.context[0]).not.toContain(BOARD_PROTOCOL)
+  expect(surfaceRecords(h)).toHaveLength(0)
+})
+
+test('the surface question is not asked in a session that draws no pane', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await ask($, 'How does a DAG run settle?')
+  expect(modeRequests(h)).toHaveLength(1)
+  expect(Object.keys(modeRequests(h)[0]?.questions ?? {})).toEqual(['mode'])
+  expect(h.submits[0]?.context[0]).toBe(DIRECT)
+  expect(surfaceRecords(h)).toHaveLength(0)
+})
+
+test('the surface question is not asked when the turn is decided without Jev', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await boot($, null)
+  await start($, DEFINITION)
+  await ask($, 'How does a DAG run settle?')
+  expect(modeRequests(h)).toHaveLength(0)
+  expect(h.submits[0]?.context[0]).toBe(AUTO_DAG)
+  expect(surfaceRecords(h)).toHaveLength(0)
+})
+
+test('a run started in a board turn settles with a prompt that asks for a board answer, and a chat turn\'s run does not', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h, { choice: 'dag', confidence: 0.9 })
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'Explain how a settle travels from the engine through the hooks to the pane')
+  expect(h.submits[0]?.context[0]).toContain('The user wants the answer on a board: once the run settles')
+  // A dry run starts nothing, so it adds no run to the board answers.
+  expect((await dag($, { action: 'start', definition: DEFINITION, dryRun: true })).dry_run).toBe(true)
+  await start($, { ...DEFINITION, key: 'board-turn' })
+  await finish($, h, 'agent-1')
+  expect(settleTexts(h)).toHaveLength(1)
+  expect(settleTexts(h)[0]).toContain(BOARD_SETTLE)
+
+  jev.surface = CHAT
+  await ask($, 'Add a settings page with its API, tests and docs')
+  await start($, { ...DEFINITION, key: 'chat-turn' })
+  await finish($, h, 'agent-2')
+  expect(settleTexts(h)).toHaveLength(2)
+  expect(settleTexts(h)[1]).toContain('settled: completed')
+  expect(settleTexts(h)[1]).not.toContain(BOARD_SETTLE)
+})
+
+test('a direct board turn that starts a run settles with the board prompt', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'How does a DAG run settle?')
+  await start($, DEFINITION)
+  await finish($, h, 'agent-1')
+  expect(settleTexts(h)).toHaveLength(1)
+  expect(settleTexts(h)[0]).toContain(BOARD_SETTLE)
+})
+
+test('a run the person starts with /dag run in a board turn settles without the board prompt', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h, { choice: 'dag', confidence: 0.9 })
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'Explain how a settle travels from the engine through the hooks to the pane')
+  h.files.set('/work/typed.json', JSON.stringify({ ...DEFINITION, key: 'typed-by-person' }))
+  await command($, 'run typed.json')
+  expect(h.spawns).toHaveLength(1)
+  await finish($, h, 'agent-1')
+  expect(settleTexts(h)).toHaveLength(1)
+  expect(settleTexts(h)[0]).not.toContain(BOARD_SETTLE)
+})
+
+test('a run started after enforcement leaves auto is not a board answer', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'How does a DAG run settle?')
+  await command($, 'enforce strict')
+  await start($, DEFINITION)
+  await finish($, h, 'agent-1')
+  expect(settleTexts(h)).toHaveLength(1)
+  expect(settleTexts(h)[0]).not.toContain(BOARD_SETTLE)
+})
+
+test('a popup answer that turns a board turn into a dag turn keeps the board surface', async ($, on) => {
+  popup(on)
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await boot($, null)
+  await ask($, 'What next?')
+  jev.answer = { choice: 'dag', confidence: 0.9 }
+  const reply = await $.tool.call(POPUP)
+  expect(reply.context?.[0]).toContain('The user wants the answer on a board: once the run settles')
+  // The answer is judged for the mode alone: it asks no surface question and records no surface decision.
+  expect(modeRequests(h)).toHaveLength(2)
+  expect(Object.keys(modeRequests(h)[1]?.questions ?? {})).toEqual(['mode'])
+  expect(surfaceRecords(h)).toHaveLength(1)
+  expect(surfaceRecords(h)[0]).toMatchObject({ subject: 'request', selected: 'board' })
 })

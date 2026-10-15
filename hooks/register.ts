@@ -1,10 +1,10 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type SettleBoard, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
+import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
 import { shareJevCall, type PendingJevCall } from './engine/jev-calls.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
@@ -16,7 +16,7 @@ import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
-import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode } from './engine/policy.ts'
+import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
 import {
   amendRun,
   approveRun,
@@ -62,7 +62,6 @@ import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
 import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
 import { adjacentBoardId, buildBoardView } from './ui/board-model.ts'
-import { drawsResult, factEdits, resultFacts, resultTitle, type ResultSlot } from './ui/result-board.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
 import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
 
@@ -178,6 +177,9 @@ let enforcement: Enforcement = 'auto'
 // How the current user turn runs under auto. A new process starts at 'dag', the strict rules, until the next user
 // prompt is decided: a reload in the middle of a direct turn closes the gate for the rest of that turn.
 let turnMode: TurnMode = 'dag'
+// Where the current user turn's answer is shown under auto: 'board' only when Jev confidently judged that the user wants to
+// understand something with several parts. Reset to 'chat' for each user prompt, kept by a plugin's prompt like the mode.
+let turnSurface: TurnSurface = 'chat'
 // start_approval from settings, and the /dag approval override that wins over it until the plugin's code reloads.
 let startApproval: StartApproval = 'off'
 let approvalOverride: StartApproval | undefined
@@ -598,9 +600,6 @@ let selectedDecisionId: string | undefined
 // board updated last.
 let boards: Board[] = []
 let selectedBoardId: string | undefined
-// Per run, the result board its settle drew and a hash of the facts drawn. announce runs again for a settle whose message the
-// host dropped; that settle neither redraws the board nor tells the model it was refreshed.
-const resultDraws = new Map<string, { facts: string; board: SettleBoard }>()
 // The chips the person put into the prompt box from the Board section, by label, oldest first. The next user prompt gets the
 // content of the ones it carries, and all are forgotten. A label holds no board id, so a later chip with the same label wins.
 const chips = new Map<string, { boardId: string; blockId: string }>()
@@ -928,30 +927,55 @@ function turnModeWithoutJev($: EngineInterface): TurnMode | undefined {
   return undefined
 }
 
+type TurnDecision = { readonly mode: TurnMode; readonly surface: TurnSurface }
+
 // Asks Jev the mode question and records the decision under `subject`: the user's 'request' or the 'answer' to a popup.
 // Only a confident Jev 'dag' gives a dag turn, the strict rules; every other outcome (a direct answer, low confidence,
 // timeout, error) runs the turn directly. Measured over 10 mode decisions, 4 of the 5 dag turns were fallbacks with no
 // confident dag answer, one of them leaning direct at 0.83, so the fallback gated small requests.
-async function judgeTurnMode($: EngineInterface, request: JevRequest, subject: 'request' | 'answer', signal: AbortSignal): Promise<TurnMode> {
+// A request that carries the surface question gets it answered from the same call and recorded next to the mode: only a
+// confident 'board' puts the answer on a board, and every other outcome answers in chat, as before.
+async function judgeTurn($: EngineInterface, request: JevRequest, subject: 'request' | 'answer', signal: AbortSignal): Promise<TurnDecision> {
   const evaluation = await evaluateJevWithin($, request, MODE_BUDGET_MS, signal)
   const choice = evaluation.choices.get('mode')
   const outcome = decisionOutcome(evaluation, choice, 'mode', MODE_CONFIDENCE)
   const applied = outcome === 'applied' && (choice?.choice === 'direct' || choice?.choice === 'dag')
   const mode: TurnMode = applied && choice.choice === 'dag' ? 'dag' : 'direct'
-  await persistDecisions($, [decisionRecord({
-    at: await $.clock.now(), kind: 'mode', subject,
+  const at = await $.clock.now()
+  const stateHash = hash(stableStringify(request.state))
+  const records = [decisionRecord({
+    at, kind: 'mode', subject,
     proposed: 'direct', selected: mode, source: applied ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
-    stateHash: hash(stableStringify(request.state)),
+    stateHash,
     ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-  }, evaluation, MODE_CONFIDENCE)])
+  }, evaluation, MODE_CONFIDENCE)]
   debug($, `turn mode ${mode}${subject === 'answer' ? ' for the popup answer' : ''}: Jev ${outcome}${choice ? ` (${choice.choice} at ${choice.confidence}, bar ${MODE_CONFIDENCE})` : ''}`)
-  return mode
+  let surface: TurnSurface = 'chat'
+  if ('surface' in request.questions) {
+    const surfaceChoice = evaluation.choices.get('surface')
+    const surfaceOutcome = decisionOutcome(evaluation, surfaceChoice, 'surface', SURFACE_CONFIDENCE)
+    const surfaceApplied = surfaceOutcome === 'applied' && (surfaceChoice?.choice === 'chat' || surfaceChoice?.choice === 'board')
+    if (surfaceApplied && surfaceChoice.choice === 'board') surface = 'board'
+    records.push(decisionRecord({
+      at, kind: 'surface', subject,
+      proposed: 'chat', selected: surface, source: surfaceApplied ? 'jev' : 'baseline', outcome: surfaceOutcome, latencyMs: evaluation.latencyMs,
+      stateHash,
+      ...(surfaceChoice ? { confidence: surfaceChoice.confidence, ...(surfaceChoice.probabilities ? { probabilities: surfaceChoice.probabilities } : {}) } : {}),
+    }, evaluation, SURFACE_CONFIDENCE))
+    debug($, `turn surface ${surface}: Jev ${surfaceOutcome}${surfaceChoice ? ` (${surfaceChoice.choice} at ${surfaceChoice.confidence}, bar ${SURFACE_CONFIDENCE})` : ''}`)
+  }
+  await persistDecisions($, records)
+  return { mode, surface }
 }
 
 // How a user turn runs under enforcement auto: dag only on a confident Jev 'dag' or while this session has an unsettled
-// run; every other path runs it directly. `recent` holds the user's requests before this one, oldest first.
-async function decideTurnMode($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnMode> {
-  return turnModeWithoutJev($) ?? await judgeTurnMode($, modeRequest(text, recent, await lastAssistantReply($)), 'request', signal)
+// run; every other path runs it directly. `recent` holds the user's requests before this one, oldest first. The surface
+// question is asked only where a board can be shown, an interactive session with the /dag pane, and only when Jev is
+// asked at all: a turn decided without Jev answers in chat.
+async function decideTurn($: EngineInterface, text: string, recent: readonly string[], signal: AbortSignal): Promise<TurnDecision> {
+  const mode = turnModeWithoutJev($)
+  if (mode !== undefined) return { mode, surface: 'chat' }
+  return judgeTurn($, modeRequest(text, recent, await lastAssistantReply($), interactive && paneSurface), 'request', signal)
 }
 
 // An AskUserQuestion answer comes back inside the turn that asked it, so Jev never sees it as a prompt: "what next?" is
@@ -964,13 +988,13 @@ async function reconsiderAfterAnswer($: EngineInterface, reply: ToolCallResult<'
   const popup = popupAnswer(reply.result)
   if (!popup) return reply
   try {
-    const mode = turnModeWithoutJev($) ?? await judgeTurnMode($, answerModeRequest(popup.questions, popup.answers, workflowContext.requests.slice(-3).map(entry => entry.text), popup.response), 'answer', signal)
+    const mode = turnModeWithoutJev($) ?? (await judgeTurn($, answerModeRequest(popup.questions, popup.answers, workflowContext.requests.slice(-3).map(entry => entry.text), popup.response), 'answer', signal)).mode
     // The popup stayed open for as long as the person took: the turn may have changed meanwhile.
     if (mode !== 'dag' || enforcement !== 'auto' || turnMode !== 'direct') return reply
     turnMode = 'dag'
     debug($, 'turn mode dag: the popup answer selects work Jev did not call small')
     // Spread, not rebuilt, so core's own messages for the call (ref, text) stay with the result.
-    return { ...reply, context: [...(reply.context ?? []), `${ANSWER_DAG_LINE}\n${protocolFor('auto', interactive, 'dag')}`] }
+    return { ...reply, context: [...(reply.context ?? []), `${ANSWER_DAG_LINE}\n${protocolFor('auto', interactive, 'dag', turnSurface)}`] }
   } catch (error) {
     debug($, `popup answer not judged: ${message(error)}`)
     return reply
@@ -1306,6 +1330,10 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
 }
 
 const settleSubmits = new Set<string>()
+// Runs the model started in a turn whose answer the user wants on a board; their settle summary asks for one. Not persisted:
+// the turn that wanted the board is over once the session is resumed, and nothing records it, so a resumed session reports
+// such a run in chat. A run the user starts with /dag run is not a board answer either.
+const boardAnswerRuns = new Set<string>()
 
 async function tick($: EngineInterface, runId: string): Promise<Run | undefined> {
   // Drain recovered spawn failures in this hook frame without recursive ticks.
@@ -1350,7 +1378,7 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
         $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
       }
     }
-    await announce($, run)
+    announce($, run)
     return run
   }
 }
@@ -1362,15 +1390,16 @@ function afterHook($: EngineInterface, send: () => void): void {
 }
 
 // `text` replaces the settle summary when the settle has its own news (a rejected run, where nothing ran to summarize);
-// `deferred` sends it through afterHook. The settle summary names the result board drawn for it, when there is one.
-async function announce($: EngineInterface, run: Run, text?: string, deferred = false): Promise<void> {
+// `deferred` sends it through afterHook. Nothing is drawn for a settle: the run record is the DAG pane's, and a board holds only
+// an answer the user asked to understand. The summary asks the model for that board (answerOnBoard) only for a run in
+// boardAnswerRuns.
+function announce($: EngineInterface, run: Run, text?: string, deferred = false): void {
   $.ui.invalidate('ui.render')
   if (!isSettled(run) || run.settledNotified || settleSubmits.has(run.runId)) return
   settleSubmits.add(run.runId)
-  const board = text === undefined ? await drawResultBoard($, run) : undefined
   const send = () => {
     // Plugin submissions run once idle; never await them in the queue.
-    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), board)).then(result => {
+    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), boardAnswerRuns.has(run.runId))).then(result => {
       if ('drop' in result) throw new Error(result.drop)
       return serialized(async () => {
         const current = runs.get(run.runId)
@@ -1945,6 +1974,9 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
+  // Only the model's own start answers the turn's request; a /dag run the person typed is not part of that answer. The
+  // enforcement check matters because only auto decides the surface, so a level changed mid-turn leaves an old 'board'.
+  if (by === 'model' && enforcement === 'auto' && turnSurface === 'board') boardAnswerRuns.add(runId)
   // The work now belongs to the run's nodes: a direct turn that opens one keeps the main loop off the files they write.
   if (turnMode === 'direct') {
     turnMode = 'dag'
@@ -2128,7 +2160,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
       const failure = await stopAgent($, agentId)
       if (failure) failures.push({ agent_id: agentId, error: failure })
     }
-    await announce($, cancelled)
+    announce($, cancelled)
     return ok({ ...snapshotOf(cancelled, 0), ...(failures.length ? { stop_failures: failures } : {}) })
   }
   if ((input.action === 'retry' || input.action === 'amend') && run.rejected && by === 'model') return err(rejectedByUser(run))
@@ -2207,9 +2239,9 @@ async function saveBoards($: EngineInterface, next: Board[]): Promise<void> {
 
 // An accepted handoff brings the source session's boards along: a block's lines were captured when it was drawn, so
 // copying is only the board list with each board's sessionId rewritten — parseBoardFile refuses a board that names
-// another session, and this session's own file would too. A copied board linked to the accepted run becomes the
-// selected board. A missing or unparsable source file is a no-op; a failure is logged and never fails the accept.
-async function inheritBoards($: EngineInterface, source: string, acceptedRunId: string): Promise<void> {
+// another session, and this session's own file would too. The Board section then shows the board changed last, as it does
+// anywhere else. A missing or unparsable source file is a no-op; a failure is logged and never fails the accept.
+async function inheritBoards($: EngineInterface, source: string): Promise<void> {
   const path = `${projectRoot}/${BOARDS_SUBDIR}/${source}.json`
   try {
     if (!(await $.fs.exists(path))) return
@@ -2222,8 +2254,6 @@ async function inheritBoards($: EngineInterface, source: string, acceptedRunId: 
     const inherited = parsed.value.boards.filter(board => !held.has(board.boardId)).map(board => ({ ...board, sessionId }))
     if (inherited.length === 0) return
     await saveBoards($, [...boards, ...inherited])
-    const linked = inherited.find(board => board.run?.runId === acceptedRunId)
-    if (linked) selectedBoardId = linked.boardId
   } catch (error) {
     $.ui.log(`could not inherit ${path}: ${message(error)}`)
   }
@@ -2378,62 +2408,13 @@ function shownBoard(): Board | undefined {
   return boards.find(board => board.boardId === selectedBoardId) ?? latestBoard(boards)
 }
 
-// The title the approval block points at: the board this session changed last, leaving out result boards, which report a run
-// that already settled and are never the plan.
+// The title the approval block points at: the board this session changed last.
 function latestBoardTitle(): string | undefined {
-  return latestBoard(boards.filter(board => board.run === undefined))?.title
+  return latestBoard(boards)?.title
 }
 
 function newBoardId(now: number): string {
   return `board_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-}
-
-// Slots whose block was replaced keep their ids, each inserted block's id goes to its slot in order, and a removed slot is dropped.
-function factLink(previous: Record<string, string>, edits: readonly BoardEdit[], insertedSlots: readonly ResultSlot[], inserted: readonly string[]): Record<string, string> {
-  const replaced = new Set(edits.flatMap(edit => (edit.op === 'replace' ? [edit.id] : [])))
-  const link: Record<string, string> = {}
-  for (const [slot, id] of Object.entries(previous)) if (replaced.has(id)) link[slot] = id
-  insertedSlots.forEach((slot, index) => {
-    const id = inserted[index]
-    if (id !== undefined) link[slot] = id
-  })
-  return link
-}
-
-// The facts of a settle of this interactive session's run (ui/result-board.ts) go on the board linked to the run: created at the
-// first settle, its fact blocks replaced in place at a later one, so the sections the model added stay. Nothing selects or opens
-// it; the model opens it once it has verified the result. Runs inside the queue (announce). A failure is logged and the settle
-// message goes out without a board.
-async function drawResultBoard($: EngineInterface, run: Run): Promise<SettleBoard | undefined> {
-  if (!interactive || !drawsResult(run)) return undefined
-  try {
-    const facts = resultFacts(run, language, decisionRecords.filter(record => record.runId === run.runId))
-    const factsHash = hash(stableStringify(facts))
-    const linked = boards.find(board => board.run?.runId === run.runId)
-    const drawn = resultDraws.get(run.runId)
-    if (drawn?.facts === factsHash && drawn.board.boardId === linked?.boardId) return drawn.board
-    const now = await $.clock.now()
-    let board: Board
-    if (linked) board = linked
-    else {
-      const created = newBoard({ boardId: newBoardId(now), sessionId, title: resultTitle(run, language), now })
-      if (!created.ok) throw new Error(created.error.message)
-      board = created.value
-    }
-    const previous = linked?.run?.facts ?? {}
-    const { edits, insertedSlots } = factEdits(facts, previous, board.blocks.map(block => block.id))
-    const applied = applyEdits(board, edits, { now, peeks: new Map(), traces: new Map(), diffs: new Map(), boardIds: new Set(boards.map(candidate => candidate.boardId)) })
-    if (!applied.ok) throw new Error(applied.error.message)
-    const drawnBoard: Board = { ...applied.value.board, run: { runId: run.runId, facts: factLink(previous, edits, insertedSlots, applied.value.inserted) } }
-    await saveBoards($, linked ? boards.map(candidate => (candidate.boardId === drawnBoard.boardId ? drawnBoard : candidate)) : [...boards, drawnBoard])
-    $.ui.invalidate('ui.render')
-    const settled = { boardId: drawnBoard.boardId, title: drawnBoard.title, refreshed: linked !== undefined }
-    resultDraws.set(run.runId, { facts: factsHash, board: settled })
-    return settled
-  } catch (error) {
-    $.ui.log(`could not draw the result board of ${run.runId}: ${message(error)}`)
-    return undefined
-  }
 }
 
 // A block header pressed in the Board section puts the block's chip into the prompt box at the cursor, and the label is kept so
@@ -2556,7 +2537,7 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
         $.ui.log(warning)
         warnings.push(warning)
       }
-      await inheritBoards($, run.sessionId, run.runId)
+      await inheritBoards($, run.sessionId)
     }
     if (operation === 'request') {
       if (result.value.handoff?.offeredAt !== undefined) await notifyHandoff($, result.value)
@@ -2605,7 +2586,7 @@ async function decideApproval($: EngineInterface, decision: 'approve' | 'reject'
   const rejected = rejectRun(run, reason, now)
   await persist($, rejected)
   const detail = reason.trim().replace(/\.+$/, '')
-  await announce($, rejected, `DAG run "${run.name}" (${run.runId}) was rejected by the user${detail ? `: ${detail}` : ''}. Nothing ran.`, true)
+  announce($, rejected, `DAG run "${run.name}" (${run.runId}) was rejected by the user${detail ? `: ${detail}` : ''}. Nothing ran.`, true)
   return { text: runStatusText(rejected) }
 }
 
@@ -3325,7 +3306,7 @@ export function register(on: On, options: PluginOptions) {
       await serialized(async () => {
         await recoverRuns($)
         for (const run of runs.values()) {
-          if (run.sessionId === sessionId && isSettled(run) && !run.settledNotified) await announce($, run)
+          if (run.sessionId === sessionId && isSettled(run) && !run.settledNotified) announce($, run)
         }
       })
     } catch (error) {
@@ -3523,18 +3504,21 @@ export function register(on: On, options: PluginOptions) {
       userRequest = e.text
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
       await persistContext($)
-      // Under auto each user prompt is decided anew; a plugin's prompt (settle, keep-alive, progress) keeps the mode.
-      // The strict rules hold while Jev is asked; every answer, none included, then sets the mode, and only a decision
-      // that throws leaves the gate closed.
+      // Under auto each user prompt is decided anew; a plugin's prompt (settle, keep-alive, progress) keeps the mode and
+      // the surface. The strict rules hold while Jev is asked; every answer, none included, then sets the mode, and only
+      // a decision that throws leaves the gate closed. The surface starts as chat and is set by the same decision.
       if (enforcement === 'auto') {
         turnMode = 'dag'
-        turnMode = await decideTurnMode($, e.text, recent, next.signal)
+        turnSurface = 'chat'
+        const decision = await decideTurn($, e.text, recent, next.signal)
+        turnMode = decision.mode
+        turnSurface = decision.surface
       }
     }
     // The protocol rides on every prompt. The block (up to 8,000 characters) goes only on a user prompt whose run and
     // note state the model has not received yet; a plugin's prompt never gets it, and the plugin's own carry the news.
     // It counts as received only once the prompt entered: a hook beneath that drops it delivers nothing.
-    const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive, turnMode)])]
+    const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive, turnMode, turnSurface)])]
     if (learningEnabled && learningRoot && userOrigin && next.origin.plugin === 'engine') {
       try {
         const now = await $.clock.now()

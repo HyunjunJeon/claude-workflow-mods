@@ -360,88 +360,40 @@ function settleNews(h: ReturnType<typeof harness>): string[] {
   return h.submits.filter(submit => submit.origin === 'plugin' && submit.text.includes(' settled: ')).map(submit => submit.text)
 }
 
-function resultBoardOf(h: ReturnType<typeof harness>) {
-  const found = savedBoards(h).find(saved => saved.run !== undefined)
-  if (!found) throw new Error('No result board was saved')
-  return found
-}
-
-test('a settled run of the session gets a Result board with its summary and nodes, and the settle prompt names it', async ($, on) => {
-  const h = harness(on)
-  await boot($)
-  const runId = await start($, RUN)
-  await finish($, h)
-
-  const result = resultBoardOf(h)
-  expect(result.title).toBe('Result: Solo')
-  expect(result.blocks.map(block => `${block.id} ${block.type}`)).toEqual(['b1 callout', 'b2 table', 'b3 flow', 'b4 table'])
-  expect(result.blocks[0]).toMatchObject({ type: 'callout', tone: 'info', title: 'completed · 1 of 1 node done · 0s', text: 'Solo' })
-  expect(result.blocks[1]).toMatchObject({ type: 'table', title: 'Nodes', columns: ['Node', 'State', 'Checks', 'Model', 'Time'], rows: [['a', 'completed', '1/1', 'sonnet', expect.any(String)]] })
-  expect(result.blocks[3]).toMatchObject({ type: 'table', title: 'Decisions', columns: ['Kind', 'Subject', 'Picked', 'Outcome'], rows: [['routing', 'a', expect.any(String), expect.any(String)]] })
-  expect(result.run).toEqual({ runId, facts: { summary: 'b1', nodes: 'b2', graph: 'b3', decisions: 'b4' } })
-
-  const [news] = settleNews(h)
-  expect(news).toContain(`Result board "Result: Solo" (board_id ${result.boardId})`)
-  expect(news).toContain('ONE section titled "Verified result"')
-  expect(news).not.toContain('replace your earlier')
-})
-
-// A node that declares a write, so a completed settle adds the Declared writes table and a failed one leaves it out.
-const WRITING = { key: 'writing', name: 'Writing', nodes: [{ id: 'a', prompt: 'Write a', dependsOn: [], writes: ['src/a.ts'], verify: [{ kind: 'command', argv: ['check-control'] }] }] }
-
-test('a retry that settles again redraws the facts in their blocks, keeps the model\'s section and the settle prompt says to replace it', { options: { auto_recovery: false } }, async ($, on) => {
-  const h = harness(on)
-  await boot($)
-  h.control.exitCode = 1
-  const runId = await start($, WRITING)
-  await finish($, h)
-  const first = resultBoardOf(h)
-  expect(first.blocks[0]).toMatchObject({ type: 'callout', tone: 'risk', title: 'failed · 0 of 1 node done · 0s' })
-  expect(first.blocks.map(block => block.id)).toEqual(['b1', 'b2', 'b3', 'b4'])
-  await board($, { action: 'edit', board_id: first.boardId, edits: [{ op: 'insert', block: { type: 'section', title: 'Verified result', text: 'Nothing works yet.' } }] })
-
-  h.control.exitCode = 0
-  await dag($, { action: 'retry', run_id: runId })
-  await finish($, h, 'agent-2')
-
-  const second = resultBoardOf(h)
-  expect(savedBoards(h)).toHaveLength(1)
-  expect(second.boardId).toBe(first.boardId)
-  expect(second.blocks.map(block => `${block.id} ${block.type}`)).toEqual(['b1 callout', 'b2 table', 'b3 flow', 'b4 table', 'b5 section', 'b6 table'])
-  expect(second.blocks[0]).toMatchObject({ tone: 'info', title: 'completed · 1 of 1 node done · 0s' })
-  expect(second.blocks[3]).toMatchObject({ title: 'Decisions' })
-  expect(second.blocks[4]).toMatchObject({ title: 'Verified result', text: 'Nothing works yet.' })
-  expect(second.blocks[5]).toMatchObject({ title: 'Declared writes', rows: [['src/a.ts', 'a']] })
-  expect(second.run).toEqual({ runId, facts: { summary: 'b1', nodes: 'b2', graph: 'b3', writes: 'b6', decisions: 'b4' } })
-
-  const news = settleNews(h)
-  expect(news).toHaveLength(2)
-  expect(news[0]).not.toContain('replace your earlier')
-  expect(news[1]).toContain(`(board_id ${first.boardId})`)
-  expect(news[1]).toContain('replace your earlier "Verified result" section')
-})
-
-test('a settle message the host dropped and sent again draws the facts once and does not ask to replace them', async ($, on) => {
-  let dropped = 0
-  on('prompt.submit', { text: / settled: / }, ($, e, next) => (dropped++ === 0 ? { drop: 'host is busy' } : next(e)))
+test('a settled run draws no board: no board file is created and the settle message has no board lines', async ($, on) => {
   const h = harness(on)
   await boot($)
   await start($, RUN)
   await finish($, h)
-  const drawn = resultBoardOf(h)
 
-  // A later session start announces the settle the model never got.
-  await h.clock.set(9_000)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  expect(dropped).toBe(2)
-  expect(resultBoardOf(h)).toEqual(drawn)
+  expect(h.files.has(BOARD_FILE)).toBe(false)
   const news = settleNews(h)
   expect(news).toHaveLength(1)
-  expect(news[0]).toContain(`(board_id ${drawn.boardId})`)
-  expect(news[0]).not.toContain('replace your earlier')
+  expect(news[0]).not.toContain(BOARD_TOOL)
+  expect(news[0]).not.toContain('Verified result')
+  expect(news[0]).not.toContain('on a board')
 })
 
-test('a run the user rejected before it started gets no result board', { options: { start_approval: 'always' } }, async ($, on) => {
+test('a settle leaves the boards the session drew exactly as they were, even when the run settles again', { options: { auto_recovery: false } }, async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const boardId = await create($, 'Interview')
+  await board($, { action: 'edit', board_id: boardId, edits: [SECTION] })
+  const drawn = h.files.get(BOARD_FILE)
+
+  h.control.exitCode = 1
+  const runId = await start($, RUN)
+  await finish($, h)
+  h.control.exitCode = 0
+  await dag($, { action: 'retry', run_id: runId })
+  await finish($, h, 'agent-2')
+
+  expect(settleNews(h)).toHaveLength(2)
+  expect(h.files.get(BOARD_FILE)).toBe(drawn)
+  expect(savedBoards(h).map(saved => saved.title)).toEqual(['Interview'])
+})
+
+test('a run the user rejected before it started draws no board', { options: { start_approval: 'always' } }, async ($, on) => {
   const h = harness(on)
   await boot($)
   const runId = await start($, RUN)
@@ -451,21 +403,50 @@ test('a run the user rejected before it started gets no result board', { options
   expect(h.files.has(BOARD_FILE)).toBe(false)
 })
 
-test('the approval block\'s plan board line passes over a result board the session changed later', async ($, on) => {
+// What an older plugin saved for a result board: the run it reported and the block that held each fact.
+const OLD_RUN_LINK = { runId: 'dag_mv6bifi0_ggt9of', facts: { summary: 'b1', nodes: 'b2' } }
+
+function oldBoard(title: string, updatedAt: number) {
+  return {
+    boardId: `board_${updatedAt}_old`, sessionId: 'source', title, createdAt: updatedAt, updatedAt, nextId: 2,
+    blocks: [{ id: 'b1', type: 'section', title: 'Summary', text: 'It ran.' }],
+  }
+}
+
+const oldResultBoard = (title: string, updatedAt: number, run: unknown = OLD_RUN_LINK) => ({ ...oldBoard(title, updatedAt), run })
+
+test('a boards file that holds a result board with its old run field loads, and the next save writes the board without it', async ($, on) => {
+  const h = harness(on)
+  const old = oldResultBoard('Result: Solo', 100)
+  h.files.set(BOARD_FILE, JSON.stringify({ schemaVersion: 1, sessionId: 'source', boards: [old] }))
+  await boot($)
+
+  const listed = await board($, { action: 'list' })
+  expect(listed.value.boards).toEqual([{ board_id: old.boardId, title: 'Result: Solo', blocks: 1, updatedAt: 100 }])
+  const read = await board($, { action: 'get', board_id: old.boardId })
+  expect(read.value).toMatchObject({ boardId: old.boardId, blocks: [{ id: 'b1', type: 'section', text: 'It ran.' }] })
+  expect(read.value).not.toHaveProperty('run')
+
+  await create($, 'Interview')
+  const saved = savedBoards(h)
+  expect(saved.map(candidate => candidate.title)).toEqual(['Result: Solo', 'Interview'])
+  expect(h.files.get(BOARD_FILE)).not.toContain('"facts"')
+  expect(h.files.get(BOARD_FILE)).not.toContain('"runId"')
+})
+
+test('the approval block\'s plan board line names the board the session changed last, whatever it holds', async ($, on) => {
   const h = harness(on)
   await boot($)
   await create($, 'Interview')
   await h.clock.set(5_000)
-  await start($, RUN)
-  await finish($, h)
-  expect(resultBoardOf(h).updatedAt).toBe(5_000)
+  await create($, 'Sketch')
 
   await command($, 'approval always')
   await h.clock.set(9_000)
   await start($, { ...RUN, key: 'next', name: 'Next' })
   const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
   const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text ?? '')
-  expect(texts.filter(text => text.startsWith('Plan board:'))).toEqual(['Plan board: Interview · press b to view'])
+  expect(texts.filter(text => text.startsWith('Plan board:'))).toEqual(['Plan board: Sketch · press b to view'])
   await ui.unmount()
 })
 
@@ -613,24 +594,6 @@ test('export returns the board as markdown with a mermaid flow and block id anch
   expect(markdown).toContain('in["values"]')
 })
 
-// A record seeded for another run must not land on this run's result board: the decisions slot quotes the run's own rows.
-test('a settled run\'s decisions table holds the run\'s records and not another run\'s', async ($, on) => {
-  const h = harness(on)
-  h.files.set(`${ROOT}/decisions/source.json`, JSON.stringify({
-    schemaVersion: 1, projectRoot: '/work', sessionId: 'source',
-    records: [{ id: 'x-1', at: 500, sessionId: 'source', kind: 'routing', subject: 'foreign', proposed: 'standard', selected: 'standard', source: 'baseline', outcome: 'applied', ruleset: 'r', threshold: 0.5, latencyMs: 0, stateHash: 'h', runId: 'dag_foreign_1' }],
-  }))
-  await boot($)
-  const runId = await start($, RUN)
-  await finish($, h)
-
-  const decisions = resultBoardOf(h).blocks.find(block => block.type === 'table' && block.title === 'Decisions')
-  expect(decisions).toBeDefined()
-  const rows = (decisions as { rows: string[][] }).rows
-  expect(rows.map(row => row[1])).toEqual(['a'])
-  expect(rows.map(row => row[0])).toEqual(['routing'])
-})
-
 const REF = (board: string, title?: string) => ({ op: 'insert', block: { type: 'board_ref', board, ...(title ? { title } : {}) } })
 
 test('a board_ref insert naming another board of the session is saved with that board_id', async ($, on) => {
@@ -716,25 +679,6 @@ test('a goto action naming a board the session does not hold leaves the shown bo
   await ui.unmount()
 })
 
-// A result board is redrawn at every settle by replacing its fact blocks, so a ref the model added next to them has to stay.
-test('a board_ref on a result board survives the redraw when the run settles again', { options: { auto_recovery: false } }, async ($, on) => {
-  const h = harness(on)
-  await boot($)
-  const interview = await create($, 'Interview')
-  h.control.exitCode = 1
-  const runId = await start($, WRITING)
-  await finish($, h)
-  const result = resultBoardOf(h)
-  const drawn = await board($, { action: 'edit', board_id: result.boardId, edits: [REF(interview)] })
-  expect(drawn.isError).toBe(false)
-
-  h.control.exitCode = 0
-  await dag($, { action: 'retry', run_id: runId })
-  await finish($, h, 'agent-2')
-
-  expect(resultBoardOf(h).blocks.filter(block => block.type === 'board_ref')).toEqual([{ id: 'b5', type: 'board_ref', board: interview }])
-})
-
 test('accepting a handoff copies the source session\'s boards under the accepting session id', async ($, on) => {
   const h = harness(on)
   await boot($)
@@ -758,4 +702,26 @@ test('accepting a handoff copies the source session\'s boards under the acceptin
   const copied = parsed.ok ? parsed.value.boards : []
   expect(copied.map(board => board.boardId)).toContain(boardId)
   expect(copied.find(board => board.boardId === boardId)?.blocks[0]).toMatchObject({ type: 'section', title: 'What sum does' })
+})
+
+test('accepting a handoff shows the source board changed last, not one that an old run link tied to the accepted run', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  h.store.set(`dag-session:${hash('/work')}:target`, { schemaVersion: 1, sessionId: 'target', projectRoot: '/work', updatedAt: 1_000, status: 'active', runIds: [], writes: [] })
+  const runId = await start($, { key: 'handoff', name: 'Handoff', nodes: [{ id: 'a', prompt: 'Produce', verify: [{ kind: 'command', argv: ['check-control'] }] }, { id: 'b', prompt: 'Consume', dependsOn: ['a'], verify: [{ kind: 'command', argv: ['check-control'] }] }] })
+  const tied = oldResultBoard('Tied to the run', 100, { runId, facts: {} })
+  const newer = oldBoard('Changed last', 200)
+  h.files.set(BOARD_FILE, JSON.stringify({ schemaVersion: 1, sessionId: 'source', boards: [tied, newer] }))
+  await command($, `handoff ${runId} target`)
+  await finish($, h)
+
+  h.control.sessionId = 'target'
+  await boot($)
+  const reply = await command($, `accept ${runId}`)
+  expect(reply.text).toContain('Accepted')
+
+  await command($, 'inspect board')
+  const ui = (await $.ui.mount(PANE)) as Mounted<'terminal', 'Pane'>
+  expect(await ui.find({ type: 'Text', text: 'Changed last (2/2)', in: 'inspector' })).toBeDefined()
+  await ui.unmount()
 })

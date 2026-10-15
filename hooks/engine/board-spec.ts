@@ -1,11 +1,11 @@
 // Claude Code passes the model only the first 2048 characters of a tool description (see TOOL_DESCRIPTION_LIMIT in
 // tool-spec.ts), so the rules come first and tests/board-engine.test.ts keeps the whole text under that limit.
 export const BOARD_TOOL_DESCRIPTION = [
-  'The board is shown to the user in the /dag pane\'s Board section (key b). Use it for how something works, and for the interview ledger, plan and result.',
+  'The board is shown to the user in the /dag pane\'s Board section (key b). Use it when the user asks to understand something with several parts (how it works, a comparison, what changed, a decision) and for the interview and PM ledgers.',
   'Write in this order: a section (what and why), ONE diagram (flow: branches; sequence: who calls whom), then the few lines that carry the mechanism (code_peek; code: your snippet; trace: a run quote; diff: a git change).',
-  'Draw a few blocks per edit; call open once after the first edit. Block ids b<n> are shown to the user. Read the board back with get before you finish.',
-  'Flow edges may not form a cycle: draw a loop as a note. code_peek and diff take a project-relative path and at most 40 lines. Edits are atomic: one bad edit changes nothing.',
-  'Actions: create {title} returns board_id; edit {board_id, edits} (1-20); get {board_id}; list; open {board_id} shows it in the pane; export {board_id} returns markdown.',
+  'Draw a few blocks per edit; call open once after the first edit. Read the board back with get before you finish.',
+  'Flow edges may not form a cycle: draw a loop as a note. code_peek and diff take a project-relative path and at most 40 lines. Edits are atomic.',
+  'Actions: create {title} returns board_id; edit {board_id, edits} (1-20); get {board_id}; list; open {board_id} shows it; export {board_id} returns markdown.',
   'Edits: {op:"insert", block, afterId?} (appends, or after afterId); {op:"update", id, changes} (merges fields; "" clears an optional one; never id, type or lines); {op:"replace", id, block}; {op:"remove", id}; {op:"move", id, afterId?} (after afterId, else to the end).',
   'Blocks (limits in characters; ? = optional; all but section and divider take title? 80):',
   'section {title 1-80, text? 4000};',

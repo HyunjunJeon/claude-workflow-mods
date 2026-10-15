@@ -4,6 +4,9 @@ import type { EngineError } from './types.ts'
 export type Enforcement = 'strict' | 'auto' | 'guide' | 'off'
 // How one user turn runs under `auto`: 'dag' (the strict rules) on a confident Jev 'dag', otherwise 'direct'.
 export type TurnMode = 'dag' | 'direct'
+// Where the answer to one user turn is shown under `auto`: 'chat' (today's behaviour) or 'board' when Jev
+// judges that the user wants to understand something with several parts.
+export type TurnSurface = 'chat' | 'board'
 
 // Only a direct turn under auto lifts the main-loop gate; a turn Jev confidently calls dag, or one in a session
 // with an unsettled run, is passed in as 'dag'.
@@ -307,12 +310,24 @@ export function denyMessage(tool: string, reason: string): string {
 
 const NON_INTERACTIVE_LINE = '- Non-interactive session: do not ask the user (no AskUserQuestion, no clarifying questions); decide, and record every assumption in the definition\'s goal and in the node prompts.'
 
-export function protocolFor(level: Enforcement, interactive = true, mode: TurnMode = 'dag'): string {
+const ESCALATION_LINE = '- If it turns out to need three or more independent pieces of work that gain from running in parallel or in isolated contexts, load the dag-workflow:planning skill and run it as a DAG instead.'
+
+// The surface is only read under auto, where Jev judges it per prompt; every other level keeps its text byte for byte.
+export function protocolFor(level: Enforcement, interactive = true, mode: TurnMode = 'dag', surface: TurnSurface = 'chat'): string {
+  const onBoard = level === 'auto' && surface === 'board'
   if (level === 'auto' && mode === 'direct') {
-    const lines = [
-      '[dag-workflow] This request is small: do it directly in this conversation; no DAG is needed.',
-      '- If it turns out to need three or more independent pieces of work that gain from running in parallel or in isolated contexts, load the dag-workflow:planning skill and run it as a DAG instead.',
-    ]
+    const lines = onBoard
+      ? [
+        '[dag-workflow] This request asks to understand something: answer it on a board in this conversation; no DAG is needed.',
+        // The board tool is deferred in sessions, so the model has to load it before its first call.
+        `- The board tool is ${BOARD_TOOL}; when it is deferred, load it with ToolSearch query "select:${BOARD_TOOL}". create a board titled after the topic in the user's language, draw a section (what and why), ONE diagram (flow for branches, sequence for who calls whom) and the few quoted lines that carry the mechanism (code_peek, diff or trace), call open once, then get the board back and check every block against what you read.`,
+        '- Keep the chat reply to a few lines that point to the board. This is a should, not a gate: if the tool is unavailable, an edit is refused twice, or open replies shown: false, answer in chat instead.',
+        ESCALATION_LINE,
+      ]
+      : [
+        '[dag-workflow] This request is small: do it directly in this conversation; no DAG is needed.',
+        ESCALATION_LINE,
+      ]
     if (!interactive) lines.push(NON_INTERACTIVE_LINE)
     return lines.join('\n')
   }
@@ -332,6 +347,8 @@ export function protocolFor(level: Enforcement, interactive = true, mode: TurnMo
     '- Every node automatically receives the outputs of the nodes it depends on. Set the definition\'s "goal" to the overall objective and tell each node what to produce.',
     '- start returns at once. Do not poll: when the run settles you get a summary with every node\'s output. Verify it, then use retry, amend or a follow-up run for anything missing.',
   ]
+  // The settle message repeats how to draw, so this line only says that the answer goes there once the run is verified.
+  if (onBoard) lines.push(`- The user wants the answer on a board: once the run settles and you have verified it, draw the findings on a board with ${BOARD_TOOL}; the settle message repeats how.`)
   if (!interactive) lines.push(NON_INTERACTIVE_LINE)
   return lines.join('\n')
 }

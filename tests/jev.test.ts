@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { MODE_CONFIDENCE, answerModeRequest, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, popupAnswer, recoveryRequest, routingParts, routingRequest } from '../hooks/engine/jev.ts'
+import { MODE_CONFIDENCE, SURFACE_CONFIDENCE, answerModeRequest, capTail, modeRequest, modelPrompt, parseModelChoices, permissionRequest, parseChoices, popupAnswer, recoveryRequest, routingParts, routingRequest } from '../hooks/engine/jev.ts'
 import { hash } from '../hooks/engine/hash.ts'
 import { createRun } from '../hooks/engine/run.ts'
 
@@ -305,6 +305,40 @@ test('the mode request asks one choice question between direct and dag and state
   expect(parseChoices(JSON.stringify({ answers: { mode: { type: 'choice', choice: 'trivial', confidence: 0.9 } } }), request.questions).size).toBe(0)
 })
 
+test('the mode request without askSurface holds only the mode question and the same state as before', () => {
+  const request = modeRequest('explain how the scheduler works', ['earlier'], 'Pick one')
+  expect(Object.keys(request.questions)).toEqual(['mode'])
+  expect(request.state).toEqual({ request: 'explain how the scheduler works', recent: ['earlier'], previousReply: 'Pick one' })
+  expect(modeRequest('explain how the scheduler works', ['earlier'], 'Pick one', false)).toEqual(request)
+})
+
+test('the mode request with askSurface adds a surface question between chat and board next to mode', () => {
+  const plain = modeRequest('explain how the scheduler works', ['earlier'], 'Pick one')
+  const request = modeRequest('explain how the scheduler works', ['earlier'], 'Pick one', true)
+  expect(Object.keys(request.questions)).toEqual(['mode', 'surface'])
+  expect(request.questions.mode).toEqual(plain.questions.mode)
+  expect(request.state).toEqual(plain.state)
+  const surface = request.questions.surface
+  expect(surface?.type).toBe('choice')
+  expect(Object.keys(surface?.criteria ?? {})).toEqual(['chat', 'board'])
+  expect(surface?.instructions).toContain('state.request')
+  expect(surface?.instructions).toContain('state.recent and state.previousReply')
+  expect(surface?.instructions).toContain('Choose board only when the answer is understanding with several parts and the user did not ask to change files; otherwise choose chat.')
+  expect(surface?.criteria.chat).toContain('the request asks to change files, run something or commit')
+  expect(surface?.criteria.board).toContain('A diagram and a few quoted lines would show it more clearly than prose.')
+  expect(SURFACE_CONFIDENCE).toBe(0.8)
+  // The session-model fallback carries both questions, and a reply may answer each of them.
+  expect(modelPrompt(request).prompt).toContain('"surface"')
+  const reply = JSON.stringify({ answers: {
+    mode: { type: 'choice', choice: 'direct', confidence: 0.9 },
+    surface: { type: 'choice', choice: 'board', confidence: 0.85 },
+  } })
+  const choices = parseChoices(reply, request.questions)
+  expect(choices.get('mode')?.choice).toBe('direct')
+  expect(choices.get('surface')?.choice).toBe('board')
+  expect(parseChoices(JSON.stringify({ answers: { surface: { type: 'choice', choice: 'direct', confidence: 0.9 } } }), request.questions).size).toBe(0)
+})
+
 test('the mode request masks secrets in the request and in earlier requests', () => {
   const key = `sk-${'a'.repeat(24)}`
   const request = modeRequest(`deploy with API_KEY=${key} now`, [`earlier token: ghp_${'b'.repeat(24)}`])
@@ -382,6 +416,8 @@ test('the answer mode request reads the chosen answer as the request and the que
   // It is the mode question as it is, so the session-model fallback and the confidence bar need nothing new.
   expect(Object.keys(request.questions)).toEqual(['mode'])
   expect(request.questions.mode).toEqual(modeRequest('', []).questions.mode)
+  // A popup answer never changes where the answer is shown.
+  expect(request.questions.surface).toBeUndefined()
 })
 
 test('the answer mode request has one line per answered question and leaves an unanswered one out', () => {

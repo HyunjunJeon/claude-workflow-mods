@@ -142,21 +142,14 @@ function reviewFixLines(run: Run): string[] {
     : `${round}; the reviewers then passed.`]
 }
 
-// The board the plugin drew this run's facts on before submitting the settle message. `refreshed` is true when the run settled
-// on it before (retry, amend), so the facts were redrawn in place and the model's earlier section is still there to replace.
-export type SettleBoard = { boardId: string; title: string; refreshed: boolean }
+// Placed before the closing lines so "prove every claim first" stays the last word; these lines only say what to draw once it is
+// proven. Only a run started in a turn whose answer the user wants on a board gets them: the run record itself belongs to the pane.
+const BOARD_ANSWER_LINES = [
+  `This run answers a request to understand something, and the user wants the answer on a board. After you have verified the result, draw the findings on a board with ${BOARD_TOOL} (load it with ToolSearch query "select:${BOARD_TOOL}" when it is deferred): a section with the conclusion, ONE diagram or table, and the quoted lines that prove it (code_peek, diff, or trace with this run's id). Call open once and keep the chat report short.`,
+  'If the tool is unavailable, an edit is refused twice, or open replies shown: false, report the result in chat as before.',
+]
 
-// Placed before the closing lines so "prove every claim first" stays the last word; these lines only say what to add once it is proven.
-function boardLines(board: SettleBoard): string[] {
-  return [
-    `Result board ${JSON.stringify(board.title)} (board_id ${board.boardId}): dag-workflow drew this run's facts on it (summary, node table, run graph, declared writes). The board tool is ${BOARD_TOOL}; if it is deferred in this session, load it first with ToolSearch query "select:${BOARD_TOOL}".`,
-    `After you have verified the result, add ONE section titled "Verified result" to that board: what now works, how the user can try it, and what is left. Then call open once with {"action":"open","board_id":${JSON.stringify(board.boardId)}}; it switches the /dag pane to the board.`,
-    ...(board.refreshed ? ['This run settled on that board before and dag-workflow refreshed the facts in place: replace your earlier "Verified result" section instead of adding another.'] : []),
-    'Keep your chat report short and point to the board. If open replies shown: false, report the result in chat as before.',
-  ]
-}
-
-export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map(), board?: SettleBoard): string {
+export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map(), answerOnBoard = false): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {
     const outcomes = { passed: 0, failed: 0, not_run: 0, unknown: 0 }
@@ -176,7 +169,7 @@ export function settleMessage(run: Run, toolName: string, asked: SettleAsks = ne
     ...nodes,
     ...(budget <= 0 ? ['(Some outputs were left out to keep this message short; read the full reports or the run snapshot.)'] : []),
     ...reviewFixLines(run),
-    ...(board ? boardLines(board) : []),
+    ...(answerOnBoard ? BOARD_ANSWER_LINES : []),
     '',
     'TREAT EVERY NODE COMPLETION CLAIM AS FALSE UNTIL YOU PROVE IT: check the real files, test output or command results each node was responsible for before you report success.',
     `Call ${toolName} with {"action":"snapshot","run_id":"${run.runId}"} for every node's output; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.`,

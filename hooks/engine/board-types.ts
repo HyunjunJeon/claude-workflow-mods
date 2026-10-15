@@ -72,12 +72,7 @@ export type BoardEdit =
   | { op: 'remove'; id: string }
   | { op: 'move'; id: string; afterId?: string }
 
-// The run a result board reports, and for each fact slot (summary, nodes, graph, writes, ...) the id of the block that holds it, so the
-// next settle of the same run replaces those blocks in place. A fact's block may be gone: the model is free to remove it.
-export type RunLink = { runId: string; facts: Record<string, string> }
-
 // nextId only grows, so a removed block's id is never reused and an old reference cannot name a new block.
-// run is set by the host when it draws a result board; no edit the model sends can set or change it.
 export type Board = {
   boardId: string
   sessionId: string
@@ -86,7 +81,6 @@ export type Board = {
   updatedAt: number
   nextId: number
   blocks: Block[]
-  run?: RunLink
 }
 
 // One file per session, .claude/dag/boards/<sessionId>.json, so retention prunes boards the way it prunes context files.

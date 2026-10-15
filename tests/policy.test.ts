@@ -349,6 +349,41 @@ test('the mode only changes the text under auto: strict and guide ignore it', as
   expect(protocolFor('strict', true, 'dag')).not.toContain('under enforcement auto')
 })
 
+test('under auto a direct turn the user wants shown on a board is told to answer on one, with the load-and-draw steps', async () => {
+  const board = protocolFor('auto', true, 'direct', 'board').split('\n')
+  expect(board).toHaveLength(4)
+  expect(board[0]).toBe('[dag-workflow] This request asks to understand something: answer it on a board in this conversation; no DAG is needed.')
+  expect(board[1]).toContain('when it is deferred, load it with ToolSearch query "select:mcp__dag-workflow__board"')
+  expect(board[2]).toBe('- Keep the chat reply to a few lines that point to the board. This is a should, not a gate: if the tool is unavailable, an edit is refused twice, or open replies shown: false, answer in chat instead.')
+  expect(board[3]).toContain('- If it turns out to need three or more independent pieces of work')
+  expect(protocolFor('auto', true, 'direct', 'board')).not.toContain('This request is small')
+  const quiet = protocolFor('auto', false, 'direct', 'board').split('\n')
+  expect(quiet.slice(0, 4)).toEqual(board)
+  expect(quiet).toHaveLength(5)
+  expect(quiet[4]).toContain('Non-interactive session: do not ask the user')
+})
+
+test('under auto a DAG turn the user wants shown on a board keeps the DAG text and adds the settle-time board line', async () => {
+  const dag = protocolFor('auto', true, 'dag').split('\n')
+  const board = protocolFor('auto', true, 'dag', 'board').split('\n')
+  expect(board).toEqual([...dag, '- The user wants the answer on a board: once the run settles and you have verified it, draw the findings on a board with mcp__dag-workflow__board; the settle message repeats how.'])
+  const quiet = protocolFor('auto', false, 'dag', 'board').split('\n')
+  const quietDag = protocolFor('auto', false, 'dag').split('\n')
+  expect(quiet).toEqual([...quietDag.slice(0, -1), board.at(-1), quietDag.at(-1)])
+  expect(quiet.at(-1)).toContain('Non-interactive session: do not ask the user')
+})
+
+test('the surface only changes the text under auto: the chat default and every other level are untouched', async () => {
+  for (const interactive of [true, false]) {
+    for (const mode of ['dag', 'direct'] as const) expect(protocolFor('auto', interactive, mode, 'chat')).toBe(protocolFor('auto', interactive, mode))
+    for (const level of ['strict', 'guide', 'off'] as const) {
+      for (const mode of ['dag', 'direct'] as const) expect(protocolFor(level, interactive, mode, 'board')).toBe(protocolFor(level, interactive, mode, 'chat'))
+    }
+  }
+  expect(protocolFor('auto', true, 'direct')).not.toContain('board')
+  expect(protocolFor('auto', true, 'dag')).not.toContain('The user wants the answer on a board')
+})
+
 test('a node output is its "## Output" section, else its report without the status line', async () => {
   expect(extractOutput('notes\n## Output\n- wrote a.ts\n- API_KEY name is FOO\nDAG_NODE_STATUS: completed')).toBe('- wrote a.ts\n- API_KEY name is FOO')
   expect(extractOutput('just a report\nDAG_NODE_STATUS: completed')).toBe('just a report')

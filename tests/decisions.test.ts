@@ -39,3 +39,10 @@ test('a mode decision survives a reload', () => {
   expect(parseDecisionLog(log([mode]), '/p', 's')).toEqual([mode])
   expect(parseDecisionLog(log([{ ...mode, kind: 'unknown' }]), '/p', 's')).toEqual([])
 })
+
+test('a surface decision survives a reload and an unknown kind is still refused', () => {
+  const surface: DecisionRecord = { ...record, kind: 'surface', subject: 'request', proposed: 'chat', selected: 'board', source: 'jev', outcome: 'applied', confidence: 0.91, probabilities: { chat: 0.09, board: 0.91 } }
+  const log = (records: unknown[]) => ({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records })
+  expect(parseDecisionLog(log([surface]), '/p', 's')).toEqual([surface])
+  expect(parseDecisionLog(log([{ ...surface, kind: 'canvas' }]), '/p', 's')).toEqual([])
+})
