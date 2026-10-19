@@ -1,4 +1,4 @@
-# claude-dag-workflow
+# claude-workflow-mods
 
 Claude Code의 작업을 의존성 그래프(DAG)로 나누어 실행하는 Claude Mod 플러그인입니다.  
 독립된 작업은 병렬로 실행하고, 선행 작업이 끝나면 그 결과를 다음 작업에 전달합니다.
