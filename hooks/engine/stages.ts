@@ -259,6 +259,10 @@ function guideLine(guides: string[], rows: string): string {
   return `GUIDES: from the ${SECURE_CODING_SKILL} skill you loaded, read ${guides.map(id => `references/${id}.md (${id}: ${SECURITY_GUIDES[id]})`).join(' and ')} from the skill's folder, and apply ${rows}. If the skill or a reference file cannot be read, end with \`DAG_NODE_STATUS: failed: missing-input: <the skill or file>\`; never judge from memory.`
 }
 
+// The plugin adds the Semgrep hits of a lens as candidates after the lens finishes (register.ts lensExpansion), so the lens
+// spends its effort where a rule cannot see.
+const SEMGREP_LINE = 'SEMGREP: when semgrep is installed, the plugin runs the rules in skills/secure-coding/rules over the change after you finish and gives each hit in your lens its own verifier, recorded under ## Semgrep candidates in your notes. You need not list those lines. Spend your effort on what a rule cannot see: a control that is missing, and data that flows across functions or files.'
+
 // A lens finds candidates and judges none of them final: each one gets an independent verifier, so the lens favours recall.
 function lensPrompt(definition: Definition, review: ReviewStage, guides: string[], lens: string, nodes: NodeDef[]): string {
   const notes = notesFile(review, lensNodeId(lens))
@@ -267,6 +271,7 @@ function lensPrompt(definition: Definition, review: ReviewStage, guides: string[
     goalLine(definition.goal),
     ...changeBlock(nodes),
     guideLine(guides, `only the rows whose Lens column is \`${lens}\`; other lenses cover the rest`),
+    ...(guides.some(id => id === 'kisa' || id === 'owasp') ? [SEMGREP_LINE] : []),
     'CANDIDATE: a line the change adds or edits where one of your rows applies and the control it requires looks missing. When you are unsure whether the control is present, list it: the verifier traces it. Code the change does not touch is never a candidate.',
     `LIMIT: at most ${MAX_SECURITY_CANDIDATES} candidates. Merge repeats of one pattern into one candidate whose claim lists every line.`,
     `DELIVERABLE: ${notes}, written once and in full, with these sections in this order:`,
@@ -289,7 +294,7 @@ function reviewSecurityPrompt(definition: Definition, review: ReviewStage, guide
     `TASK: Compile the security verdict of this run's change from the lens and verifier notes, and write it to ${notes}. Judge nothing anew: the verifiers decided each candidate.`,
     goalLine(definition.goal),
     `INPUTS: the lens notes ${lenses.map(lens => notesFile(review, lensNodeId(lens))).join(', ')}, and every notes file under ${folder}/ (one per candidate, written by a verifier, ending with \`${CANDIDATE_CONFIRMED}\` or \`${CANDIDATE_REFUTED}\`). Guides applied: ${guides.join(', ')}.`,
-    `COUNT: the verifier notes files must number exactly the candidates in all lens notes together. If a candidate has no verifier verdict, end with \`DAG_NODE_STATUS: failed: missing-input: <the candidate without a verdict>\`.`,
+    `COUNT: the verifier notes files must number exactly the candidates in all lens notes together, counting both the ## Candidates block and the ## Semgrep candidates block the plugin adds. If a candidate has no verifier verdict, end with \`DAG_NODE_STATUS: failed: missing-input: <the candidate without a verdict>\`.`,
     `DELIVERABLE: ${notes}, written once and in full, with these sections in this order, each \`none\` when empty:`,
     '## Guides - each guide applied, with the edition its reference file names, and the candidate count per lens.',
     '## Breaches - each CONFIRMED candidate: its guide items, file:line, the missing control and the verifier\'s decisive evidence, with the verifier notes path.',

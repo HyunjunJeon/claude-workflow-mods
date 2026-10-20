@@ -3,7 +3,7 @@ import { verdictFailure } from './recovery.ts'
 import { isSettled } from './run.ts'
 import { downstream } from './graph.ts'
 import { COMMIT_ID, isReviewStageNode } from './stages.ts'
-import type { NodeDef, Run } from './types.ts'
+import type { NodeDef, ReviewFinding, Run } from './types.ts'
 
 // One automatic review-fix round per run. A FAIL verdict names what is wrong, and only the producer can change it, so instead
 // of reviewing the same work again (recovery.ts verdictFailure) the plugin reruns the producers the findings point at, with
@@ -13,7 +13,8 @@ import type { NodeDef, Run } from './types.ts'
 export const MAX_REVIEW_FIX_ROUNDS = 1
 export const REWORK_FINDINGS_CHARS = 4_000
 
-export type ReworkPlan = { reviewers: string[]; producers: string[]; note: string }
+// findings are the texts the note's <findings> blocks hold, kept for the review ledger (ledger.ts).
+export type ReworkPlan = { reviewers: string[]; producers: string[]; note: string; findings: ReviewFinding[] }
 // Why a run that failed only on FAIL verdicts got no round: the main conversation reviews the findings and, for work
 // outside the project, asks the person how to fix it.
 export type ReworkSkip = { skip: string }
@@ -92,18 +93,40 @@ function owns(writes: readonly string[], path: string): boolean {
     scope === '.' || scope === path || path.startsWith(`${scope}/`) || (!path.includes('/') && scope.split('/').pop() === path))
 }
 
-// What the producers are told: which reviewers failed the result, their findings (bounded), and to fix only that.
-export function reworkNote(round: number, findings: ReadonlyMap<string, string>): string {
-  let budget = REWORK_FINDINGS_CHARS
-  const blocks = [...findings].map(([reviewer, text]) => {
-    const kept = text.length <= budget ? text : `${text.slice(0, Math.max(0, budget)).trimEnd()}\n… (truncated)`
-    budget -= kept.length
-    return `<findings reviewer="${reviewer}">\n${kept}\n</findings>`
+// Each reviewer's share of the budget: the shortest texts are taken whole first and each longer one gets an equal part of
+// what is left, so every reviewer is heard. Spent in order instead, on 2026-10-19 review-spec and review-standards used the
+// whole budget and the producer got an empty review-security block, so the round left both security breaches in place.
+function findingShares(lengths: readonly number[], budget: number): number[] {
+  const shares = lengths.map(() => 0)
+  let left = budget
+  const byLength = lengths.map((length, index) => ({ length, index })).sort((a, b) => a.length - b.length)
+  byLength.forEach(({ length, index }, position) => {
+    shares[index] = Math.min(length, Math.floor(left / (byLength.length - position)))
+    left -= shares[index] ?? 0
   })
+  return shares
+}
+
+// Each failed reviewer's findings as the producers receive them: cut to its share of REWORK_FINDINGS_CHARS.
+export function reworkFindings(findings: ReadonlyMap<string, string>): ReviewFinding[] {
+  const shares = findingShares([...findings.values()].map(text => text.length), REWORK_FINDINGS_CHARS)
+  return [...findings].map(([reviewer, text], index) => {
+    const share = shares[index] ?? 0
+    return { reviewer, text: text.length <= share ? text : `${text.slice(0, share).trimEnd()}\n… (truncated)` }
+  })
+}
+
+const CLOSING = 'Change your deliverable so the findings that concern your work are resolved, inside your declared scope. Keep everything the original task asked for, change nothing the findings do not name, and rerun your checks. The reviewers run again after you.'
+// With the review ledger on. In the runs ledger.ts describes, the producer read its own task scope ("the two endpoints, touch
+// nothing else") as overriding a finding that cited its file, so this line says whose work such a finding is.
+const LEDGER_CLOSING = 'A finding that cites a file in your declared writes concerns your work, also when it asks for more than your original task listed: the reviewers judge the result against the request, not against your task. Resolve each such finding inside your declared scope, keep everything the original task asked for, change nothing the findings do not name, and rerun your checks. If a finding cannot be resolved inside your scope, end failed and name it. The reviewers run again after you.'
+
+// What the producers are told: which reviewers failed the result, their findings (bounded), and to fix only that.
+export function reworkNote(round: number, findings: ReadonlyMap<string, string>, ledger = false): string {
   return [
     `[Review fix ${round}/${MAX_REVIEW_FIX_ROUNDS}] After this node completed, ${[...findings.keys()].join(' and ')} failed the run's result with the findings below.`,
-    ...blocks,
-    'Change your deliverable so the findings that concern your work are resolved, inside your declared scope. Keep everything the original task asked for, change nothing the findings do not name, and rerun your checks. The reviewers run again after you.',
+    ...reworkFindings(findings).map(({ reviewer, text }) => `<findings reviewer="${reviewer}">\n${text}\n</findings>`),
+    ledger ? LEDGER_CLOSING : CLOSING,
   ].join('\n')
 }
 
@@ -111,7 +134,7 @@ export function reworkNote(round: number, findings: ReadonlyMap<string, string>)
 // no round: the findings point at no single producer, or a completed node the round would rerun works outside the project.
 // undefined means the round does not apply at all: another kind of failure, or the round is spent.
 // findings maps each failed reviewer to its text (the error, its ## Output, its notes); register.ts reads the notes.
-export function reworkPlan(run: Run, findings: ReadonlyMap<string, string>, projectRoot: string): ReworkPlan | ReworkSkip | undefined {
+export function reworkPlan(run: Run, findings: ReadonlyMap<string, string>, projectRoot: string, ledger = false): ReworkPlan | ReworkSkip | undefined {
   if (!isSettled(run) || run.cancelReason || run.handoff || run.approval || run.rejected) return undefined
   if ((run.reviewFix?.rounds ?? 0) >= MAX_REVIEW_FIX_ROUNDS) return undefined
   const failed = run.nodes.filter(node => node.state === 'failed')
@@ -130,11 +153,14 @@ export function reworkPlan(run: Run, findings: ReadonlyMap<string, string>, proj
   // Every node the round would run again after it already completed: the producers and what downstream of them had finished.
   const rerun = [...selected, ...downstream(run.definition.nodes, selected)].filter(id => run.nodes.find(node => node.id === id)?.state === 'completed')
   for (const id of rerun) {
+    // The plugin builds the review stage's nodes, and they write only their notes, so running them again is safe. The security
+    // lenses declare no writes and carry no verification name, and rerunRisk alone would stop every security review's round.
+    if (run.definition.review !== undefined && isReviewStageNode(run.definition.review, id)) continue
     const def = defOf(run, id)
     const risk = def ? rerunRisk(def) : 'is not in the definition'
     if (risk) return { skip: `${id} already ran and ${risk}, so the round does not rerun it unattended` }
   }
   const reviewers = failed.map(node => node.id)
   const texts = new Map(reviewers.map(id => [id, findings.get(id) ?? run.nodes.find(node => node.id === id)?.error ?? '']))
-  return { reviewers, producers: [...selected], note: reworkNote((run.reviewFix?.rounds ?? 0) + 1, texts) }
+  return { reviewers, producers: [...selected], note: reworkNote((run.reviewFix?.rounds ?? 0) + 1, texts, ledger), findings: reworkFindings(texts) }
 }

@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { isBlockedReportPath, isVerificationNode, lintDefinition, notesNameFor } from '../hooks/engine/lint.ts'
+import type { ReviewStage } from '../hooks/engine/types.ts'
 import { verificationProblem } from '../hooks/engine/verification.ts'
 
 // Every definition carries a goal unless a test passes undefined, so the goal warning stays out of the other tests.
@@ -277,4 +278,68 @@ test('a graph whose only candidate is a preview commit gets the no-verification-
     { id: 'commit', label: 'Commit the run preview', prompt: full, dependsOn: ['a'] },
   ]))
   expect(warnings).toEqual(['the graph has no verification node - add a node that depends on the producers, runs the real check and has "verify" in its id or label.'])
+})
+
+const KIT_GOAL = 'Add the user search, avatar and user deletion endpoints, and commit the change only after it passes a secure-coding review against the KISA guide.'
+const KIT_TAIL = " an endpoint that returns a user's avatar as a PNG with an ETag for HTTP caching (404 when the avatar file is missing), and an endpoint that deletes a user (404 when the user does not exist)."
+const KIT_REQUEST = `Add a user search endpoint,${KIT_TAIL}`
+const vagueClause = (clause: string) => `review.request: "${clause}" names a deliverable without an observable criterion (what it returns or does, its error and edge cases) - review-spec judges such a part by its own reading, so repeated runs can disagree; state the expected behavior.`
+const NO_ACCESS_RULE = 'review.request: review.security is set, but neither the request nor the goal says who may use what it asks for - after a security fix adds an access check, review-spec can report it as unrequested or as conflicting with a requested result (a 403 before a requested 404); say who may perform each action.'
+const review = (request: string, security?: string[]): ReviewStage => ({ request, notes: '/tmp/notes', category: 'standard', security })
+const reviewLint = (stage: ReviewStage, goal = KIT_GOAL) => lintDefinition({ ...build([{ id: 'x', prompt: full }], goal), review: stage })
+const requestWarnings = (warnings: string[]) => warnings.filter(warning => warning.startsWith('review.request:'))
+
+test('review.request warns about the vague search clause and the missing access rule of the kit request', async () => {
+  expect(requestWarnings(reviewLint(review(KIT_REQUEST, ['kisa'])))).toEqual([vagueClause('Add a user search endpoint'), NO_ACCESS_RULE])
+})
+
+test('review.request stays silent for a request with criteria and an access rule', async () => {
+  const request = `Add a user search endpoint that returns the id and name of users whose name contains the query,${KIT_TAIL} Only the user or an admin may delete a user.`
+  expect(requestWarnings(reviewLint(review(request, ['kisa'])))).toEqual([])
+})
+
+test('review.request never warns about access without review.security', async () => {
+  expect(requestWarnings(reviewLint(review(KIT_REQUEST)))).toEqual([vagueClause('Add a user search endpoint')])
+  expect(requestWarnings(reviewLint(review(KIT_REQUEST, [])))).toEqual([vagueClause('Add a user search endpoint')])
+})
+
+test('review.request accepts an access rule stated in the goal', async () => {
+  const goal = 'Add the endpoints; only signed-in users may call them.'
+  expect(requestWarnings(reviewLint(review('Add a user search endpoint that returns matching users', ['kisa']), goal))).toEqual([])
+})
+
+test('a definition without review gets no review.request warning', async () => {
+  expect(requestWarnings(lintDefinition(build([{ id: 'x', prompt: full }], KIT_GOAL)))).toEqual([])
+})
+
+test('review.request keeps the commas inside parentheses in one clause', async () => {
+  expect(requestWarnings(reviewLint(review('Add a lookup (by id, by name, by email) for users')))).toEqual([vagueClause('Add a lookup (by id, by name, by email) for users')])
+})
+
+test('review.request joins a clause of fewer than three words to the one before it', async () => {
+  expect(requestWarnings(reviewLint(review('Add an order list, sorted newest-first')))).toEqual([])
+})
+
+test('review.request accepts a printed quoted literal as a criterion', async () => {
+  expect(requestWarnings(reviewLint(review('Add a `greet` CLI that prints "hello <name>".\nDocument it in the README.')))).toEqual([])
+})
+
+test('review.request still warns about a clause whose only detail is a backticked name', async () => {
+  expect(requestWarnings(reviewLint(review('Add a `search` endpoint')))).toEqual([vagueClause('Add a `search` endpoint')])
+})
+
+test('review.request accepts an output verb as a criterion', async () => {
+  expect(requestWarnings(reviewLint(review('Add an export command that writes report.csv')))).toEqual([])
+})
+
+test('review.request accepts a quoted literal without an output verb, but not an empty one', async () => {
+  expect(requestWarnings(reviewLint(review('Add a banner reading "Welcome back", add a placeholder field reading ""')))).toEqual([vagueClause('add a placeholder field reading ""')])
+})
+
+test('review.request does not ask who may act under review.security for a local CLI', async () => {
+  expect(requestWarnings(reviewLint(review('Add a `greet` CLI that prints "hello <name>"', ['kisa']), 'A greet CLI ships with docs.'))).toEqual([])
+})
+
+test('review.request still asks who may act under review.security for an endpoint', async () => {
+  expect(requestWarnings(reviewLint(review(KIT_REQUEST, ['kisa'])))).toContain(NO_ACCESS_RULE)
 })

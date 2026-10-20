@@ -1,0 +1,6 @@
+{
+  "pluginConfigs": {
+    "dag-workflow": { "options": { "language": "ko", "max_concurrent": 12, "session_learning": false } },
+    "dag-workflow@inline": { "options": { "language": "ko", "max_concurrent": 12, "session_learning": false } }
+  }
+}

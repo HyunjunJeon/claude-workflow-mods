@@ -106,6 +106,46 @@ function vacuousReason(check: VerificationCheck): string | undefined {
   return undefined
 }
 
+// review-spec judges the result against the request sentences, so the request is cut into the parts it will judge one by one:
+// at sentence ends, ';', newlines and commas outside parentheses. A part of fewer than three words ("and", "etc.") joins the one before it.
+const MIN_CLAUSE_WORDS = 3
+
+function requestClauses(request: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let depth = 0
+  for (let index = 0; index < request.length; index++) {
+    const char = request.charAt(index)
+    current += char
+    if (char === '(') depth++
+    if (char === ')') depth = Math.max(0, depth - 1)
+    const next = request.charAt(index + 1)
+    const sentenceEnd = '.!?'.includes(char) && (next === '' || /\s/.test(next))
+    if (sentenceEnd || char === ';' || char === '\n' || (char === ',' && depth === 0)) {
+      parts.push(current)
+      current = ''
+    }
+  }
+  parts.push(current)
+  const clauses: string[] = []
+  for (const text of parts) {
+    const part = text.replace(/[\s,;.!?]+$/, '').trim()
+    if (part === '') continue
+    const words = part.split(/\s+/).length
+    if (words < MIN_CLAUSE_WORDS && clauses.length > 0) clauses[clauses.length - 1] += ` ${part}`
+    else clauses.push(part)
+  }
+  return clauses
+}
+
+const DELIVERABLE_START = /^(?:add|create|implement|build|write|introduce|expose|support|make|return|an?|and an?)\b/i
+// A criterion is a result word, a status code, an output verb, or a double-quoted literal such as "hello <name>" that the output can be checked against.
+// A backtick span such as `greet` only names the deliverable, so it is not one.
+const CRITERION = /"[^"]+"|\b(?:[1-5]\d\d|returns?|responds|when|if|unless|only|must|never|rejects?|errors?|fails?|status|within|limit|empty|sorted|ordered|matches|contains|exactly|with|as|prints|outputs|displays|shows|writes|logs|exits|emits|renders|sends|redirects|raises|throws|lists)\b/i
+const ACCESS_RULE = /\b(authori[sz]\w*|permission\w*|owners?|admins?|administrators?|roles?|who (?:may|can)|signed[- ]in|logged[- ]in|access control)\b/i
+// Who may act matters only for something other people can reach, so warning 2 needs a network surface in the request or goal.
+const NETWORK_SURFACE = /\b(?:endpoints?|routes?|apis?|urls?|https?|web\w*|servers?|pages?|forms?)\b/i
+
 export function lintDefinition(definition: Definition): string[] {
   const warnings: string[] = []
   for (const node of definition.nodes) {
@@ -157,6 +197,18 @@ export function lintDefinition(definition: Definition): string[] {
   }
   if (definition.goal === undefined || definition.goal.trim() === '') {
     warnings.push('the definition has no goal - set "goal" to one sentence naming the deliverable and its observable done condition; every node sees it.')
+  }
+  const review = definition.review
+  if (review !== undefined) {
+    for (const clause of requestClauses(review.request)) {
+      if (DELIVERABLE_START.test(clause) && !CRITERION.test(clause)) {
+        warnings.push(`review.request: "${clause}" names a deliverable without an observable criterion (what it returns or does, its error and edge cases) - review-spec judges such a part by its own reading, so repeated runs can disagree; state the expected behavior.`)
+      }
+    }
+    const requestAndGoal = `${review.request}\n${definition.goal ?? ''}`
+    if ((review.security?.length ?? 0) > 0 && NETWORK_SURFACE.test(requestAndGoal) && !ACCESS_RULE.test(requestAndGoal)) {
+      warnings.push('review.request: review.security is set, but neither the request nor the goal says who may use what it asks for - after a security fix adds an access check, review-spec can report it as unrequested or as conflicting with a requested result (a 403 before a requested 404); say who may perform each action.')
+    }
   }
   return warnings
 }

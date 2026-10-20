@@ -1,7 +1,7 @@
 import { expect, test, type Plugin } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { checkpoint, harness, start } from './control-harness.ts'
+import { checkpoint, command, harness, start } from './control-harness.ts'
 
 // B6: a `claude -p` session exits with exit code 0 while its DAG run is still `running`
 // (a node left `scheduled` or `running`). Diagnosis and evidence: notes/b6-diagnosis.md.
@@ -259,4 +259,53 @@ test('keep-alive: the prompt\'s turn ends and holds afresh after the earlier hol
   await h.clock.advance(1_000)
   await Promise.all([...done, secondHold])
   expect(checkpoint(h, runId).status).toBe('completed')
+})
+
+// `claude -p "/dag run <file>"` has no main turn, so no hold: in 5 of 14 real runs on 2026-10-19 the session closed as the
+// first node ended and the successor failed with "no session is bound in this process". The command now submits one prompt
+// that opens a main turn, whose end the hold keeps up while the run is active.
+const RUN_STARTED = 'dag-workflow runs it in the background'
+const runStarted = (h: { prompts: string[] }) => h.prompts.filter(text => text.includes(RUN_STARTED))
+const DEFINITION = JSON.stringify({ key: 'cmd-run', nodes: [{ id: 'a', prompt: 'A', verify: CHECK }, { id: 'b', prompt: 'B', dependsOn: ['a'], verify: CHECK }] })
+
+test('a /dag run in a non-interactive session with no main turn submits one prompt that opens a turn to hold', { plugins: [LATENCY] }, async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.json', DEFINITION)
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  await command($, 'run flow.json')
+  await h.clock.settle()
+  expect(h.logs.filter(line => line.includes('keep the session'))).toEqual([])
+  expect(h.spawns.length).toBe(1)
+  expect(runStarted(h)).toHaveLength(1)
+  expect(runStarted(h)[0]).toContain('end your turn without calling any tools')
+})
+
+test('a /dag run in an interactive session, or typed while the main turn runs, submits no such prompt', { plugins: [LATENCY] }, async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.json', DEFINITION)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await command($, 'run flow.json')
+  expect(runStarted(h)).toEqual([])
+})
+
+test('a /dag run typed while a non-interactive main turn runs waits for that turn and submits no prompt', { plugins: [LATENCY] }, async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.json', DEFINITION)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  await $.turn.start({ turnId: 'main', text: 'go' })
+  await command($, 'run flow.json')
+  expect(runStarted(h)).toEqual([])
+})
+
+test("a node agent's turn.start does not make a later /dag run wait for a main turn", { plugins: [LATENCY] }, async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/flow.json', DEFINITION)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  await $.turn.start({ turnId: 'node-turn', agentId: 'agent-9', text: '' })
+  await command($, 'run flow.json')
+  await h.clock.settle()
+  expect(h.spawns.length).toBe(1)
+  expect(runStarted(h)).toHaveLength(1)
 })

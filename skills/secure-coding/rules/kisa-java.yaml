@@ -1,0 +1,412 @@
+# Semgrep rules for the KISA implementation-phase weaknesses (references/kisa.md) that a program can find in Java (Spring MVC, Servlet, JDBC).
+# metadata.kisa is the item id in references/kisa.md, which also gives the item's name and lens.
+# metadata.tier: block refuses an Edit or Write before it lands; warn reports the hit after it lands.
+# Taint rules run on Semgrep CE, which follows data inside one function; flows across functions or files stay with the lens nodes.
+# Taint sources are Spring request-binding parameters and HttpServletRequest values. Each taint rule spells its sources out:
+# Semgrep 1.181 does not read a YAML alias (*anchor) as the pattern-sources list of a Java rule.
+rules:
+  # ---------------------------------------------------------------- 1. 입력데이터 검증 및 표현
+  - id: kisa-1-1-sql-injection-java
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Request input reaches the SQL text as is. Bind it with PreparedStatement placeholders or JdbcTemplate arguments.
+    metadata: {kisa: "1-1", cwe: [CWE-89], tier: warn}
+    pattern-sources: &spring-request
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: (java.sql.Statement $STMT).$EXEC($QUERY, ...)
+              - pattern-inside: (java.sql.Connection $CONN).prepareStatement($QUERY, ...)
+              - pattern-inside: (JdbcTemplate $JDBC).$EXEC($QUERY, ...)
+              - pattern-inside: (EntityManager $EM).createNativeQuery($QUERY, ...)
+              - pattern-inside: (EntityManager $EM).createQuery($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: kisa-1-3-path-traversal-java
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Request input builds a file path. Normalize it and check it stays inside the allowed base directory.
+    metadata: {kisa: "1-3", cwe: [CWE-22, CWE-99], tier: warn}
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sanitizers:
+      - pattern: FilenameUtils.getName(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: new File(..., $PATH)
+              - pattern-inside: new FileInputStream($PATH)
+              - pattern-inside: Paths.get(..., $PATH, ...)
+              - pattern-inside: Path.of(..., $PATH, ...)
+          - focus-metavariable: $PATH
+
+  - id: kisa-1-4-xss-java
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Request input is written to an HTML response without encoding. Use the template engine's escaping or encode for the output context.
+    metadata: {kisa: "1-4", cwe: [CWE-79], tier: warn}
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: (HttpServletResponse $RESP).getWriter().$PRINT($BODY)
+              - pattern-inside: (PrintWriter $OUT).$PRINT($BODY)
+          - metavariable-regex:
+              metavariable: $PRINT
+              regex: '^(print|println|write|append)$'
+          - focus-metavariable: $BODY
+
+  - id: kisa-1-5-os-command-injection-java
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Request input reaches an operating system command. Run a fixed program with an argument array and check the value against an allow-list.
+    metadata: {kisa: "1-5", cwe: [CWE-78], tier: warn}
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: Runtime.getRuntime().exec($CMD, ...)
+              - pattern-inside: new ProcessBuilder("sh", "-c", $CMD)
+              - pattern-inside: new ProcessBuilder("bash", "-c", $CMD)
+              - pattern-inside: new ProcessBuilder("cmd", "/c", $CMD)
+          - focus-metavariable: $CMD
+
+  - id: kisa-1-7-open-redirect-java
+    mode: taint
+    languages: [java]
+    severity: WARNING
+    message: >-
+      Request input picks the redirect target. Check it against allowed hosts or relative paths.
+    metadata: {kisa: "1-7", cwe: [CWE-601], tier: warn}
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: (HttpServletResponse $RESP).sendRedirect($URL)
+              - pattern-inside: return "redirect:" + $URL;
+          - focus-metavariable: $URL
+
+  - id: kisa-1-8-xxe-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      The XML parser allows DTDs and external entities. Turn on the disallow-doctype-decl feature.
+    metadata: {kisa: "1-8", cwe: [CWE-611], tier: warn}
+    patterns:
+      - pattern-inside: |
+          $FACTORY = DocumentBuilderFactory.newInstance();
+          ...
+      - pattern-not-inside: |
+          $FACTORY = DocumentBuilderFactory.newInstance();
+          ...
+          $FACTORY.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+          ...
+      - pattern: $FACTORY.newDocumentBuilder()
+
+  - id: kisa-1-11-csrf-disabled-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      Spring Security CSRF protection is turned off. Keep it on for state-changing requests authenticated by a session cookie.
+    metadata: {kisa: "1-11", cwe: [CWE-352], tier: warn}
+    pattern-either:
+      - pattern: $HTTP.csrf().disable()
+      - pattern: $HTTP.csrf($C -> $C.disable())
+      - pattern: $HTTP.csrf(AbstractHttpConfigurer::disable)
+
+  - id: kisa-1-12-ssrf-java
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: >-
+      The server fetches a URL taken from request input. Restrict it to an allow-list and block internal and metadata addresses.
+    metadata: {kisa: "1-12", cwe: [CWE-918], tier: warn}
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: new URL($URL)
+              - pattern-inside: URI.create($URL)
+              - pattern-inside: (RestTemplate $REST).$CALL($URL, ...)
+          - focus-metavariable: $URL
+
+  - id: kisa-1-17-format-string-java
+    mode: taint
+    languages: [java]
+    severity: WARNING
+    message: >-
+      Request input is used as a format string. Keep the format constant and pass the value as an argument.
+    metadata: {kisa: "1-17", cwe: [CWE-134], tier: warn}
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RET $METHOD(..., @RequestParam $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestParam(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @PathVariable(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @RequestHeader(...) $TYPE $INPUT, ...) { ... }
+              - pattern-inside: $RET $METHOD(..., @CookieValue(...) $TYPE $INPUT, ...) { ... }
+          - pattern: $INPUT
+      - pattern: (HttpServletRequest $REQ).getParameter(...)
+      - pattern: (HttpServletRequest $REQ).getHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: String.format($FORMAT, ...)
+              - pattern-inside: (PrintStream $OUT).printf($FORMAT, ...)
+          - focus-metavariable: $FORMAT
+
+  # ---------------------------------------------------------------- 2. 보안기능
+  - id: kisa-2-3-world-permissions-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      Every user gets read or write permission. Grant only the permissions the use needs.
+    metadata: {kisa: "2-3", cwe: [CWE-732], tier: warn}
+    pattern-either:
+      - pattern: PosixFilePermissions.fromString("rwxrwxrwx")
+      - pattern: PosixFilePermissions.fromString("rw-rw-rw-")
+      - pattern: (File $F).setWritable(true, false)
+      - pattern: (File $F).setReadable(true, false)
+
+  - id: kisa-2-4-weak-crypto-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      MD5/SHA-1, DES, RC4 and ECB cannot protect anything, and "AES" alone means ECB. Use SHA-256 or stronger and AES/GCM.
+    metadata: {kisa: "2-4", cwe: [CWE-327], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: MessageDigest.getInstance("$ALG")
+          - pattern: Cipher.getInstance("$ALG")
+      - metavariable-regex:
+          metavariable: $ALG
+          regex: '(?i)^(md5|md2|sha-?1|des|desede|rc2|rc4|blowfish)(/.*)?$|^aes$|.*/ecb/.*'
+
+  - id: kisa-2-6-hardcoded-secret-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A password, key or token is written in the code. Read it from the environment or a secrets manager.
+    metadata: {kisa: "2-6", cwe: [CWE-259, CWE-321], tier: block}
+    # Only literals count: with constant propagation on, a line that merely uses the variable matches too.
+    options:
+      constant_propagation: false
+    paths:
+      exclude: ["src/test/", "*Test.java"]
+    patterns:
+      - pattern-either:
+          - pattern: $TYPE $NAME = "$VALUE";
+          - pattern: $NAME = "$VALUE";
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '(?i).*(passw(or)?d|passwd|secret|api_?key|access_?key|private_?key|token).*'
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: '^.{4,}$'
+
+  - id: kisa-2-6-hardcoded-secret-setter-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A password, key or token is written in the code. Read it from the environment or a secrets manager.
+    metadata: {kisa: "2-6", cwe: [CWE-259, CWE-321], tier: block}
+    options:
+      constant_propagation: false
+    paths:
+      exclude: ["src/test/", "*Test.java"]
+    patterns:
+      - pattern: $OBJ.$SETTER("$VALUE")
+      - metavariable-regex:
+          metavariable: $SETTER
+          regex: '^set(Password|Secret|ApiKey|AccessKey|Token)$'
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: '^.{4,}$'
+
+  - id: kisa-2-7-short-rsa-key-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      The RSA key is shorter than 2048 bits. Use 2048 bits or more.
+    metadata: {kisa: "2-7", cwe: [CWE-326], tier: warn}
+    patterns:
+      - pattern-inside: |
+          $GEN = KeyPairGenerator.getInstance("RSA");
+          ...
+      - pattern: $GEN.initialize($BITS)
+      - metavariable-comparison:
+          metavariable: $BITS
+          comparison: $BITS < 2048
+
+  - id: kisa-2-8-insecure-random-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      A security value (token, OTP, session, password) comes from a predictable random source. Use SecureRandom.
+    metadata: {kisa: "2-8", cwe: [CWE-330], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: $TYPE $VAR = <... new Random(...) ...>;
+          - pattern: $TYPE $VAR = <... Math.random() ...>;
+          - pattern: $TYPE $VAR = <... RandomStringUtils.$GEN(...) ...>;
+          - pattern: $TYPE $VAR = <... ThreadLocalRandom.current() ...>;
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: '(?i).*(token|otp|nonce|session|secret|passw|reset|salt|key).*'
+
+  - id: kisa-2-10-jwt-signature-not-verified-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      The JWT signature is not verified. Use a parser with the signing key (parseClaimsJws, JWT.require(...).build().verify).
+    metadata: {kisa: "2-10", cwe: [CWE-347], tier: warn}
+    pattern-either:
+      - pattern: $PARSER.parseClaimsJwt(...)
+      - pattern: $PARSER.parseUnsecuredClaims(...)
+      - pattern: JWT.decode(...)
+
+  - id: kisa-2-11-tls-verification-disabled-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      TLS certificate or host name verification is off. Use the default TrustManager and HostnameVerifier.
+    metadata: {kisa: "2-11", cwe: [CWE-295], tier: warn}
+    pattern-either:
+      - pattern: |
+          public void checkServerTrusted(...) { }
+      - pattern: |
+          public boolean verify(String $HOST, SSLSession $SESSION) { return true; }
+      - pattern: ($HOST, $SESSION) -> true
+
+  - id: kisa-2-12-insecure-cookie-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      The cookie's HttpOnly or Secure flag is off. Session cookies need both.
+    metadata: {kisa: "2-12", cwe: [CWE-539], tier: warn}
+    pattern-either:
+      - pattern: (Cookie $C).setHttpOnly(false)
+      - pattern: (Cookie $C).setSecure(false)
+
+  - id: kisa-2-14-unsalted-password-hash-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      The password is stored as a fast unsalted hash. Use BCryptPasswordEncoder or Argon2PasswordEncoder.
+    metadata: {kisa: "2-14", cwe: [CWE-759], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: (MessageDigest $MD).digest(<... $PW ...>)
+          - pattern: (MessageDigest $MD).update(<... $PW ...>)
+      - metavariable-regex:
+          metavariable: $PW
+          regex: '(?i)^(password|passwd|pw|pwd|rawPassword|userPassword)$'
+
+  # ---------------------------------------------------------------- 4. 에러처리
+  - id: kisa-4-1-error-detail-exposed-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      The response returns the stack trace. Send the client a generic message and log the details on the server.
+    metadata: {kisa: "4-1", cwe: [CWE-209], tier: warn}
+    patterns:
+      - pattern-inside: |
+          try { ... } catch ($TYPE $E) { ... }
+      - pattern-either:
+          - pattern: $E.printStackTrace($RESP.getWriter())
+          - pattern: return <... ExceptionUtils.getStackTrace($E) ...>;
+
+  - id: kisa-4-2-swallowed-exception-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      The exception is caught and ignored. Handle it or rethrow it; if ignoring it is the decision, say why.
+    metadata: {kisa: "4-2", cwe: [CWE-390], tier: warn}
+    pattern: |
+      try { ... } catch ($TYPE $E) { }
+
+  # ---------------------------------------------------------------- 5. 코드오류
+  - id: kisa-5-5-unsafe-deserialization-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      This deserialization can build arbitrary objects. Use a data format such as JSON with a type allow-list.
+    metadata: {kisa: "5-5", cwe: [CWE-502], tier: warn}
+    pattern-either:
+      - pattern: (ObjectInputStream $IN).readObject()
+      - pattern: new XMLDecoder(...).readObject()
+      - pattern: (ObjectMapper $MAPPER).enableDefaultTyping(...)

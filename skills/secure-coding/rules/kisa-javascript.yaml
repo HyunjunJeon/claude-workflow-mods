@@ -1,0 +1,263 @@
+# Semgrep rules for the KISA implementation-phase weaknesses (references/kisa.md) that a program can find in JavaScript and TypeScript (Express, Node).
+# metadata.kisa is the item id in references/kisa.md, which also gives the item's name and lens.
+# metadata.tier: block refuses an Edit or Write before it lands; warn reports the hit after it lands.
+# Taint rules run on Semgrep CE, which follows data inside one function; flows across functions or files stay with the lens nodes.
+# The taint source is an Express handler argument named req or request.
+rules:
+  # ---------------------------------------------------------------- 1. 입력데이터 검증 및 표현
+  - id: kisa-1-1-sql-injection-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Request input reaches the SQL text as is. Pass it as a bound parameter: db.query(sql, [params]).
+    metadata: {kisa: "1-1", cwe: [CWE-89], tier: warn}
+    pattern-sources: &express-request
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.body
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: '^(req|request)$'
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $DB.query($QUERY, ...)
+              - pattern-inside: $DB.execute($QUERY, ...)
+              - pattern-inside: $DB.raw($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: kisa-1-2-code-injection-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Request input runs as code. Do not execute input; branch on an allow-list instead.
+    metadata: {kisa: "1-2", cwe: [CWE-94, CWE-95], tier: warn}
+    pattern-sources: *express-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: eval($CODE)
+              - pattern-inside: new Function(..., $CODE)
+              - pattern-inside: vm.runInNewContext($CODE, ...)
+          - focus-metavariable: $CODE
+
+  - id: kisa-1-3-path-traversal-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Request input builds a file path. Normalize it and check it stays inside the allowed base directory.
+    metadata: {kisa: "1-3", cwe: [CWE-22, CWE-99], tier: warn}
+    pattern-sources: *express-request
+    pattern-sanitizers:
+      - pattern: path.basename(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: fs.$READ($PATH, ...)
+              - pattern-inside: $RES.sendFile($PATH, ...)
+          - focus-metavariable: $PATH
+
+  - id: kisa-1-4-xss-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Request input is written to an HTML response without encoding. Use the template engine's auto-escaping or encode for the output context.
+    metadata: {kisa: "1-4", cwe: [CWE-79], tier: warn}
+    pattern-sources: *express-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RES.send($BODY)
+              - pattern-inside: $RES.write($BODY)
+          - pattern-not-inside: $RES.send({...})
+          - focus-metavariable: $BODY
+
+  - id: kisa-1-5-os-command-injection-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Request input reaches a shell command string. Pass an argument array to execFile/spawn and check the value against an allow-list.
+    metadata: {kisa: "1-5", cwe: [CWE-78], tier: warn}
+    pattern-sources: *express-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: exec($CMD, ...)
+              - pattern-inside: execSync($CMD, ...)
+              - pattern-inside: $CP.exec($CMD, ...)
+              - pattern-inside: $CP.execSync($CMD, ...)
+          - focus-metavariable: $CMD
+
+  - id: kisa-1-7-open-redirect-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Request input picks the redirect target. Check it against allowed hosts or relative paths.
+    metadata: {kisa: "1-7", cwe: [CWE-601], tier: warn}
+    pattern-sources: *express-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $RES.redirect($URL)
+              - pattern-inside: $RES.redirect($STATUS, $URL)
+          - focus-metavariable: $URL
+
+  - id: kisa-1-12-ssrf-js
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      The server fetches a URL taken from request input. Restrict it to an allow-list and block internal and metadata addresses.
+    metadata: {kisa: "1-12", cwe: [CWE-918], tier: warn}
+    pattern-sources: *express-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: fetch($URL, ...)
+              - pattern-inside: axios.$METHOD($URL, ...)
+              - pattern-inside: axios($URL, ...)
+          - focus-metavariable: $URL
+
+  # ---------------------------------------------------------------- 2. 보안기능
+  - id: kisa-2-4-weak-crypto-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      MD5/SHA-1, DES, RC4 and ECB cannot protect anything. Use SHA-256 or stronger and AES-GCM.
+    metadata: {kisa: "2-4", cwe: [CWE-327], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash("$ALG")
+          - pattern: crypto.createCipheriv("$ALG", ...)
+          - pattern: crypto.createDecipheriv("$ALG", ...)
+      - metavariable-regex:
+          metavariable: $ALG
+          regex: '(?i)^(md5|sha1|des.*|rc4.*|rc2.*|.*-ecb)$'
+
+  - id: kisa-2-6-hardcoded-secret-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      A password, key or token is written in the code. Read it from the environment or a secrets manager.
+    metadata: {kisa: "2-6", cwe: [CWE-259, CWE-321], tier: block}
+    # Only literals count: with constant propagation on, a line that merely uses the variable matches too.
+    options:
+      constant_propagation: false
+    paths:
+      exclude: ["tests/", "*.test.*", "*.spec.*"]
+    patterns:
+      - pattern-either:
+          - pattern: const $NAME = "$VALUE"
+          - pattern: let $NAME = "$VALUE"
+          - pattern: var $NAME = "$VALUE"
+          - pattern: $OBJ.$NAME = "$VALUE"
+          - pattern: |
+              {..., $NAME: "$VALUE", ...}
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '(?i).*(passw(or)?d|passwd|secret|api_?key|access_?key|private_?key|token).*'
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: '^.{4,}$'
+
+  - id: kisa-2-8-insecure-random-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      A security value (token, OTP, session, password) comes from Math.random. Use crypto.randomBytes or crypto.randomUUID.
+    metadata: {kisa: "2-8", cwe: [CWE-330], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: const $VAR = <... Math.random() ...>
+          - pattern: let $VAR = <... Math.random() ...>
+          - pattern: $VAR = <... Math.random() ...>
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: '(?i).*(token|otp|nonce|session|secret|passw|reset|salt|key).*'
+
+  - id: kisa-2-10-jwt-signature-not-verified-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      The JWT signature is not verified. Use jwt.verify with a fixed algorithm list and the server key.
+    metadata: {kisa: "2-10", cwe: [CWE-347], tier: warn}
+    pattern-either:
+      - pattern: jwt.decode(...)
+      - pattern: |
+          jwt.verify($TOKEN, $KEY, {..., algorithms: [..., "none", ...], ...}, ...)
+
+  - id: kisa-2-11-tls-verification-disabled-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is off. Turn it on; for a private CA, pass its certificate in the ca option.
+    metadata: {kisa: "2-11", cwe: [CWE-295], tier: warn}
+    pattern-either:
+      - pattern: |
+          {..., rejectUnauthorized: false, ...}
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+
+  - id: kisa-2-12-insecure-cookie-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      The cookie's HttpOnly or Secure flag is off. Session cookies need both.
+    metadata: {kisa: "2-12", cwe: [CWE-539], tier: warn}
+    pattern-either:
+      - pattern: |
+          $RES.cookie($NAME, $VALUE, {..., httpOnly: false, ...})
+      - pattern: |
+          $RES.cookie($NAME, $VALUE, {..., secure: false, ...})
+
+  - id: kisa-2-14-unsalted-password-hash-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      The password is stored as a fast unsalted hash. Use bcrypt, scrypt or Argon2.
+    metadata: {kisa: "2-14", cwe: [CWE-759], tier: warn}
+    patterns:
+      - pattern: crypto.createHash($ALG).update(<... $PW ...>)
+      - metavariable-regex:
+          metavariable: $PW
+          regex: '(?i)^(password|passwd|pw|pwd|userPassword|rawPassword)$'
+
+  # ---------------------------------------------------------------- 4. 에러처리
+  - id: kisa-4-1-error-detail-exposed-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      The response returns the stack trace. Send the client a generic message and log the details on the server.
+    metadata: {kisa: "4-1", cwe: [CWE-209], tier: warn}
+    patterns:
+      - pattern-inside: |
+          try { ... } catch ($ERR) { ... }
+      - pattern: $RES.$SEND(<... $ERR.stack ...>)
+
+  - id: kisa-4-2-swallowed-exception-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      The exception is caught and ignored. Handle it or rethrow it; if ignoring it is the decision, say why.
+    metadata: {kisa: "4-2", cwe: [CWE-390], tier: warn}
+    pattern-either:
+      - pattern: try { ... } catch ($ERR) {}
+      - pattern: try { ... } catch {}
+
+  # ---------------------------------------------------------------- 6. 캡슐화
+  - id: kisa-6-2-debug-code-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Debug code remains in shipped code. Remove it.
+    metadata: {kisa: "6-2", cwe: [CWE-489], tier: warn}
+    pattern: debugger;

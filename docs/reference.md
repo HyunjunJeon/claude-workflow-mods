@@ -172,7 +172,7 @@ mod는 이 스킬을 강제로 연결합니다.
 - 메인 대화는 노드마다 출력 발췌가 담긴 짧은 진행 알림을 받고, 정착하면 모든 노드의 출력과 보고서 경로가 담긴 요약을 받습니다.
 - 사용자가 `report.md`처럼 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*` 이름의 파일을 요구하면 노드는 호스트가 서브에이전트의 쓰기를 거부하므로 전체 텍스트를 `## Output`에 돌려주고(또는 `<node-id>-notes.md`에 쓰고), 메인 대화가 정착 뒤에 그 내용을 해당 파일로 그대로 씁니다([강제](#강제)). 노드 id가 `report-draft`처럼 이 이름들로 시작하면 `<node-id>-notes.md`도 거부되므로 `notes-<node-id>.md`를 씁니다. lint 경고와 거부 메시지도 이 이름을 제안하며, 경고는 같은 경로를 여러 번 적어도 노드마다 한 번만 나옵니다.
 
-**비대화형 세션에서 세션 유지**: 비대화형 세션(`claude -p` 등)에서는 메인 턴이 끝나도 이 세션의 실행이 `running`인 동안 플러그인이 그 턴의 `turn.complete`를 `sleep 1` 반복으로 붙잡아 세션을 열어 둡니다. 그런데 호스트는 붙잡힌 메인 턴을 끝난 뒤 60초까지만 기다립니다. 넘기면 `[WARN] headless session: turn events still running after 60000ms; the turn ends without them and their late notes are dropped`를 남기고, 그 뒤에는 살아 있는 노드 에이전트만 프로세스를 붙잡습니다. 그래서 메인 턴이 끝나고 60초가 지난 뒤에 노드가 끝나면 플러그인이 그 노드를 검증하거나 다음 노드를 띄우는 도중에 세션이 종료되어, 실행은 `running`, 노드는 `scheduled`나 `running`인 채 종료 코드 0으로 끝나곤 했습니다(백로그 B6). 이제 메인 턴이 붙잡힌 동안 노드 에이전트가 끝나면 플러그인이 검증보다 먼저 짧은 진행 프롬프트를 제출합니다. 노드가 끝났고 검증과 후속 실행은 백그라운드에서 이어진다고 알리며, 도구를 부르지 말고 한 줄로 답한 뒤 턴을 끝내라고 요청하는 내용입니다. 호스트가 이 프롬프트로 새 메인 턴을 시작하면 세션이 유지되고, 그 턴이 끝나면 플러그인은 실행이 정착할 때까지 다시 붙잡습니다. 비용은 노드가 끝날 때마다 메인 모델 턴이 짧게 한 번 더 도는 것입니다(그 프롬프트의 턴이 시작되기 전에 겹쳐 끝난 노드는 프롬프트 하나로 묶습니다). 이 턴의 한 줄 답변은 `claude -p`의 stdout에 그대로 나타납니다. 제출이 거부되거나 버려지면 `could not keep the session open for <run_id>/<node>`를 로그에 남깁니다. 대화형 세션은 영향을 받지 않습니다.
+**비대화형 세션에서 세션 유지**: 비대화형 세션(`claude -p` 등)에서는 메인 턴이 끝나도 이 세션의 실행이 `running`인 동안 플러그인이 그 턴의 `turn.complete`를 `sleep 1` 반복으로 붙잡아 세션을 열어 둡니다. 그런데 호스트는 붙잡힌 메인 턴을 끝난 뒤 60초까지만 기다립니다. 넘기면 `[WARN] headless session: turn events still running after 60000ms; the turn ends without them and their late notes are dropped`를 남기고, 그 뒤에는 살아 있는 노드 에이전트만 프로세스를 붙잡습니다. 그래서 메인 턴이 끝나고 60초가 지난 뒤에 노드가 끝나면 플러그인이 그 노드를 검증하거나 다음 노드를 띄우는 도중에 세션이 종료되어, 실행은 `running`, 노드는 `scheduled`나 `running`인 채 종료 코드 0으로 끝나곤 했습니다(백로그 B6). 이제 메인 턴이 붙잡힌 동안 노드 에이전트가 끝나면 플러그인이 검증보다 먼저 짧은 진행 프롬프트를 제출합니다. 노드가 끝났고 검증과 후속 실행은 백그라운드에서 이어진다고 알리며, 도구를 부르지 말고 한 줄로 답한 뒤 턴을 끝내라고 요청하는 내용입니다. 호스트가 이 프롬프트로 새 메인 턴을 시작하면 세션이 유지되고, 그 턴이 끝나면 플러그인은 실행이 정착할 때까지 다시 붙잡습니다. 비용은 노드가 끝날 때마다 메인 모델 턴이 짧게 한 번 더 도는 것입니다(그 프롬프트의 턴이 시작되기 전에 겹쳐 끝난 노드는 프롬프트 하나로 묶습니다). 이 턴의 한 줄 답변은 `claude -p`의 stdout에 그대로 나타납니다. 제출이 거부되거나 버려지면 `could not keep the session open for <run_id>/<node>`를 로그에 남깁니다. `claude -p "/dag run <파일>"`처럼 명령만 넘긴 세션에는 붙잡을 메인 턴이 아예 없어서, 첫 노드가 끝나는 순간 세션이 닫히고 후속 노드가 `no session is bound in this process`로 시작하지 못하곤 했습니다(2026-10-19 실측 14회 중 5회). 이제 비대화형 세션에서 메인 턴이 없을 때 `/dag run`·`retry`·`approve`가 실행을 시작하면, 플러그인이 "실행이 시작됐으니 한 줄로 답하고 턴을 끝내라"는 짧은 프롬프트를 제출해 메인 턴을 엽니다. 호스트가 명령 훅 안에서의 제출을 거부하므로 명령이 끝난 다음 틱에 제출하고, 그 턴이 끝나면 위와 같이 실행이 정착할 때까지 붙잡습니다. `turn.start`는 `agentId`가 있는 노드 에이전트의 턴에도 발생하므로, `agentId`가 없는 메인 루프의 `turn.start`만 메인 턴을 바쁨으로 표시합니다(2026-10-19 리허설에서 필요했던 수정입니다). 대화형 세션은 영향을 받지 않습니다.
 
 **비대화형 세션의 도구 허용**: 비대화형 세션(`claude -p` 등)에서 DAG 노드 작업자의 도구 호출은 메인 대화와 같은 권한 설정을 따릅니다. 판정이 `ask`인 호출은 물어볼 상대가 없으므로 Claude Code가 거부합니다. 플러그인의 Jev 도구 승인이 `jev_confidence`(기본 `0.9`) 이상의 확신도로 허용을 고른 호출만 예외입니다. 2026-10-09에 `--allowedTools`에 Write가 빠진 `claude -p`로 실측했더니 Jev는 허용을 골랐지만 확신도가 0.88로 기준 0.9에 못 미쳐 노드의 Write가 거부됐습니다. 그래서 `claude -p`로 DAG를 돌릴 때는 노드가 쓰는 도구를 미리 허용하길 권합니다. 권장 명령은 `claude -p "<요청>" --allowedTools mcp__dag-workflow__dag Skill Read Write Edit Bash`입니다. `eval/run.ts`는 여기에 `TaskStop`, `ToolSearch`, `LSP`도 허용합니다. `--permission-mode acceptEdits`는 Write와 Edit만 덮고 Bash는 덮지 않으므로, Bash는 이 모드에서도 `--allowedTools`로 허용해야 합니다. 비대화형 세션에서 노드 작업자의 도구 호출이 `ask`로 남으면 플러그인은 판정을 그대로 두고(거부는 호스트가 합니다) 트랜스크립트에 한 줄을 `$.ui.log`로 남깁니다. `-p`나 SDK 호스트는 이 줄을 `ui_log`로 받고 디버그 로그에도 남으며, 같은 실행·노드·시도·도구에는 한 번만 남깁니다. 줄의 형식은 `<runId>/<nodeId>: <tool> needs approval that this non-interactive session cannot ask for (<why>); allow it up front with --allowedTools <tool> or a --permission-mode that covers it`입니다. `<why>`는 Jev가 왜 이 호출을 정하지 못했는지입니다. Jev가 답했지만 적용되지 않았으면 `Jev <outcome>: <choice> at <confidence>, jev_confidence <threshold>`(예: `Jev low-confidence: allow at 0.88, jev_confidence 0.9`), 답이 없었으면 `Jev <outcome>`(예: `Jev timeout`), 묻지 않았으면 `Jev not asked: jev_permission_scope is dag and the call carries no node task`입니다([Jev 를 활용한 자동 판단](#jev-를-활용한-자동-판단)의 승인 범위). 실행이 끝났을 때 플러그인이 올리는 완료 요약 메시지(메인 모델이 읽고 사용자에게 전하는 프롬프트)에도 같은 정보가 실립니다. 현재 시도에서 도구 호출이 `ask`로 남은 노드의 줄 끝에 `; needed approval this non-interactive session cannot give: <tools> (allow them up front with --allowedTools)`가 붙고, `<tools>`는 그 도구를 처음 나온 순서대로 `, `로 이은 목록입니다. 재시도한 시도는 이 목록을 처음부터 다시 만듭니다. 그래서 로그 줄이 보이지 않는 환경에서도 메인 모델이 해결 방법을 사용자에게 전할 수 있습니다. 노드 작업자의 도구 승인 판단 기록(`/dag decisions`, 도구 액션 `decisions`)에는 `runId`와 `nodeId`가 들어가고, 이 비대화형 경우에는 `<runId>/<nodeId>: ` 접두사를 뺀 같은 문장이 `note`로 붙습니다. 다만 `Jev not asked`인 경우(`jev_permission_scope`가 `dag`인데 호출에 노드 작업이 없을 때)는 Jev를 묻지 않으므로 판단 기록을 쓰지 않고, 그래서 `note`도 없습니다. 이 경우에는 로그 줄과 완료 요약의 힌트만 남습니다. 대화형 세션과 메인 대화의 호출에는 이 줄도, 요약 힌트도, `note`도 없습니다.
 
@@ -381,6 +381,8 @@ verify:
 
 `review-spec`은 테스트와 검사·권한 정책이 약해져서 통과한 것은 아닌지도 고정한 HEAD와 비교합니다. 테스트 삭제, skip/todo/only 추가, 단언·모의 객체 약화, 테스트 검색 범위 축소, 린트·타입·보안·검증·권한 설정 완화를 `## Real check`에 파일·줄, 잃은 동작이나 통제, 요청에 근거한 변경 이유와 대체 검증 근거로 기록합니다. 바뀐 요구사항의 테스트 수정, 동등한 커버리지 이동, 문구만 고정하던 단언 제거는 자동 실패가 아닙니다. 동작 보존 근거가 없거나 요청과 무관하게 정책을 우회하면 `## Findings`의 (c)에 적어 기존 `Spec verdict: FAIL` 판정과 수정 라운드를 적용합니다. 코드 작성 노드도 같은 변경 이유와 근거를 `## Output`에 남깁니다.
 
+`review.request`는 파싱할 때 경고 두 가지를 더 냅니다. 첫째, 요청의 절이 결과물을 이름 붙이면서 관찰 가능한 기준(반환값·출력, 오류와 경계 사례를 뜻하는 상태 코드나 `returns`·`when`·`prints` 같은 동사, 따옴표로 묶은 리터럴)이 없을 때입니다. 백틱으로 감싼 이름만으로는 기준이 되지 않습니다. `review-spec`이 그런 부분을 자기 해석으로 판정해 같은 실행도 판정이 갈리므로, 결과물마다 기대 동작을 적습니다. 키트의 "Add a user search endpoint"가 이 경고에 걸리는 예이고, 무엇을 돌려주는지와 오류·빈 결과를 함께 적으면 사라집니다. 둘째, `review.security`가 있고 요청이나 목표가 엔드포인트·라우트·API·URL·웹·서버·페이지·폼 같은 네트워크 표면을 말하는데, 둘 다 누가 무엇을 쓸 수 있는지는 말하지 않을 때입니다. 보안 수정이 접근 검사를 넣으면 `review-spec`이 그것을 요청하지 않은 변경이나 요청한 결과(요청한 404 대신 403)와의 충돌로 보고할 수 있으므로, 작업마다 누가 수행할 수 있는지 적습니다.
+
 #### 의미 없는 코드 차단 (anti-slop)
 
 추가 검토 후보 두 가지는 자동 위반 판정이 아닙니다. `test-expectation-change`는 이름이 유일한 TS·JS 테스트의 동일 `expect` 표현식·matcher에서 기대 리터럴만 바뀐 경우를 안내합니다. 숫자·불리언·null·undefined·이스케이프 없는 문자열을 비교하며, 동등한 리터럴 표기나 모호한 대응 관계는 제외합니다. `requirement-substitution`은 최신 사용자 요청에 실제 API 연동이 명시되어 있는데, production의 동일한 최상위 named 함수가 직접 반환하던 `fetch`를 고정 응답으로 바꾼 경우를 안내합니다. 한국어·영어의 명시 요청을 지원하고, 테스트·mock·fixture 경로, 부정된 요청, 일반 테스트 mock은 제외합니다. 임의 SDK·별칭·복잡한 제어 흐름은 추정하지 않습니다. 두 후보 모두 기존 skip·저장소 예외를 따르며, 정당한 요구사항 변경이나 동등한 검증 근거가 있으면 변경을 유지할 수 있습니다. 경고만으로 rollback이나 FAIL 판정을 하지 않습니다.
@@ -453,6 +455,28 @@ review:
 - `amend`: 선언된 정의에는 실행 중 추가된 검증 노드가 없으므로, `amend`하면 검증 노드를 만든 관점 노드가 다시 실행되어 검증 노드를 새로 만듭니다. 검증 노드가 실행 중이면 `amend`는 거부됩니다.
 - 고르는 방법: 계획 스킬은 요청이 시큐어코딩, 보안 검토, KISA, OWASP를 언급하거나 프로젝트 규칙 파일이 가이드를 지정할 때만 `security`를 넣고, 기본으로는 넣지 않습니다. 실행마다 고르려면 요청에 "KISA 기준으로 보안 검토까지"처럼 적거나 정의 파일에 `security`를 씁니다. 프로젝트 전체에 적용하려면 그 프로젝트의 `CLAUDE.md`나 `AGENTS.md`에 "코드 변경 실행은 `review.security: [kisa]`로 검토한다" 같은 한 줄을 둡니다.
 - 구현 노드: 코드를 쓰는 노드도 `load_skills: ["dag-workflow:secure-coding"]`과 프롬프트의 가이드 id로 같은 기준을 따르게 할 수 있습니다. 가이드 id가 없으면 그 노드는 `missing-input`으로 실패합니다.
+
+#### Semgrep 규칙 스캔
+
+`skills/secure-coding/rules/`의 Semgrep 규칙은 KISA 49개 항목 중 프로그램으로 찾을 수 있는 것을 검사합니다. 관점 노드와 검증 노드가 판단을 맡는다면, 이 규칙은 같은 입력에 늘 같은 결과를 내는 결정적 검사입니다. 기존 진단 절차(진단도구 → 진단원 → 조치 확인)에서 진단도구 자리에 해당하고, 진단원 자리는 관점 노드와 검증 노드가 맡습니다.
+
+| 언어 | 규칙 파일 | 규칙 | KISA 항목 |
+| --- | --- | --- | --- |
+| Python (Flask) | `kisa-python.yaml` | 16 | 1-1, 1-2, 1-3, 1-5, 1-7, 1-12, 2-4, 2-6, 2-7, 2-8, 2-11, 2-14, 4-1, 4-2, 5-5, 6-2 |
+| JavaScript·TypeScript (Express) | `kisa-javascript.yaml` | 17 | 1-1, 1-2, 1-3, 1-4, 1-5, 1-7, 1-12, 2-4, 2-6, 2-8, 2-10, 2-11, 2-12, 2-14, 4-1, 4-2, 6-2 |
+| Java (Spring MVC·Servlet·JDBC) | `kisa-java.yaml` | 22 | 1-1, 1-3, 1-4, 1-5, 1-7, 1-8, 1-11, 1-12, 1-17, 2-3, 2-4, 2-6, 2-7, 2-8, 2-10, 2-11, 2-12, 2-14, 4-1, 4-2, 5-5 |
+
+세 언어를 합쳐 23개 항목에 규칙이 있습니다. 나머지 26개(인증·인가 누락, 반복 인증 시도 제한, 경쟁 조건, 자원 해제 등)는 "있어야 하는데 없는 통제"라서 규칙으로 판정할 수 없고 관점 노드가 봅니다. 규칙마다 `metadata.kisa`에 항목 번호를, `metadata.tier`에 `block`(편집 거부) 또는 `warn`(알림)을 적습니다. 항목 이름과 관점은 `references/kisa.md`에서 읽습니다.
+
+규칙은 두 곳에서 실행됩니다.
+
+1. 편집 시점: Edit이나 Write가 코드 파일(`.py`, `.js`, `.ts`, `.java` 등)에 닿으면 플러그인이 새 내용을 임시 폴더의 같은 상대 경로에 복사해 검사합니다. 그 호출이 추가하는 줄에 `block` 규칙(현재는 하드코드된 중요정보 2-6)이 걸리면 파일에 쓰기 전에 호출을 거부합니다. 거부 사유에는 걸린 줄의 내용을 다시 적지 않습니다. 비밀값이 거부 사유를 통해 대화 기록에 남지 않게 하기 위해서입니다. 나머지 히트는 호출이 끝난 뒤 anti-slop 스캔처럼 모델이 읽는 컨텍스트로 붙습니다. 메인 대화와 DAG 노드 모두에 적용됩니다.
+2. 보안 검토: `review.security`가 `kisa`나 `owasp`를 고른 실행에서 관점 노드가 끝나면, 플러그인이 실행의 변경(추적 파일은 `git diff HEAD`의 추가 줄, 새 파일은 전체)을 한 번 검사합니다. 그 관점에 속하는 히트를 관점 노드의 후보 옆에 더하고, 후보마다 검증 노드가 붙습니다. 같은 규칙의 여러 히트는 후보 하나로 합치고, 관점 노드가 이미 보고한 줄은 다시 더하지 않습니다. 더한 후보는 관점 노트의 `## Semgrep candidates`에 기록되어 `review-security`가 검증 노드 수와 맞춰 봅니다. 히트는 위반 판정이 아니라 후보입니다. 도구 오탐(예: `long` 타입 경로 변수, ETag용 MD5)은 검증 노드가 반박합니다.
+
+- 설치: semgrep이 PATH에 있어야 합니다(`brew install semgrep` 또는 `pipx install semgrep`). 세션마다 첫 검사 때 `semgrep --version`을 한 번 확인하고, 없으면 두 곳 모두 아무것도 하지 않습니다. `secure_scan: false`로 끕니다.
+- 우회 방지: `--disable-nosem`으로 실행하므로 `nosemgrep` 주석으로 규칙을 끌 수 없습니다. 예외는 검증 노드의 REFUTED 판정뿐입니다.
+- 한계: Semgrep CE의 taint 규칙은 한 함수 안의 흐름만 추적합니다. 함수나 파일을 넘는 흐름은 관점 노드 프롬프트가 맡도록 안내합니다. 편집 시점 검사는 호출마다 semgrep을 한 번 실행하므로 코드 파일 편집이 1초 안팎 늦어집니다.
+- 규칙 추가: 규칙 파일에 규칙을 더하고 `tests/semgrep/kisa-<언어>.*`에 `ruleid:`(잡아야 할 줄)와 `ok:`(잡으면 안 되는 줄) 예제를 더한 뒤 `semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep`로 확인합니다. 런타임 코드는 고치지 않습니다.
 - 모델 등급: 보안 노드는 모두 `review.category`(기본 `standard`)를 씁니다. 더 깊게 보려면 `category: hard`로 올립니다.
 - 가이드 추가: `hooks/engine/stages.ts`의 `SECURITY_GUIDES`에 id와 이름을 한 줄 넣고, `skills/secure-coding/references/<id>.md`에 항목, 판본, 행마다 관점 열(`SECURITY_LENSES`의 id 중 하나)을 쓰고, `skills/secure-coding/SKILL.md`의 가이드 표와 이 표에 한 줄씩 더합니다. 도구 스키마의 허용 값은 `SECURITY_GUIDES`에서 만들어집니다.
 
@@ -465,7 +489,9 @@ review:
 - `transient`(일시 오류): 같은 등급 모델로 다시 실행합니다.
 - `implementation`(구현 실수): Opus로 다시 실행합니다.
 - `missing-input`, `clarification`, `permanent`, 낮은 확신도, API 실패, 사용자 취소, 인계 중인 실행, 검증 계약이 없는 노드는 자동으로 재시도하지 않습니다.
-- 리뷰·감사 노드의 FAIL 판정(`Spec`/`Standards`/`Security verdict: FAIL`, `partial/supporting-output`)도 재시도하지 않습니다. 같은 결과물을 다시 리뷰해도 판정은 그대로이기 때문입니다(2026-10-12, 실제 run 4개에서 Opus 재시도 7번이 같은 FAIL을 되풀이하며 54분을 썼습니다). 대신 실행에서 실패한 노드가 이런 판정뿐이면, 실행당 한 번 **리뷰 수정 라운드**를 돕니다. 지적이 가리키는 producer(생산 노드가 하나면 그 노드, 여럿이면 지적에 나온 `파일:줄`이 `writes` 범위에 드는 노드)를 지적 내용을 프롬프트에 붙여 다시 실행하고, 그 뒤의 노드(리뷰·커밋)도 다시 실행합니다. 생성된 리뷰 노드의 지적은 노트의 `## Findings`·`## Rule breaches`·`## Breaches` 절에서 읽습니다. 리뷰가 통과하면 정착 메시지에 "자동 수정 라운드가 producer를 다시 실행했다"는 줄이 붙고, 다시 FAIL이면 "라운드를 이미 썼다"는 줄과 남은 지적을 담아 정착 메시지를 보내고, 지적이 어느 `writes`에도 닿지 않으면 예전처럼 바로 정착합니다. 라운드가 다시 실행할 노드 중 이미 끝난 노드가 프로젝트 밖을 바꾸는 노드면 라운드를 돌지 않습니다. `external: true`로 표시했거나, `writes`를 선언하지 않았거나, id·라벨·요약에 push·deploy·publish·upload·migrate·delete·commit·prod 같은 단어가 있는 노드가 여기에 해당합니다. 실제 run에서 외부 작업을 한 노드(`apply-env`, `setup-assets`, `delete-token-row`, `commit-push`)는 모두 `writes`가 없었습니다. 이때 FAIL은 바로 정착하고, 정착 메시지에 이유와 함께 "지적을 검토하고 외부 작업을 다시 하기 전에 사용자에게 수정 방향을 물으라"는 안내가 붙습니다. 지적이 어느 producer에도 닿지 않아 라운드를 돌지 않을 때도 이유가 붙습니다. `auto_recovery=false`면 이 라운드도 돌지 않습니다.
+- 리뷰·감사 노드의 FAIL 판정(`Spec`/`Standards`/`Security verdict: FAIL`, `partial/supporting-output`)도 재시도하지 않습니다. 같은 결과물을 다시 리뷰해도 판정은 그대로이기 때문입니다(2026-10-12, 실제 run 4개에서 Opus 재시도 7번이 같은 FAIL을 되풀이하며 54분을 썼습니다). 대신 실행에서 실패한 노드가 이런 판정뿐이면, 실행당 한 번 **리뷰 수정 라운드**를 돕니다. 지적이 가리키는 producer(생산 노드가 하나면 그 노드, 여럿이면 지적에 나온 `파일:줄`이 `writes` 범위에 드는 노드)를 지적 내용을 프롬프트에 붙여 다시 실행하고, 그 뒤의 노드(리뷰·커밋)도 다시 실행합니다. 생성된 리뷰 노드의 지적은 노트의 `## Findings`·`## Rule breaches`·`## Breaches` 절에서 읽습니다. 지적은 모두 합쳐 4,000자 안에서 producer 프롬프트에 붙이는데, 리뷰어마다 고르게 나눕니다. 짧은 지적은 그대로 싣고, 쓰고 남은 몫은 긴 지적을 낸 리뷰어들이 나눠 씁니다. 예전에는 리뷰어 순서대로 예산을 썼기 때문에, 2026-10-19 리허설에서 세 리뷰어가 모두 FAIL하자 `review-spec`과 `review-standards`가 예산을 다 쓰고 `review-security`의 지적은 빈 블록으로 전달되어 라운드가 보안 위반을 고치지 못했습니다. 리뷰가 통과하면 정착 메시지에 "자동 수정 라운드가 producer를 다시 실행했다"는 줄이 붙고, 다시 FAIL이면 "라운드를 이미 썼다"는 줄과 남은 지적을 담아 정착 메시지를 보내고, 지적이 어느 `writes`에도 닿지 않으면 예전처럼 바로 정착합니다. 라운드가 다시 실행할 노드 중 이미 끝난 노드가 프로젝트 밖을 바꾸는 노드면 라운드를 돌지 않습니다. `external: true`로 표시했거나, `writes`를 선언하지 않았거나, id·라벨·요약에 push·deploy·publish·upload·migrate·delete·commit·prod 같은 단어가 있는 노드가 여기에 해당합니다. 실제 run에서 외부 작업을 한 노드(`apply-env`, `setup-assets`, `delete-token-row`, `commit-push`)는 모두 `writes`가 없었습니다. `review`가 만든 검토 노드(`review-spec`, `review-standards`, 보안 관점 노드, 검증 노드, `review-security`)는 노트만 쓰므로 `writes`가 없어도 이 검사에서 빼고 다시 실행합니다. 2026-10-19 리허설에서 보안 관점 노드의 빈 `writes` 때문에 `review.security`를 쓴 실행이 라운드를 받지 못한 것을 고쳤습니다. 이때 FAIL은 바로 정착하고, 정착 메시지에 이유와 함께 "지적을 검토하고 외부 작업을 다시 하기 전에 사용자에게 수정 방향을 물으라"는 안내가 붙습니다. 지적이 어느 producer에도 닿지 않아 라운드를 돌지 않을 때도 이유가 붙습니다. `auto_recovery=false`면 이 라운드도 돌지 않습니다.
+
+  **지적 장부(finding ledger).** 라운드는 이제 실패한 리뷰어마다 생산 노드에 보낸 지적 원문을 체크포인트의 라운드 기록에 남기고, 고치기 전의 생산 노드 `writes` 파일(디스크에 있는 것만, 최대 200개)을 `.claude/dag/runs/<run_id>/review-fix-<n>/before/`에 복사합니다. 복사에 실패해도 라운드는 그대로 돌고, 다시 도는 리뷰어는 변경을 기록하지 못했다는 안내를 읽습니다. 다시 실행되는 `review-spec`과 `review-standards`는 프롬프트 끝에 리뷰어별 지적 블록과 수정이 만든 diff(12,000자까지, 넘으면 전체 길이를 밝히고 자름)를 받고, 규칙 네 가지를 따릅니다. (1) 자기 지적은 `## Ledger`에 RESOLVED(수정이 없앰), OPEN(아직 있음), WITHDRAWN(애초에 요청이나 규칙 위반이 아니었다고 다시 판단함) 중 하나로 `file:line` 근거와 함께 적고, WITHDRAWN이면 그 지적이 틀렸다는 근거도 적습니다. (2) 어떤 지적이든 그것을 풀려고 한 변경은 요청받은 작업으로 보며, 요청 문장과 충돌하면 `## Deferred`에 적습니다. (3) 새 지적은 수정이 바꾼 줄에 있을 때만 FAIL 사유가 되고, 나머지는 `## Deferred`에 적습니다. (4) 자기 지적이 OPEN이거나 그런 새 지적이 있을 때만 FAIL하며, OPEN 지적은 아무리 사소해도 FAIL 사유입니다. WITHDRAWN은 아래 측정에서 OPEN으로 표시하고도 통과한 사례 때문에 더했습니다. 생산 노드의 마무리 지시도 바뀝니다. `writes`에 든 파일을 가리키는 지적은 원래 작업이 요구하지 않은 것을 요구하더라도 자기 일이고, 리뷰어는 작업이 아니라 요청에 비춰 결과를 판단하므로 범위 안에서 풀되 원래 작업이 요구한 것은 모두 유지하고 지적이 짚지 않은 것은 바꾸지 말며, 범위 안에서 풀 수 없는 지적은 `failed`로 끝내며 그 지적을 밝히라는 내용입니다. 보안 관점 노드, 검증 노드, `review-security`의 프롬프트는 그대로입니다. 배경은 `examples/secure-coding`을 헤드리스로 다섯 번 실행한 측정입니다(2026-10-19~20, 1막 없이 실행해 검색 엔드포인트가 없는 상태). 수정 라운드 뒤에 `review-spec`이 다시 FAIL한 것이 5번 중 5번이었고, 보안 수정이 넣은 접근 검사를 어떤 시도는 요청하지 않은 변경이라 보고하고 어떤 시도는 받아들였으며, 메인 대화는 매번 amend를 한두 번 하거나 새 run을 시작해야 했습니다. 이 효과는 2026-10-20에 `review_ledger`를 끈 실행과 켠 실행을 짝지어 쟀습니다. `examples/secure-coding`의 3막(`/dag run demo/review.yaml`, sonnet)을 1막 상태(SQL 인젝션이 있는 검색 엔드포인트가 커밋되지 않은 채 남은 상태)에서, 끈 실행과 켠 실행을 동시에 시작한 쌍으로 세 쌍 돌렸고 실행마다 키를 따로 두어 리뷰 노트 폴더가 겹치지 않게 했습니다. 끈 쪽은 첫 settle이 3번 중 3번 실패했고(`review-spec`이 라운드 뒤에 매번 다시 FAIL하며, 보안 수정이 넣은 소유자·관리자 403을 어떤 요청 문장도 다루지 않는 동작이라고 보고했습니다), 메인 대화가 두 번은 amend 한 번으로 커밋까지 갔고 한 번은 실패로 끝나 커밋을 건너뛰었습니다. 비용은 평균 4.05 USD, 벽시계는 평균 276초, 노드 attempt는 35/51/50이었습니다. 켠 쪽은 첫 settle이 3번 중 3번 자동 라운드만으로 완료되었고 메인 대화의 조치가 없었으며, `review-spec`은 3번 모두 FAIL에서 PASS로 바뀌었고 다시 돈 리뷰어는 403을 "ledger fix, requested work"라고 불렀습니다. 비용은 평균 2.86 USD, 벽시계는 평균 191초, attempt는 34/33/36이었습니다. 커밋된 변경 다섯 건(켠 3, 끈 2)은 모두 검색 파라미터를 `LIKE ?`로 바인딩하고 삭제 전에 소유자 또는 관리자를 확인합니다. 켠 실행의 리뷰 노트에서는 두 가지가 보였습니다. 두 실행에서 `review-spec`이 앞서 적은 MD5 ETag 노트를 OPEN으로 표시하고도 통과했고(규칙 4는 OPEN 지적이 있으면 FAIL이라 하며, 보안 검증 노드가 모두 MD5 후보를 반박했으니 통과 자체는 옳았지만 규칙이 느슨하게 적용되었습니다), 세 실행 모두에서 다시 돈 `review-spec`이 403-먼저-404 충돌을 규칙 2대로 `## Deferred`에 적어 사람의 결정으로 넘겼습니다. WITHDRAWN 규칙을 넣고 `review_ledger`를 켠 실행을 1막 상태에서 여섯 번 다시 돌렸더니 모두 메인 대화 조치 없이 자동 라운드만으로 완료되었고(평균 2.90 USD, 202.5초), OPEN 지적이 있는데 통과한 실행은 없었으며, `review-spec`이 403-먼저-404 충돌을 여섯 번 모두 `## Deferred`에 적었습니다. 자세한 표는 `examples/secure-coding/README.md`에 있습니다. 한계: 세 쌍은 유의성을 말하기에 적고, 쌍이 동시에 돌았으며, 비용에 settle 뒤 메인 대화의 턴이 들어 있어 끈 쪽의 추가 비용 일부는 amend 턴입니다. 자세한 표는 `examples/secure-coding/README.md`에 있습니다. `review_ledger: false`면 리뷰어와 생산 노드의 프롬프트·노트는 장부 이전과 같고 복사도 하지 않습니다.
 - 검사 자체의 결함(`check-defect`)도 재시도하지 않고 Jev에 묻지도 않습니다. 검사 프로그램이 PATH에 없어 시작되지 못했거나, 검사의 셸이 종료 코드 127로 "command not found"를 냈거나(`./dist/cli`처럼 경로로 부른 프로그램은 제외), 워커가 `DAG_NODE_STATUS: failed: check-defect - <이유>`로 보고한 경우입니다. 다시 실행해도 같은 검사가 또 실패하기 때문입니다. 오류는 `check-defect:`로 시작하고, 메인 대화가 검사를 `amend`로 고칩니다.
 - 노드마다 자동 추가 시도는 최대 2번입니다. 원래 프롬프트·범위·목표를 그대로 두고 실패 이유와 "선언한 검증을 다시 실행하라"는 지시만 덧붙이며, 사용한 횟수는 체크포인트에 남아 다시 늘어나지 않습니다.
 - 실패 때문에 건너뛴 하위 노드도 함께 대기 상태로 돌아갑니다. 모든 복구 판단은 [판단 기록](#판단-기록)에 남습니다.
@@ -489,6 +515,38 @@ review:
 ## 판단 기록
 
 라우팅·도구 승인·복구·실행 방식·표시 방식 판단을 세션마다 마지막 200개까지 `.claude/dag/decisions/<session>.json`에 남깁니다. 기본값 `auto`에서는 Jev에 물은 사용자 프롬프트마다 실행 방식 기록(대화형 세션의 패널 화면에서는 표시 방식 기록도)이 남으므로, DAG를 쓰지 않는 프로젝트에서도 첫 프롬프트에 `.claude/dag/.gitignore`와 이 파일이 생깁니다. 기록에는 제안값, 선택값, 판단 주체(`jev`/`baseline`/`rule`), 확신도, 선택지별 확률, 규칙 버전, 기준 확신도, 지연 시간, 결과(`applied`, `low-confidence`, `timeout` 등), 입력 상태의 해시가 들어갑니다. 결과는 Jev의 답이 어떻게 처리됐는지, 판단 주체는 최종 값을 누가 정했는지를 뜻합니다. 그래서 최종 감사 규칙이 Jev의 `trivial`을 덮어쓰면 결과는 `applied`, 판단 주체는 `rule`로 남습니다. API 키와 도구 입력 전체는 저장하지 않습니다. `/dag decisions [id]`, 도구 액션 `decisions`, 패널의 Decisions 탭으로 봅니다. 노드 작업자의 도구 승인 기록에는 `runId`와 `nodeId`도 들어가고, 비대화형 세션에서 호출이 `ask`로 남았으면 그 원인을 적은 `note`도 붙습니다([결과 전달](#결과-전달)의 **비대화형 세션의 도구 허용** 문단).
+
+## 실행 기록 (trajectory)
+
+같은 정의를 여러 번 실행하면 리뷰어의 판정, 리뷰 수정 라운드 여부, 커밋 여부가 실행마다 다를 수 있습니다. 체크포인트는 노드마다 마지막 시도만 남기고, 보고서 `runs/<run_id>/<node>.md`는 다음 시도가 덮어쓰며, 리뷰어 노트는 리뷰어가 다시 시작하기 전에 지웁니다. 그래서 체크포인트만으로는 두 실행이 어디서 갈렸는지 알 수 없습니다. `trajectory_log: true`로 켜면 그 과정을 이벤트로 남깁니다. 기본값은 꺼짐입니다.
+
+- **위치:** 실행의 이벤트는 `.claude/dag/trajectories/<run_id>/`에, 메인 대화의 턴은 `.claude/dag/trajectories/session-<session_id>/`에 이벤트 하나당 파일 하나(JSON 한 줄)로 씁니다. 파일 이름은 `<시각 ms>-<순번>-<종류>[-<노드>].jsonl`이라 이름순이 발생 순서입니다. 실행이 끝날(settle) 때마다 그 실행의 이벤트를 이름순으로 이어 붙인 `.claude/dag/trajectories/<run_id>.jsonl`을 다시 씁니다. 세션 폴더는 이어 붙이지 않으니 `cat .claude/dag/trajectories/session-<id>/*.jsonl`로 읽습니다.
+- **쓰기:** 기록은 별도 쓰기 큐로 보내고 실행은 기다리지 않습니다. 쓰기에 실패하면 디버그 로그에 남기고 실행은 계속합니다. 노드 종료 기록은 완료를 반영하기 전에 노트와 diff를 먼저 읽습니다. 반영 뒤에 시작되는 다음 시도가 노트를 지우기 때문입니다.
+- **가림과 자르기:** 모든 문자열에서 Jev 요청을 보낼 때와 같은 비밀값 패턴(개인 키, Bearer 토큰, AWS·GitHub·Slack 토큰, `sk-` API 키, `password=` 같은 할당)을 `[REDACTED:<종류>]`로 바꿉니다. 프롬프트·답·노트·diff는 64,000자, 도구 입력의 문자열과 도구 결과는 4,000자에서 자르고 원래 길이를 적습니다. 이벤트 한 줄이 1,000,000자를 넘으면 더 짧게 자르고, 그래도 넘으면 이벤트 이름과 길이만 남깁니다. 패턴에 없는 형태의 비밀값은 가리지 못하니 기록을 공유하기 전에 확인하세요.
+- **보관:** `retention_days`로 지우지 않습니다. 필요 없어진 기록은 직접 지웁니다. `.claude/dag/.gitignore`가 `*`이므로 커밋되지 않습니다.
+
+| 종류 | 언제 | 주요 필드 |
+| --- | --- | --- |
+| `run.start` | 실행 생성 | `by`(`model`/`user`), `key`, `name`, `goal`, 검토·커밋 단계까지 펼친 `definition` |
+| `run.retry`, `run.amend` | retry·amend 반영 | `nodeIds`·`prompt` 또는 `rerun`·새 `definition` |
+| `node.start` | 노드 에이전트 시작 | `attempt`, `agentId`, `model`, `subagentType`, `category`, `recovery`, 에이전트가 받은 `prompt` 원문(상위 노드 결과, 리뷰 수정 지적, 복구 맥락 포함). 시작 실패면 `error` |
+| `node.end` | 노드 에이전트 종료 | `state`, `error`, `answer`(보고서 원문), `verification`(검사별 결과), `expansion`(보안 관점이 만든 검증 노드 id), `notes`(검사가 읽는 프로젝트 밖 노트 파일의 그 시점 내용: 리뷰어·보안 관점·후보 검증 노트), `diff`(`writes`를 선언한 노드의 HEAD 대비 변경과 새 파일 내용), `usage`(토큰 수와 모델) |
+| `node.transcript` | `node.end` 직후 | 에이전트 대화의 행: 말한 텍스트, 도구 호출마다 `tool`·`input`·모델이 읽은 `result`·`isError` |
+| `rework` | 리뷰 수정 라운드 | `round`, `reviewers`, `producers`, 생산 노드에 붙인 지적 `note` 원문. 라운드를 건너뛰면 `skip`과 이유 |
+| `run.settle` | 실행 종료 | `status`, `cancelReason`, `reviewFix`, 노드별 `state`·`attempt`·`model`·`category`·시작/종료 시각·`error`·`recovery`·검증 상태 |
+| `main.turn` | 메인 대화 턴 종료 | `turnId`, `reason`, `durationMs`, `usage`, 직전 기록 이후의 메인 대화 행 |
+
+모든 이벤트에는 `at`(ms)과 `sessionId`가 있고, 실행 이벤트에는 `runId`, 노드 이벤트에는 `nodeId`가 있습니다. 예를 들어 실행 여러 개에서 후보 검증 노드의 판정을 모으려면 다음처럼 읽습니다.
+
+```bash
+jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))) | {runId, nodeId, attempt, state, verdict: ([.notes[].text | scan("Candidate verdict: [A-Z]+")] | last)}' .claude/dag/trajectories/dag_*.jsonl
+```
+
+한계는 다음과 같습니다.
+
+- 노드 에이전트의 대화는 호스트가 서브에이전트용으로 저장한 행이라 도구의 저장 기록(`result` 원본)이 없고, 모델이 읽은 텍스트만 있습니다.
+- 메인 대화는 호스트가 돌려주는 최근 4,096행 안에서 직전 기록의 마지막 행 뒤를 남깁니다. 압축(compaction)으로 그 행이 사라지면 그때 남은 행을 모두 다시 기록합니다. 재개한 세션은 재개 전 행을 다시 쓰지 않습니다.
+- 노드를 `send`로 조정한 메시지는 별도 이벤트가 아니라 메인 대화 턴의 도구 호출 입력으로 남습니다.
 
 ## 세션과 인계
 
@@ -745,6 +803,9 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `start_approval`               | `off`     | `always`면 대화형 세션에서 모델이 시작한 실행을 만들되 시작하지 않고 사용자의 승인을 기다림([실행 규칙](#실행-규칙)). 사용자가 입력한 `/dag run`과 비대화형 세션은 기다리지 않음. `/dag approval`로 덮어쓴 값은 다음 `/reload-plugins`까지만 유지되고, `off`·`always`가 아닌 값은 `off`로 처리 |
 | `anti_slop_scan`               | `true`    | Edit·Write가 추가한 줄을 anti-slop 패턴으로 검사해 걸린 것을 모델에게 알림([의미 없는 코드 차단](#의미-없는-코드-차단-anti-slop)). 모델 호출 없음 |
 | `anti_slop_skip`               | `[]`      | 스캔이 보고하지 않을 패턴 id 목록. 예: 이유 없는 캐스트를 허용하는 저장소의 `unreasoned-assertion` |
+| `secure_scan`                  | `true`    | semgrep이 설치되어 있으면 Edit·Write가 추가하는 줄에 KISA 규칙을 실행(`block` 규칙은 쓰기 전에 거부)하고, 보안 검토 실행의 변경에서 나온 히트를 검증 노드가 붙는 후보로 더함([Semgrep 규칙 스캔](#semgrep-규칙-스캔)) |
+| `trajectory_log`               | `false`   | 실행마다 노드 시도의 프롬프트·답·검증·검토 노트·diff·토큰·도구 호출 기록과 메인 대화의 턴을 `.claude/dag/trajectories/`에 남김([실행 기록](#실행-기록-trajectory)). `retention_days`로 지우지 않음 |
+| `review_ledger`                | `true`    | 리뷰 수정 라운드가 실패한 리뷰어의 지적과 고치기 전 파일 복사를 남기고, 다시 도는 `review-spec`·`review-standards`에 지적과 수정 diff를 전달([자동 복구](#자동-복구)). `false`면 장부 이전 프롬프트 |
 
 
 ### 보관 기간

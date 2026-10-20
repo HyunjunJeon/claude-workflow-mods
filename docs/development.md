@@ -10,7 +10,10 @@
 command claude plugin validate .
 command claude plugin test .
 bunx -p typescript@5 tsc -p . --noEmit
+semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep
 ```
+
+마지막 줄은 Semgrep 시큐어코딩 규칙의 테스트이며 semgrep이 설치되어 있어야 합니다. `tests/semgrep/`의 각 픽스처에서 `ruleid:` 주석이 달린 줄은 규칙이 잡아야 하고 `ok:` 주석이 달린 줄은 잡으면 안 됩니다. 결과가 한 건도 없는 규칙을 semgrep 1.181은 "ruleid annotation with no YAML rule"로 보고하므로, 그 메시지는 규칙 이름 오타보다 패턴이 아무것도 잡지 못한 경우를 먼저 의심합니다. 플러그인 테스트(`tests/secure-scan.test.ts`)는 semgrep 대신 스텁을 씁니다.
 
 이 저장소는 anti-slop 패턴 네 가지를 일부러 씁니다. 스캐너는 로컬 `AGENTS.md`의 `anti-slop allow:` 줄로 이들을 건너뛰고, 검토 노드는 이 문단을 저장소 규칙으로 읽습니다.
 

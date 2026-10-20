@@ -158,9 +158,14 @@ export type Run = {
   // the checkpoint keep it: the model may not retry, amend or restart the run; only the user's own /dag retry runs it again.
   rejected?: { at: number; reason: string }
   // The automatic review-fix rounds this run used (rework.ts): each reran the producers a FAIL verdict pointed at.
+  // findings holds what a round sent them, when the caller recorded it, so the review ledger (ledger.ts) can show the rerun
+  // reviewers the same text.
   // skipped holds why the last failed settle got no round, for the settle message.
-  reviewFix?: { rounds: number; history: { at: number; reviewers: string[]; producers: string[] }[]; skipped?: { at: number; reason: string } }
+  reviewFix?: { rounds: number; history: { at: number; reviewers: string[]; producers: string[]; findings?: ReviewFinding[] }[]; skipped?: { at: number; reason: string } }
 }
+
+// One reviewer's findings as a review-fix round sent them to the producers, after the cut to its share of the budget.
+export type ReviewFinding = { reviewer: string; text: string }
 
 export type EngineError = { code: string; message: string }
 

@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
@@ -15,6 +15,7 @@ import { CHECK_DEFECT, exitProblem, isCheckDefect, missingProgram, textProblem }
 import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
+import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
 import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
 import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
 import {
@@ -42,7 +43,9 @@ import {
   expandNodes,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
-import { allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandidates, owaspCweRows, parseSemgrepReport, SEMGREP_RULES_DIR, semgrepArgv, semgrepCandidates, semgrepNote, semgrepRefusal, semgrepTarget, semgrepVersion, type GuideRows, type SemgrepHit } from './engine/semgrep.ts'
+import { addUsage, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
@@ -534,8 +537,24 @@ async function observeLearnedSkill($: EngineInterface, tool: string, input: Read
 }
 let antiSlopScan = true
 let antiSlopSkip: ReadonlySet<string> = new Set()
+let secureScan = true
+// The semgrep version a session found on its first scan, '' when there is none; undefined until it asks.
+let semgrepFound: string | undefined
+let guideRowsRead: Promise<GuideRows> | undefined
+// The Semgrep hits of a run's change, keyed by the run and the change, so the lenses of one review share one scan.
+const changeScans = new Map<string, Promise<Result<SemgrepHit[]>>>()
 // The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
 let repositoryAllows: ReadonlySet<string> | undefined
+// The trajectory log (trajectory.ts): its own write queue, so no run step waits on it, a counter that orders events of the same
+// millisecond, where the main conversation's log stopped, and each node agent's token counts until its node ends.
+let trajectoryLog = false
+let trajectoryWrites: Promise<unknown> = Promise.resolve()
+let trajectorySeq = 0
+let mainRows: RowMark | undefined
+const agentUsage = new Map<string, Usage>()
+// The review ledger (ledger.ts): the review-fix round keeps the findings it sends and the producers' files before the fix, and
+// the rerun review-spec and review-standards get both.
+let reviewLedger = true
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
 let contextOnDisk = false
@@ -1051,6 +1070,81 @@ async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
   }
 }
 
+// Semgrep is optional. The first scan of a session asks for its version once; without one every scan stays off.
+async function semgrepReady($: EngineInterface): Promise<boolean> {
+  if (!secureScan) return false
+  if (semgrepFound === undefined) {
+    try {
+      const probe = await $.process.run(['semgrep', '--version'], { timeoutMs: 30_000 })
+      semgrepFound = (probe.exitCode === 0 && semgrepVersion(probe.stdout)) || ''
+    } catch {
+      semgrepFound = ''
+    }
+    debug($, semgrepFound ? `semgrep ${semgrepFound} runs the secure-coding rules` : 'semgrep is not installed; the secure-coding scan is off')
+  }
+  return semgrepFound !== ''
+}
+
+async function runSemgrep($: EngineInterface, cwd: string, targets: readonly string[]): Promise<Result<SemgrepHit[]>> {
+  try {
+    const done = await $.process.run(semgrepArgv(`${$.plugin.root}/${SEMGREP_RULES_DIR}`, targets), { cwd, timeoutMs: 120_000 })
+    return parseSemgrepReport(done.stdout)
+  } catch (error) {
+    return fail('semgrep_error', `semgrep could not run (${message(error)}).`)
+  }
+}
+
+// The names and lenses a hit cites, from the guide references the plugin ships.
+function guideRows($: EngineInterface): Promise<GuideRows> {
+  const reference = (id: string) => readOrEmpty($, `${$.plugin.root}/skills/secure-coding/references/${id}.md`)
+  guideRowsRead ??= Promise.all([reference('kisa'), reference('owasp')]).then(([kisa, owasp]) => ({ kisa: kisaRows(kisa), owasp: owaspCweRows(owasp) }))
+  return guideRowsRead
+}
+
+// The hits an Edit or Write would add, scanned before it lands. The new text goes to a copy at the same project-relative path
+// in a scratch folder, so the rules' path filters (tests/, *Test.java) match as they would in the project.
+async function scanEdit($: EngineInterface, path: string, before: string, after: string): Promise<SemgrepHit[]> {
+  if (!projectRoot || !path.startsWith(`${projectRoot}/`) || path.startsWith(`${projectRoot}/.claude/`) || !(await semgrepReady($))) return []
+  const rel = path.slice(projectRoot.length + 1)
+  const made = await $.process.run(['mktemp', '-d'], { timeoutMs: 10_000 })
+  const scratch = made.stdout.trim()
+  if (made.exitCode !== 0 || !scratch.startsWith('/')) return []
+  try {
+    await $.fs.write(`${scratch}/${rel}`, after)
+    const report = await runSemgrep($, scratch, [rel])
+    if (!report.ok) {
+      $.ui.log(`secure-coding scan skipped ${rel}: ${report.error.message}`)
+      return []
+    }
+    const added = addedLines(before, after)
+    return report.value.filter(hit => hit.path === rel && added.has(hit.line))
+  } finally {
+    await $.process.run(['rm', '-rf', scratch]).catch(() => undefined)
+  }
+}
+
+// The Semgrep hits on the lines a run's change added, read as the review nodes read the change: tracked files against
+// HEAD and untracked files whole. The lenses of one review share one scan; undefined when semgrep is not there.
+async function changeHits($: EngineInterface, run: Run): Promise<Result<SemgrepHit[]> | undefined> {
+  if (!(await semgrepReady($))) return undefined
+  const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '-U0', '--no-color', '--relative', 'HEAD'], { cwd: projectRoot })
+  const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], { cwd: projectRoot })
+  if (diff.exitCode !== 0 || untracked.exitCode !== 0) return fail('semgrep_change', `git could not list the change (${(diff.stderr || untracked.stderr).trim()}).`)
+  const added = addedLinesByFile(diff.stdout)
+  const fresh = new Set(untracked.stdout.split('\0').filter(Boolean))
+  const targets = [...new Set([...added.keys(), ...fresh])].filter(path => semgrepTarget(path) && !path.startsWith('.claude/'))
+  if (targets.length === 0) return { ok: true, value: [] }
+  const key = `${run.runId}\0${hash(`${diff.stdout}\0${untracked.stdout}`)}`
+  let scan = changeScans.get(key)
+  if (!scan) {
+    scan = runSemgrep($, projectRoot, targets).then((report): Result<SemgrepHit[]> => report.ok
+      ? { ok: true, value: report.value.filter(hit => fresh.has(hit.path) || added.get(hit.path)?.has(hit.line) === true) }
+      : report)
+    changeScans.set(key, scan)
+  }
+  return scan
+}
+
 async function slopSkips($: EngineInterface): Promise<ReadonlySet<string>> {
   repositoryAllows ??= new Set((await Promise.all(RULE_FILES.map(name => readOrEmpty($, `${projectRoot}/${name}`)))).flatMap(allowedPatterns))
   return new Set([...antiSlopSkip, ...repositoryAllows])
@@ -1310,22 +1404,29 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
     if (!dep || dep.state !== 'completed') return []
     return [{ id: dep.id, label: dep.label, output: dep.output ?? '', ...(dep.reportPath ? { reportPath: dep.reportPath } : {}) }]
   })
+  // The ledger joins the task text, so the reporting contract stays the prompt's end.
+  const ledger = await ledgerSection($, run, def)
+  const prompt = buildNodePrompt(run, def, ledger === undefined ? node : { ...node, promptOverride: `${node.promptOverride ?? def.prompt}\n\n${ledger}` }, upstream)
+  const model = node.recovery?.model ?? target.model
   let spawned: { agentId?: string; model?: string; deny?: string }
   try {
     spawned = await $.agent.spawn({
-      prompt: buildNodePrompt(run, def, node, upstream),
+      prompt,
       description: `${run.name}: ${def.task_summary ?? def.label ?? def.id}`.slice(0, 80),
       subagentType: target.subagentType,
-      model: node.recovery?.model ?? target.model,
+      model,
     })
   } catch (error) {
     spawned = { deny: message(error) }
   }
   const now = await $.clock.now()
+  const started = { kind: 'node.start', runId: run.runId, nodeId: id, attempt: node.attempt + 1, subagentType: target.subagentType, category: node.routing?.category ?? def.category, recovery: node.recovery, prompt } as const
   if (spawned.agentId) {
     agentRuns.set(spawned.agentId, run.runId)
+    await record($, { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
     return markRunning(run, id, spawned.agentId, now, spawned.model)
   }
+  await record($, { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
 }
 
@@ -1372,6 +1473,8 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
       settleToasts.add(runId)
+      await record($, { kind: 'run.settle', runId, ...settleRecord(run) })
+      exportTrajectory($, runId)
       const failed = run.nodes.filter(node => node.state === 'failed')
       const toasted = failureToasts.get(runId)
       if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
@@ -1450,6 +1553,26 @@ function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
   const node = run && nodeForAgent(run, end.agentId)
   if (!run || !node) return
   return { run, node, report }
+}
+
+// `claude -p "/dag run <file>"` runs the command with no main turn, so nothing holds the session: in 5 of 14 real runs on
+// 2026-10-19 it closed as the first node ended and the successor failed with "no session is bound in this process". One
+// short prompt opens a main turn; the end of that turn is held while the run is active, and keepSessionUp takes over.
+// The host refuses a submit from inside the command.run hook, so it goes out on the next tick, while the first node's
+// agent keeps the session up.
+function openHeldTurn($: EngineInterface): void {
+  if (interactive || mainTurnBusy || keepAliveQueued) return
+  const run = [...runs.values()].find(current => current.sessionId === sessionId && current.status === 'running')
+  if (!run) return
+  keepAliveQueued = true
+  $.clock.after(0, () => {
+    submitRunNews($, run, runStartedMessage(run)).then(result => {
+      if ('drop' in result) throw new Error(result.drop)
+    }).catch(error => {
+      keepAliveQueued = false
+      $.ui.log(`could not keep the session open for ${run.runId}: ${message(error)}`)
+    })
+  })
 }
 
 // B6: past the host's 60 s wait for the held turn, a -p session ends 58-440 ms after its last live agent stops unless
@@ -1537,7 +1660,9 @@ async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Ti
   if (stopFailure) $.ui.log(`could not stop agent ${agentId} after its background wait: ${stopFailure}`)
   const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, wait.answer) : undefined
   const error = `The node agent ended its turn with background work pending and was not resumed within ${BACKGROUND_WAIT_MS / 60_000} minutes.`
-  await applyCompletion($, claim, { outcome: { state: 'failed', error, ...(wait.answer ? { answer: wait.answer } : {}), ...(reportPath ? { reportPath } : {}) } })
+  const result: CompletionResult = { outcome: { state: 'failed', error, ...(wait.answer ? { answer: wait.answer } : {}), ...(reportPath ? { reportPath } : {}) } }
+  await recordNodeEnd($, claim, result, { agentId, isAborted: false, ...(wait.answer ? { answer: wait.answer } : {}) })
+  await applyCompletion($, claim, result)
 }
 
 async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
@@ -1575,6 +1700,7 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   } catch (error) {
     result = { outcome: { state: 'failed', error: `Completion processing failed: ${message(error)}` } }
   }
+  await recordNodeEnd($, claim, result, end)
   await serialized(() => applyCompletion($, claim, result))
 }
 
@@ -1594,6 +1720,19 @@ async function lensExpansion($: EngineInterface, run: Run, lensId: string): Prom
   }
   const candidates = parseCandidates(text, review.security)
   if (!candidates.ok) return fail('invalid_candidates', `${notes}: ${candidates.error.message}`)
+  let all = candidates.value
+  // The Semgrep rules cite kisa and owasp rows. Their hits in this lens join the lens's candidates, and the lens notes record
+  // them, or the scan's failure, so review-security counts a verifier for each.
+  const scan = review.security.some(guide => guide === 'kisa' || guide === 'owasp') ? await changeHits($, run) : undefined
+  if (scan) {
+    const merged = scan.ok ? mergeCandidates(all, semgrepCandidates(scan.value, lens, review.security, await guideRows($))) : undefined
+    all = merged?.all ?? all
+    try {
+      await $.fs.write(notes, lensNotesWithSemgrep(text, merged?.added ?? [], scan.ok ? undefined : scan.error.message))
+    } catch (error) {
+      return fail('invalid_expansion', `could not record the Semgrep candidates in ${notes} (${message(error)}).`)
+    }
+  }
   const folder = lensVerifyFolder(review, lens)
   try {
     const made = await $.process.run(['mkdir', '-p', folder])
@@ -1601,7 +1740,7 @@ async function lensExpansion($: EngineInterface, run: Run, lensId: string): Prom
   } catch (error) {
     return fail('invalid_expansion', `could not create ${folder}: ${message(error)}`)
   }
-  return verifierNodes(run.definition, lensId, candidates.value)
+  return verifierNodes(run.definition, lensId, all)
 }
 
 async function applyCompletion($: EngineInterface, claim: CompletionClaim, result: CompletionResult): Promise<void> {
@@ -1664,20 +1803,125 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
   for (const node of run.nodes) {
     if (node.state === 'failed' && verdictFailure(run, node.id)) findings.set(node.id, await reviewerFindings($, run, node.id))
   }
-  const plan = reworkPlan(run, findings, projectRoot)
+  const plan = reworkPlan(run, findings, projectRoot, reviewLedger)
   if (!plan) return undefined
   const now = await $.clock.now()
   if ('skip' in plan) {
     $.ui.log(`No automatic review fix for ${run.runId}: ${plan.skip}`)
+    await record($, { kind: 'rework', runId: run.runId, skip: plan.skip })
     return { run: withReworkSkip(run, plan.skip, now), reworked: false }
   }
-  const reworked = reworkRun(run, plan.producers, plan.note, plan.reviewers, now)
+  const reworked = reworkRun(run, plan.producers, plan.note, plan.reviewers, now, reviewLedger ? plan.findings : undefined)
   if (!reworked.ok) {
     debug($, `review fix for ${run.runId} not applied: ${reworked.error.message}`)
     return undefined
   }
+  const round = reworked.value.reviewFix?.rounds
+  await record($, { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
   $.ui.log(`Automatic review fix ${run.runId}: ${plan.reviewers.join(', ')} failed on a FAIL verdict; rerunning ${plan.producers.join(', ')} with the findings, then the reviewers`)
+  // Before returning: tick starts the producers right after, and the copy must hold their files as the reviewers judged them.
+  if (reviewLedger && round !== undefined) await recordBeforeFix($, reworked.value, round, plan.producers)
   return { run: reworked.value, reworked: true }
+}
+
+// The review ledger's copy of the producers' files before a fix holds at most this many, and its diff takes at most this many
+// files the fix added. A scope such as '.' lists the whole repository, and every file costs a copy when the round starts and a
+// git diff when each ledger reviewer starts.
+const LEDGER_FILES = 200
+
+type BeforeFix = { scopes: string[]; files: string[] }
+
+// One round's ledger folder, project-relative: git diff --no-index runs in the project root and names the before-state copies
+// by this path, and fixDiffText strips it from their headers.
+function ledgerFolder(runId: string, round: number): string {
+  return `${RUNS_SUBDIR}/${runId}/review-fix-${round}`
+}
+
+// The files in the given write scopes, tracked or new but not ignored, as project-relative paths.
+async function ledgerFiles($: EngineInterface, scopes: readonly string[]): Promise<string[]> {
+  const files = new Set<string>()
+  for (const scope of scopes) {
+    const listed = await $.process.run(['git', '-c', 'core.quotePath=false', 'ls-files', '-z', '-c', '-o', '--exclude-standard', '--', `:(literal)${scope}`], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+    if (listed.exitCode !== 0) throw new Error(`git ls-files ${scope} exited ${listed.exitCode}: ${listed.stderr.trim()}`)
+    for (const path of listed.stdout.split('\0')) if (path !== '') files.add(path)
+  }
+  return [...files]
+}
+
+// A copy of every file in the producers' declared writes under review-fix-<round>/before/, then before.json naming the scopes
+// and the files copied. before.json is written last, so its presence means a complete copy; without it the rerun reviewers
+// read that the change could not be recorded. A file the host cannot read (a binary, or one over its read limit) is skipped
+// alone and left out of before.json, so fixDiff shows it as added since the copy: the whole file counts as changed. A failure
+// of the git listing itself drops the whole copy. A failure never stops the round.
+async function recordBeforeFix($: EngineInterface, run: Run, round: number, producers: readonly string[]): Promise<void> {
+  const folder = `${projectRoot}/${ledgerFolder(run.runId, round)}`
+  const scopes = [...new Set(producers.flatMap(id => run.definition.nodes.find(def => def.id === id)?.writes ?? []))]
+  try {
+    const files: string[] = []
+    for (const path of (await ledgerFiles($, scopes)).slice(0, LEDGER_FILES)) {
+      // ls-files -c still lists a tracked file the producer deleted without git rm. It has no text to keep, and if the fix
+      // brings it back, fixDiff shows it as added.
+      if (!(await $.fs.exists(`${projectRoot}/${path}`))) continue
+      try {
+        await $.fs.write(`${folder}/before/${path}`, await $.fs.read(`${projectRoot}/${path}`))
+        files.push(path)
+      } catch (error) {
+        debug($, `review ledger: left ${path} out of the copy before review fix ${round} of ${run.runId}: ${message(error)}`)
+      }
+    }
+    const before: BeforeFix = { scopes, files }
+    await $.fs.write(`${folder}/before.json`, JSON.stringify(before))
+  } catch (error) {
+    debug($, `review ledger: could not copy the files of ${producers.join(', ')} before review fix ${round} of ${run.runId}: ${message(error)}`)
+  }
+}
+
+function isBeforeFix(value: unknown): value is BeforeFix {
+  const strings = (list: unknown) => Array.isArray(list) && list.every(item => typeof item === 'string')
+  return typeof value === 'object' && value !== null && 'scopes' in value && 'files' in value && strings(value.scopes) && strings(value.files)
+}
+
+// The fix's diff: each copied file against the same path now, and each file the scopes gained since, as git prints them, with
+// the copy's folder stripped from the headers. undefined when the copy was not recorded or before.json cannot be read.
+async function fixDiff($: EngineInterface, runId: string, round: number): Promise<string | undefined> {
+  const folder = ledgerFolder(runId, round)
+  let before: BeforeFix
+  let current: string[]
+  try {
+    const parsed: unknown = JSON.parse(await $.fs.read(`${projectRoot}/${folder}/before.json`))
+    if (!isBeforeFix(parsed)) throw new Error('before.json does not list scopes and files')
+    before = parsed
+    current = await ledgerFiles($, before.scopes)
+  } catch (error) {
+    debug($, `review ledger: no fix diff for ${runId} round ${round}: ${message(error)}`)
+    return undefined
+  }
+  const copied = new Set(before.files)
+  const added = current.filter(path => !copied.has(path)).slice(0, LEDGER_FILES)
+  const parts: string[] = []
+  for (const path of [...before.files, ...added]) {
+    try {
+      // The disk decides the after side: git still lists a tracked file the fix deleted without git rm, and git diff --no-index
+      // on a missing path prints only an error.
+      const sides = [copied.has(path) ? `${folder}/before/${path}` : '/dev/null', (await $.fs.exists(`${projectRoot}/${path}`)) ? path : '/dev/null']
+      // git diff --no-index exits 0 when the two sides are equal and 1 when it printed a difference.
+      const diff = await $.process.run(['git', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+      if (diff.exitCode === 1) parts.push(diff.stdout)
+      else if (diff.exitCode !== 0) debug($, `review ledger: git diff of ${path} exited ${diff.exitCode}: ${diff.stderr.trim()}`)
+    } catch (error) {
+      debug($, `review ledger: could not diff ${path}: ${message(error)}`)
+    }
+  }
+  return fixDiffText(parts, `${folder}/before`)
+}
+
+// The ledger section a rerun review-spec or review-standards gets after a round that kept its findings; undefined for every
+// other start. Lenses, verifiers and review-security keep their prompts.
+async function ledgerSection($: EngineInterface, run: Run, def: NodeDef): Promise<string | undefined> {
+  const fix = run.reviewFix
+  const last = fix?.history.at(-1)
+  if (!reviewLedger || !isLedgerReviewer(def.id) || !fix || !last?.findings) return undefined
+  return ledgerBlock({ reviewerId: def.id, producers: last.producers, findings: last.findings, fixDiff: await fixDiff($, run.runId, fix.rounds) })
 }
 
 async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Promise<Run> {
@@ -1898,6 +2142,102 @@ async function recoverReport($: EngineInterface, agentId: string): Promise<strin
   return finalReport(rows as TranscriptRow[])
 }
 
+// A run's events go to a folder named for it; the main conversation's go to one named for the session.
+function trajectoryDir(runId?: string): string {
+  return `${projectRoot}/${TRAJECTORY_SUBDIR}/${runId ?? `session-${sessionId}`}`
+}
+
+// Queues one trajectory event. Nothing in a run waits on the write: one that fails is logged and the run goes on.
+async function record($: EngineInterface, input: TrajectoryInput): Promise<void> {
+  if (!trajectoryLog || !projectRoot) return
+  const event = { at: await $.clock.now(), sessionId, ...input }
+  const dir = trajectoryDir('runId' in input ? input.runId : undefined)
+  const path = `${dir}/${eventFileName(event.at, ++trajectorySeq, input.kind, 'nodeId' in input ? input.nodeId : undefined)}`
+  trajectoryWrites = trajectoryWrites.then(async () => {
+    await ensureDir($, dir)
+    await $.fs.write(path, trajectoryLine(event))
+  }).catch(error => debug($, `could not record the trajectory event ${input.kind}: ${message(error)}`))
+}
+
+// A settled run's events joined into one <run_id>.jsonl beside its folder, once the writes queued before it are done.
+function exportTrajectory($: EngineInterface, runId: string): void {
+  if (!trajectoryLog || !projectRoot) return
+  const dir = trajectoryDir(runId)
+  trajectoryWrites = trajectoryWrites.then(async () => {
+    const names = (await $.fs.list(dir)).filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl')).map(entry => entry.name).sort()
+    const lines: string[] = []
+    for (const name of names) lines.push(await $.fs.read(`${dir}/${name}`))
+    await $.fs.write(`${dir}.jsonl`, lines.join(''))
+  }).catch(error => debug($, `could not join the trajectory of ${runId}: ${message(error)}`))
+}
+
+const TRAJECTORY_NEW_FILES = 20
+
+// What a node's end leaves that a later attempt erases: the notes files its checks read outside the project, which
+// clearStaleNotes removes before a reviewer's next start, and, for a node that declares writes, their change against HEAD with
+// new files in full, which the next attempt overwrites.
+async function endSnapshot($: EngineInterface, run: Run, nodeId: string): Promise<{ notes: NotesFile[]; diff?: string }> {
+  const def = run.definition.nodes.find(current => current.id === nodeId)
+  const notes: NotesFile[] = []
+  const paths = new Set((def?.verify ?? []).flatMap(check => check.kind === 'file' && readOnlyAbsolutePath(check.path) ? [check.path] : []))
+  for (const path of paths) {
+    try {
+      if ((await $.fs.stat(path)).kind === 'file') notes.push({ path, text: await $.fs.read(path) })
+    } catch (error) {
+      debug($, `trajectory: could not read ${path}: ${message(error)}`)
+    }
+  }
+  const writes = (def?.writes ?? []).map(path => `:(literal)${path}`)
+  if (writes.length === 0) return { notes }
+  try {
+    const changed = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-color', 'HEAD', '--', ...writes], { cwd: projectRoot })
+    const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--', ...writes], { cwd: projectRoot })
+    if (changed.exitCode !== 0 || untracked.exitCode !== 0) return { notes }
+    const fresh = untracked.stdout.split('\0').filter(Boolean).slice(0, TRAJECTORY_NEW_FILES)
+    const added = await Promise.all(fresh.map(async path => `new file ${path}\n${await readOrEmpty($, `${projectRoot}/${path}`)}`))
+    return { notes, diff: [changed.stdout, ...added].filter(text => text !== '').join('\n') }
+  } catch (error) {
+    debug($, `trajectory: could not read the change of ${nodeId}: ${message(error)}`)
+    return { notes }
+  }
+}
+
+// The end of one node attempt: its outcome and checks, what it left (endSnapshot), its token counts, and its transcript.
+// Awaited before the completion is applied, because applying it can start the attempt that erases the notes.
+async function recordNodeEnd($: EngineInterface, claim: CompletionClaim, result: CompletionResult, end: AgentEnd): Promise<void> {
+  if (!trajectoryLog) return
+  const { run, node } = claim
+  const usage = agentUsage.get(end.agentId)
+  agentUsage.delete(end.agentId)
+  try {
+    const { notes, diff } = await endSnapshot($, run, node.id)
+    const { state, error, answer } = result.outcome
+    await record($, {
+      kind: 'node.end', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, reason: end.reason, isAborted: end.isAborted,
+      state, error, answer, verification: result.verification, expansion: result.expansion?.map(def => def.id), notes, diff, usage,
+    })
+    const rows = await $.session.messages({ agentId: end.agentId })
+    await record($, Array.isArray(rows)
+      ? { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: transcriptRows(rows) }
+      : { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: [], error: rows.deny })
+  } catch (error) {
+    debug($, `could not record the end of ${run.runId}/${node.id} in its trajectory: ${message(error)}`)
+  }
+}
+
+// The main conversation's rows since the last turn it logged.
+async function recordMainTurn($: EngineInterface, turn: { turnId: string; reason: string; durationMs: number; usage?: Usage }): Promise<void> {
+  try {
+    const rows = await $.session.messages()
+    if (!Array.isArray(rows)) return
+    const fresh = rowsAfter(rows, mainRows)
+    mainRows = fresh.mark
+    await record($, { kind: 'main.turn', turnId: turn.turnId, reason: turn.reason, durationMs: turn.durationMs, usage: turn.usage, rows: transcriptRows(fresh.rows) })
+  } catch (error) {
+    debug($, `could not record the main turn in the trajectory: ${message(error)}`)
+  }
+}
+
 // Both start and a dry run say so when the person or the model has not loaded the planning skill (guide mode lets the start through).
 function planningWarning(): string[] {
   return planningLoaded || enforcement === 'off' ? [] : [`the ${PLANNING_SKILL} skill is not loaded in this session - load it and follow its node prompt contract.`]
@@ -1974,6 +2314,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
+  await record($, { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
   // Only the model's own start answers the turn's request; a /dag run the person typed is not part of that answer. The
   // enforcement check matters because only auto decides the surface, so a level changed mid-turn leaves an old 'board'.
   if (by === 'model' && enforcement === 'auto' && turnSurface === 'board') boardAnswerRuns.add(runId)
@@ -2174,6 +2515,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (by === 'user') delete retried.value.rejected
     const routed = await routeRun($, retried.value, retried.value.nodes.filter(node => node.state === 'pending' || node.state === 'scheduled').map(node => node.id))
     runs.set(run.runId, routed)
+    await record($, { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
     return ok(snapshotOf((await tick($, run.runId)) ?? routed, 0))
   }
   if (input.action === 'amend') {
@@ -2185,6 +2527,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
     runs.set(run.runId, routed)
+    await record($, { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
     return ok({
       rerun: amended.value.rerun,
       snapshot: snapshotOf((await tick($, run.runId)) ?? routed, 0),
@@ -3231,6 +3574,9 @@ export function register(on: On, options: PluginOptions) {
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
   antiSlopScan = options.anti_slop_scan !== false
   if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
+  secureScan = options.secure_scan !== false
+  trajectoryLog = options.trajectory_log === true
+  reviewLedger = options.review_ledger !== false
   jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
   learningEnabled = options.session_learning !== false
   for (const [key, set] of [
@@ -3261,6 +3607,9 @@ export function register(on: On, options: PluginOptions) {
     sessionClosed = false
     keepAliveQueued = false
     repositoryAllows = undefined
+    semgrepFound = undefined
+    guideRowsRead = undefined
+    changeScans.clear()
     // A new process: the conversation it serves (a resume) has not been told this process's state yet.
     forgetDelivered()
     await restorePlanningLoaded($)
@@ -3295,6 +3644,17 @@ export function register(on: On, options: PluginOptions) {
       $.ui.log(`could not restore workflow context: ${message(error)}`)
     }
     await restorePlanningFromContext($)
+    agentUsage.clear()
+    mainRows = undefined
+    if (trajectoryLog) {
+      // A resumed conversation's earlier rows were logged by the process that saw them.
+      try {
+        const rows = await $.session.messages()
+        if (Array.isArray(rows)) mainRows = rowsAfter(rows, undefined).mark
+      } catch (error) {
+        debug($, `could not mark where the main conversation's trajectory starts: ${message(error)}`)
+      }
+    }
     try {
       await initializeLearning($)
     } catch (error) {
@@ -3766,6 +4126,8 @@ export function register(on: On, options: PluginOptions) {
     if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
     if (e.agentId) clearWaiting($, e.agentId)
+    if (trajectoryLog && e.agentId && agentRuns.has(e.agentId) && e.usage) agentUsage.set(e.agentId, addUsage(agentUsage.get(e.agentId), e.usage) ?? e.usage)
+    if (trajectoryLog && !e.agentId) await recordMainTurn($, e)
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
       try {
@@ -3826,7 +4188,12 @@ export function register(on: On, options: PluginOptions) {
     const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || (verb === 'approval' && setting !== undefined)
     if (userOnly && e.origin.kind !== 'composer') return { text: USER_ONLY }
     const fromComposer = e.origin.kind === 'composer'
-    if (!mainTurnBusy || (verb !== 'run' && verb !== 'retry' && verb !== 'approve')) return serialized(() => runCommand($, e.args ?? '', fromComposer))
+    const starts = verb === 'run' || verb === 'retry' || verb === 'approve'
+    if (!mainTurnBusy || !starts) {
+      const out = await serialized(() => runCommand($, e.args ?? '', fromComposer))
+      if (starts) openHeldTurn($)
+      return out
+    }
     return serialized(async () => {
       const before = pendingStarts.length
       deferStarts = true
@@ -3840,10 +4207,13 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('turn.start', async ($, e, next) => {
-    mainTurnBusy = true
-    // The turn a keep-alive prompt asked for has begun (turn.start fires for main turns only); the next completion
-    // while that turn's end is held may queue another.
-    keepAliveQueued = false
+    // turn.start also fires for subagent turns, which carry agentId; only the main loop's turn is the main turn.
+    if (!e.agentId) {
+      mainTurnBusy = true
+      // The turn a keep-alive prompt asked for has begun; the next completion while that turn's end is held may
+      // queue another.
+      keepAliveQueued = false
+    }
     return next(e)
   })
 
@@ -3904,6 +4274,30 @@ export function register(on: On, options: PluginOptions) {
       debug($, `anti-slop scan skipped ${e.file_path}: ${message(error)}`)
       return reply
     }
+  })
+
+  // The secure-coding Semgrep rules (engine/semgrep.ts) on what an Edit or Write adds, in the main conversation or a node
+  // worker. Unlike the anti-slop scan this one runs before the tool: a block rule (a hard-coded secret) refuses the call
+  // before the value reaches the file, and the other hits come back as context once the call is answered. A scan that
+  // cannot run lets the call through.
+  on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
+    if ((e.tool !== 'Edit' && e.tool !== 'Write') || !secureScan || !semgrepTarget(e.file_path)) return next(e)
+    let hits: SemgrepHit[] = []
+    try {
+      const before = await readOrEmpty($, e.file_path)
+      const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
+      if (after !== undefined) hits = await scanEdit($, e.file_path, before, after)
+    } catch (error) {
+      debug($, `secure-coding scan skipped ${e.file_path}: ${message(error)}`)
+    }
+    if (hits.length === 0) return next(e)
+    const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
+    const { kisa } = await guideRows($)
+    const blocking = hits.filter(hit => hit.tier === 'block')
+    if (blocking.length > 0) return { deny: semgrepRefusal(shown, blocking, kisa) }
+    const reply = await next(e)
+    if (reply.deny !== undefined || reply.isError) return reply
+    return { ...reply, context: [...(reply.context ?? []), semgrepNote(shown, hits, kisa)] }
   })
 
   on('tool.call', { tool: /^SubagentHandback$/ }, async ($, e, next) => {

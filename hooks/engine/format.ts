@@ -109,6 +109,15 @@ export function nodeMessage(run: Run, nodeId: string, output = ''): string {
 
 // Submitted the moment a node agent stops in a non-interactive session, before its result is verified, so
 // it carries no result: its only job is to give the host queued work (a new main turn) while the plugin works.
+// The prompt a person's /dag run, retry or approve submits when it starts a run in a non-interactive session with no main
+// turn: the turn it opens is the one whose end the plugin holds while the run is active.
+export function runStartedMessage(run: Run): string {
+  return [
+    `DAG run "${run.name}" (${run.runId}) started; dag-workflow runs it in the background.`,
+    'Reply with one short line and end your turn without calling any tools. You will get one summary when the run settles.',
+  ].join('\n')
+}
+
 export function keepAliveMessage(run: Run, nodeId: string): string {
   return [
     `Node "${nodeId}" of DAG run "${run.name}" (${run.runId}) finished; dag-workflow is verifying it and continuing the run in the background.`,

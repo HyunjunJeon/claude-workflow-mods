@@ -2,7 +2,7 @@ import { definitionHash, nodeFingerprint } from './definition.ts'
 import { extractOutput } from './node-prompt.ts'
 import { VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
-import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type Run, type RunStatus } from './types.ts'
+import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type ReviewFinding, type Run, type RunStatus } from './types.ts'
 
 export const MAX_ANSWER_CHARS = 20_000
 
@@ -286,8 +286,9 @@ export function retryRun(input: Run, options: RetryOptions, now: number): Result
 
 // Reruns completed producers with a note appended to their prompt, and every node downstream of them, after a reviewer's
 // FAIL verdict (rework.ts plans it). Unlike retry it takes completed nodes; unlike amend it changes no definition, so the
-// fingerprints stay and a later amend still compares against the declared prompts. The round is recorded on the run.
-export function reworkRun(input: Run, producers: string[], note: string, reviewers: string[], now: number): Result<Run> {
+// fingerprints stay and a later amend still compares against the declared prompts. The round is recorded on the run, with the
+// findings it sent when the caller passes them (the review ledger shows them to the rerun reviewers).
+export function reworkRun(input: Run, producers: string[], note: string, reviewers: string[], now: number, findings?: ReviewFinding[]): Result<Run> {
   if (deriveStatus(input) === 'running') return fail('run_still_active', 'The run still has pending or running nodes.')
   if (producers.length === 0) return fail('nothing_to_retry', 'No producer to rework.')
   const run = clone(input)
@@ -310,7 +311,8 @@ export function reworkRun(input: Run, producers: string[], note: string, reviewe
     }
   }
   const rounds = (run.reviewFix?.rounds ?? 0) + 1
-  run.reviewFix = { rounds, history: [...(run.reviewFix?.history ?? []), { at: now, reviewers, producers }] }
+  const entry = { at: now, reviewers, producers }
+  run.reviewFix = { rounds, history: [...(run.reviewFix?.history ?? []), findings ? { ...entry, findings } : entry] }
   delete run.cancelReason
   run.settledNotified = false
   return { ok: true, value: advance(run, now) }

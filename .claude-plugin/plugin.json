@@ -128,6 +128,24 @@
       "description": "After Edit or Write, scan added lines and precise TS/JS test changes, including advisory expectation replacements and explicit real-API substitutions; show candidates to the model with no model call",
       "default": true
     },
+    "secure_scan": {
+      "type": "boolean",
+      "title": "Semgrep secure-coding scan",
+      "description": "When semgrep is on PATH, run the KISA rules in skills/secure-coding/rules on what each Edit or Write adds (a block rule such as a hard-coded secret refuses the call before it lands; other hits come back as context), and give every hit on a run's change its own verifier in review.security. Without semgrep nothing runs",
+      "default": true
+    },
+    "trajectory_log": {
+      "type": "boolean",
+      "title": "Trajectory log",
+      "description": "Record every run's trajectory under .claude/dag/trajectories/ for comparing runs: each node attempt's exact prompt, model, answer, verification, reviewer notes, change against HEAD, token counts and tool-call transcript, each review-fix round's findings, and the main conversation's turns. Secrets are masked and long text is cut. Each settled run is also joined into <run_id>.jsonl. Not pruned by retention_days",
+      "default": false
+    },
+    "review_ledger": {
+      "type": "boolean",
+      "title": "Review fix ledger",
+      "description": "In the automatic review-fix round, keep each failed reviewer's findings and a copy of the producers' files before the fix. When review-spec and review-standards run again they get those findings and the fix's diff, judge their own findings RESOLVED or OPEN, accept changes made to resolve any finding, and fail only on an open finding or a new one on a line the fix changed; other new findings go under ## Deferred. The producer is told that a finding on its files concerns it even beyond its original task. Off keeps the reviewers' original prompts",
+      "default": true
+    },
     "anti_slop_skip": {
       "type": "string",
       "title": "Anti-slop patterns to skip",

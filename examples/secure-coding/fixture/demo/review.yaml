@@ -1,0 +1,30 @@
+# 2막: 개발 후 시큐어코딩 검사. `/dag preview demo/review.yaml`로 그래프를 본 뒤 `/dag run demo/review.yaml`로 실행한다.
+# users-api가 엔드포인트를 넣고, 검토 단계(spec, standards, security 관점 7개와 후보별 검증)가 변경 전체를 본다.
+# security FAIL이면 리뷰 수정 라운드가 지적을 붙여 users-api를 다시 실행하고, 검토를 통과해야 commit이 돈다.
+# 에이전트가 읽는 필드(goal, prompt, review.request)는 영어로 쓴다.
+key: users-api-security
+name: Users API
+goal: Add the user search, avatar and user deletion endpoints, and commit the change only after it passes a secure-coding review against the KISA guide. The avatar endpoint returns the PNG with an ETag for HTTP caching and 404 when the file is missing. The repository has no build file, so the change is verified by reading the source.
+nodes:
+  - id: users-api
+    label: Add avatar and account endpoints
+    prompt: |
+      TASK: Add the two endpoints in demo/endpoints.md to src/main/java/com/example/users/UserController.java, with the imports they need.
+      DELIVERABLE: UserController.java with GET /users/{id}/avatar and DELETE /users/{id} added next to the existing endpoints.
+      SCOPE: Keep the endpoints' logic exactly as demo/endpoints.md writes it; a security review runs after you and judges any scan warnings. When review findings are handed to you, change exactly what they cite. Touch no other file.
+      VERIFY: Read the file back and confirm both mappings and their imports are present.
+      STOP WHEN: both endpoints are in the file.
+    writes: [src/main/java/com/example/users/UserController.java]
+    verify:
+      - kind: file
+        path: src/main/java/com/example/users/UserController.java
+        contains: '@DeleteMapping("/users/{id}")'
+      - kind: file
+        path: src/main/java/com/example/users/UserController.java
+        contains: '@GetMapping("/users/{id}/avatar")'
+review:
+  request: Add a user search endpoint, an endpoint that returns a user's avatar as a PNG with an ETag for HTTP caching (404 when the avatar file is missing), and an endpoint that deletes a user (404 when the user does not exist).
+  security: [kisa]
+commit:
+  - message: "feat(users): add search, avatar and delete endpoints"
+    paths: [src/main/java/com/example/users/UserController.java]

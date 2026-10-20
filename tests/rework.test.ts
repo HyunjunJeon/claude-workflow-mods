@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
-import { citedPaths, findingSections, producersOf, rerunRisk, reworkPlan, type ReworkPlan, type ReworkSkip } from '../hooks/engine/rework.ts'
+import { citedPaths, findingSections, producersOf, rerunRisk, REWORK_FINDINGS_CHARS, reworkNote, reworkPlan, type ReworkPlan, type ReworkSkip } from '../hooks/engine/rework.ts'
 import { createRun, markFinished, markRunning, reworkRun } from '../hooks/engine/run.ts'
 import type { Run } from '../hooks/engine/types.ts'
 
@@ -89,6 +89,21 @@ test('producersOf looks through generated review nodes to the user nodes, and a 
   expect(producersOf(run, 'review-spec')).toEqual(['build'])
 })
 
+// Seen in a rehearsal on 2026-10-19: a review.security run whose only failure was the security verdict got no round, because
+// the completed lens nodes declare no writes and rerunRisk took them for work outside the project.
+test('a security verdict FAIL reruns the producer, and the completed lens nodes downstream of it do not stop the round', () => {
+  const parsed = parseDefinition({ key: 'sec', nodes: [{ id: 'build', prompt: TASK, writes: ['src'], verify: CHECK }], review: { request: 'Build it', security: ['kisa'] } })
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  let run = createRun(parsed.value, { runId: 'r', sessionId: 's', now: 0 })
+  run = markFinished(markRunning(run, 'build', 'agent-build', 1), 'build', { state: 'completed', answer: 'done' }, 2)
+  for (const id of run.nodes.flatMap(node => node.state === 'scheduled' ? [node.id] : [])) {
+    run = markFinished(markRunning(run, id, `agent-${id}`, 3), id, { state: 'completed', answer: 'done' }, 4)
+  }
+  run = markFinished(markRunning(run, 'review-security', 'agent-security', 5), 'review-security', { state: 'failed', error: 'Security verdict: FAIL - 1 confirmed breaches' }, 6)
+  expect(run.nodes.find(node => node.id === 'security-access')?.state).toBe('completed')
+  expect(reworkPlan(run, new Map([['review-security', '## Breaches\nsrc/users.ts:9 deletes any user without an ownership check']]), '/work')).toMatchObject({ reviewers: ['review-security'], producers: ['build'] })
+})
+
 test('reworkRun reruns the producers with the note and everything downstream, and records the round', () => {
   const run = settled({ error: 'Spec verdict: FAIL - src/api/a.ts:1' })
   const result = reworkRun(run, ['api'], '[Review fix 1/1] fix it', ['verify-all'], 9)
@@ -104,4 +119,24 @@ test('reworkRun reruns the producers with the note and everything downstream, an
 test('citedPaths keeps project files and basenames, and drops paths outside the project', () => {
   expect(citedPaths('see /work/lib/x.ts:12, ./a.ts and guard.mjs:49; not /tmp/dag-review/k/review-spec-notes.md', '/work')).toEqual(['lib/x.ts', 'a.ts', 'guard.mjs'])
   expect(findingSections('## Request sentences\n"Edit src/a.ts"\n\n## Findings\n(a) b.ts:2\n\n## Real check\nok')).toBe('## Findings\n(a) b.ts:2')
+})
+
+// Seen in a rehearsal on 2026-10-19: all three reviewers failed, review-spec and review-standards used the whole budget, and
+// the producer got an empty review-security block, so the round left both security breaches in place.
+const findingBlocks = (note: string) => [...note.matchAll(/<findings reviewer="([^"]+)">\n([\s\S]*?)\n<\/findings>/g)].map(match => ({ reviewer: match[1], length: match[2]?.length ?? 0 }))
+
+test('every failed reviewer gets a share of the findings budget, so the last one is never cut to nothing', () => {
+  const long = (head: string) => `${head} ${'x'.repeat(3_000)}`
+  const note = reworkNote(1, new Map([['review-spec', long('spec finding')], ['review-standards', long('standards finding')], ['review-security', long('kisa 2-2 delete has no ownership check')]]))
+  expect(note).toContain('kisa 2-2 delete has no ownership check')
+  expect(findingBlocks(note).map(block => block.reviewer)).toEqual(['review-spec', 'review-standards', 'review-security'])
+  expect(findingBlocks(note).every(block => block.length >= 1_000)).toBe(true)
+  expect(findingBlocks(note).reduce((sum, block) => sum + block.length, 0)).toBeLessThanOrEqual(REWORK_FINDINGS_CHARS + 3 * '\n… (truncated)'.length)
+})
+
+test('a short finding stays whole and leaves the share it does not use to the other reviewers', () => {
+  const note = reworkNote(1, new Map([['review-spec', 'src/a.ts:1 the greeting is missing'], ['review-security', 'y'.repeat(5_000)]]))
+  expect(note).toContain('src/a.ts:1 the greeting is missing\n</findings>')
+  const security = findingBlocks(note).find(block => block.reviewer === 'review-security')
+  expect(security?.length).toBeGreaterThan(REWORK_FINDINGS_CHARS - 100)
 })

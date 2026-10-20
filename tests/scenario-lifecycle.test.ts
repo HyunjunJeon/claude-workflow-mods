@@ -660,7 +660,7 @@ const GIT: Plugin = {
 }
 
 const GREET_GOAL = 'A greet function exists in src/greet.ts and the README documents it'
-const GREET_REQUEST = 'Add a greet function and document it in the README'
+const GREET_REQUEST = 'Add a greet(name) function that returns the greeting and document it in the README'
 const FEAT_SUBJECT = 'feat: add greet'
 const DOCS_SUBJECT = 'docs: document greet'
 

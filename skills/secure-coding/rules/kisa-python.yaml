@@ -1,0 +1,273 @@
+# Semgrep rules for the KISA implementation-phase weaknesses (references/kisa.md) that a program can find in Python (Flask).
+# metadata.kisa is the item id in references/kisa.md, which also gives the item's name and lens.
+# metadata.tier: block refuses an Edit or Write before it lands; warn reports the hit after it lands.
+# Taint rules run on Semgrep CE, which follows data inside one function; flows across functions or files stay with the lens nodes.
+# The Flask request object is the taint source.
+rules:
+  # ---------------------------------------------------------------- 1. 입력데이터 검증 및 표현
+  - id: kisa-1-1-sql-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request input reaches the SQL text as is. Bind it as a parameter: cursor.execute(sql, params).
+    metadata: {kisa: "1-1", cwe: [CWE-89], tier: warn}
+    pattern-sources: &flask-request
+      - pattern-either:
+          - pattern: flask.request.$ATTR
+          - pattern: flask.request.$ATTR.get(...)
+          - pattern: flask.request.$ATTR[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $CUR.execute($QUERY, ...)
+              - pattern-inside: $CUR.executemany($QUERY, ...)
+              - pattern-inside: $CUR.executescript($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: kisa-1-2-code-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request input runs as code through eval/exec. Do not execute input; branch on an allow-list instead.
+    metadata: {kisa: "1-2", cwe: [CWE-94, CWE-95], tier: warn}
+    pattern-sources: *flask-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: eval($CODE, ...)
+              - pattern-inside: exec($CODE, ...)
+          - focus-metavariable: $CODE
+
+  - id: kisa-1-3-path-traversal
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request input builds a file path. Normalize it and check it stays inside the allowed base directory.
+    metadata: {kisa: "1-3", cwe: [CWE-22, CWE-99], tier: warn}
+    pattern-sources: *flask-request
+    pattern-sanitizers:
+      - pattern: werkzeug.utils.secure_filename(...)
+      - pattern: os.path.basename(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: open($PATH, ...)
+              - pattern-inside: flask.send_file($PATH, ...)
+              - pattern-inside: os.remove($PATH)
+          - focus-metavariable: $PATH
+
+  - id: kisa-1-5-os-command-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request input reaches a shell command string. Use shell=False with an argument list and check the value against an allow-list.
+    metadata: {kisa: "1-5", cwe: [CWE-78], tier: warn}
+    pattern-sources: *flask-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: os.system($CMD)
+              - pattern-inside: os.popen($CMD, ...)
+              - pattern-inside: subprocess.$FN($CMD, ..., shell=True, ...)
+          - focus-metavariable: $CMD
+
+  - id: kisa-1-7-open-redirect
+    mode: taint
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Request input picks the redirect target. Check it against allowed hosts or relative paths.
+    metadata: {kisa: "1-7", cwe: [CWE-601], tier: warn}
+    pattern-sources: *flask-request
+    pattern-sinks:
+      - patterns:
+          - pattern-inside: flask.redirect($URL, ...)
+          - focus-metavariable: $URL
+
+  - id: kisa-1-12-ssrf
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      The server fetches a URL taken from request input. Restrict it to an allow-list and block internal and metadata addresses.
+    metadata: {kisa: "1-12", cwe: [CWE-918], tier: warn}
+    pattern-sources: *flask-request
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: requests.$METHOD($URL, ...)
+              - pattern-inside: urllib.request.urlopen($URL, ...)
+          - focus-metavariable: $URL
+
+  # ---------------------------------------------------------------- 2. 보안기능
+  - id: kisa-2-4-weak-hash
+    languages: [python]
+    severity: WARNING
+    message: >-
+      MD5/SHA-1 cannot protect anything. Use SHA-256 or stronger, and bcrypt, scrypt or Argon2 for passwords. When the hash protects nothing, say so with usedforsecurity=False.
+    metadata: {kisa: "2-4", cwe: [CWE-327], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+          - patterns:
+              - pattern: hashlib.new("$ALG", ...)
+              - metavariable-regex:
+                  metavariable: $ALG
+                  regex: '(?i)^(md5|sha1)$'
+      # A call that declares it protects nothing (an ETag, a cache key) is no breach.
+      - pattern-not: hashlib.$FN(..., usedforsecurity=False)
+
+  - id: kisa-2-6-hardcoded-secret
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A password, key or token is written in the code. Read it from the environment or a secrets manager.
+    metadata: {kisa: "2-6", cwe: [CWE-259, CWE-321], tier: block}
+    # Only literals count: with constant propagation on, a line that merely uses the variable matches too.
+    options:
+      constant_propagation: false
+    paths:
+      exclude: ["tests/", "test_*.py", "*_test.py"]
+    patterns:
+      - pattern-either:
+          - pattern: $NAME = "$VALUE"
+          - pattern: $OBJ.$NAME = "$VALUE"
+          - pattern: $FN(..., $NAME="$VALUE", ...)
+          - pattern: |
+              {..., "$NAME": "$VALUE", ...}
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '(?i).*(passw(or)?d|passwd|secret|api_?key|access_?key|private_?key|token).*'
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: '^.{4,}$'
+
+  - id: kisa-2-7-short-rsa-key
+    languages: [python]
+    severity: ERROR
+    message: >-
+      The RSA key is shorter than 2048 bits. Use 2048 bits or more.
+    metadata: {kisa: "2-7", cwe: [CWE-326], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: rsa.generate_private_key(..., key_size=$BITS, ...)
+          - pattern: RSA.generate($BITS, ...)
+      - metavariable-comparison:
+          metavariable: $BITS
+          comparison: $BITS < 2048
+
+  - id: kisa-2-8-insecure-random
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A security value (token, OTP, session, password) comes from the random module. Use the secrets module.
+    metadata: {kisa: "2-8", cwe: [CWE-330], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = random.$FN(...)
+          - pattern: $VAR = $SEP.join(random.$FN(...))
+          - pattern: $VAR = $SEP.join(random.$FN(...) for ... in ...)
+          - pattern: $VAR = str(random.$FN(...))
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: '(?i).*(token|otp|nonce|session|secret|passw|reset|salt|key).*'
+
+  - id: kisa-2-11-tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is off. Turn it on; for a private CA, pass the CA bundle path as verify.
+    metadata: {kisa: "2-11", cwe: [CWE-295], tier: warn}
+    pattern-either:
+      - pattern: requests.$METHOD(..., verify=False, ...)
+      - pattern: ssl._create_unverified_context(...)
+      - pattern: $CTX.verify_mode = ssl.CERT_NONE
+      - pattern: $CTX.check_hostname = False
+
+  - id: kisa-2-14-unsalted-password-hash
+    languages: [python]
+    severity: ERROR
+    message: >-
+      The password is stored as a fast unsalted hash. Use bcrypt, scrypt, Argon2 or PBKDF2.
+    metadata: {kisa: "2-14", cwe: [CWE-759], tier: warn}
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.$ALG(<... $PW ...>)
+          - pattern: hashlib.new($NAME, <... $PW ...>)
+      - metavariable-regex:
+          metavariable: $PW
+          regex: '(?i)^(password|passwd|pw|pwd|user_password|raw_password)$'
+
+  # ---------------------------------------------------------------- 4. 에러처리
+  - id: kisa-4-1-error-detail-exposed
+    languages: [python]
+    severity: WARNING
+    message: >-
+      The response returns the exception text or stack trace. Send the client a generic message and log the details on the server.
+    metadata: {kisa: "4-1", cwe: [CWE-209], tier: warn}
+    patterns:
+      - pattern-inside: |
+          try:
+            ...
+          except $EXC as $E:
+            ...
+      - pattern-either:
+          - pattern: return <... str($E) ...>
+          - pattern: return <... repr($E) ...>
+          - pattern: return <... traceback.format_exc() ...>
+
+  - id: kisa-4-2-swallowed-exception
+    languages: [python]
+    severity: WARNING
+    message: >-
+      The exception is caught and ignored. Handle it or re-raise it; if ignoring it is the decision, say why.
+    metadata: {kisa: "4-2", cwe: [CWE-390], tier: warn}
+    pattern-either:
+      - pattern: |
+          try:
+            ...
+          except:
+            pass
+      - pattern: |
+          try:
+            ...
+          except $EXC:
+            pass
+      - pattern: |
+          try:
+            ...
+          except $EXC as $E:
+            pass
+
+  # ---------------------------------------------------------------- 5. 코드오류
+  - id: kisa-5-5-unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This deserialization can build arbitrary objects. Use JSON or yaml.safe_load.
+    metadata: {kisa: "5-5", cwe: [CWE-502], tier: warn}
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: marshal.loads(...)
+      - patterns:
+          - pattern: yaml.load(...)
+          - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader, ...)
+
+  # ---------------------------------------------------------------- 6. 캡슐화
+  - id: kisa-6-2-debug-code
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Debug code remains in shipped code. Remove it or move it behind configuration.
+    metadata: {kisa: "6-2", cwe: [CWE-489], tier: warn}
+    pattern-either:
+      - pattern: $APP.run(..., debug=True, ...)
+      - pattern: breakpoint()
+      - pattern: pdb.set_trace()
