@@ -1138,11 +1138,12 @@ function guideRows($: EngineInterface): Promise<GuideRows> {
   return guideRowsRead
 }
 
-// The hits an Edit or Write would add, scanned before it lands. The new text goes to a copy at the same project-relative path
-// in a scratch folder, so the rules' path filters (tests/, *Test.java) match as they would in the project.
-async function scanEdit($: EngineInterface, path: string, before: string, after: string): Promise<SemgrepHit[]> {
-  if (!projectRoot || !path.startsWith(`${projectRoot}/`) || path.startsWith(`${projectRoot}/.claude/`) || !(await semgrepReady($))) return []
-  const rel = path.slice(projectRoot.length + 1)
+// The hits an Edit or Write would add, scanned before it lands. The new text goes to a copy at the same root-relative path
+// in a scratch folder, so the rules' path filters (tests/, *Test.java) match as they would in the project. root is the folder
+// the edit lands in (editRoot): measured from the session's own folder, every file of a worktree under .claude/ was skipped.
+async function scanEdit($: EngineInterface, path: string, before: string, after: string, root: string): Promise<SemgrepHit[]> {
+  if (!root || !path.startsWith(`${root}/`) || path.startsWith(`${root}/.claude/`) || !(await semgrepReady($))) return []
+  const rel = path.slice(root.length + 1)
   const made = await $.process.run(['mktemp', '-d'], { timeoutMs: 10_000 })
   const scratch = made.stdout.trim()
   if (made.exitCode !== 0 || !scratch.startsWith('/')) return []
@@ -1164,8 +1165,9 @@ async function scanEdit($: EngineInterface, path: string, before: string, after:
 // HEAD and untracked files whole. The lenses of one review share one scan; undefined when semgrep is not there.
 async function changeHits($: EngineInterface, run: Run): Promise<Result<SemgrepHit[]> | undefined> {
   if (!(await semgrepReady($))) return undefined
-  const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '-U0', '--no-color', '--relative', 'HEAD'], { cwd: projectRoot })
-  const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], { cwd: projectRoot })
+  const root = rootOf(run)
+  const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '-U0', '--no-color', '--relative', 'HEAD'], { cwd: root })
+  const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], { cwd: root })
   if (diff.exitCode !== 0 || untracked.exitCode !== 0) return fail('semgrep_change', `git could not list the change (${(diff.stderr || untracked.stderr).trim()}).`)
   const added = addedLinesByFile(diff.stdout)
   const fresh = new Set(untracked.stdout.split('\0').filter(Boolean))
@@ -1174,7 +1176,7 @@ async function changeHits($: EngineInterface, run: Run): Promise<Result<SemgrepH
   const key = `${run.runId}\0${hash(`${diff.stdout}\0${untracked.stdout}`)}`
   let scan = changeScans.get(key)
   if (!scan) {
-    scan = runSemgrep($, projectRoot, targets).then((report): Result<SemgrepHit[]> => report.ok
+    scan = runSemgrep($, root, targets).then((report): Result<SemgrepHit[]> => report.ok
       ? { ok: true, value: report.value.filter(hit => fresh.has(hit.path) || added.get(hit.path)?.has(hit.line) === true) }
       : report)
     changeScans.set(key, scan)
@@ -1231,7 +1233,10 @@ async function refreshSessions($: EngineInterface, closed = false): Promise<void
   const own: SessionRecord = {
     schemaVersion: 1, sessionId, projectRoot, updatedAt: now, status: closed ? 'closed' : 'active',
     runIds: owned.map(run => run.runId),
-    writes: [...new Set(owned.flatMap(run => run.definition.nodes.filter(def => run.nodes.some(node => node.id === def.id && node.state === 'running')).flatMap(node => node.writes ?? [])))],
+    // A run in a worktree names its writes by absolute path (sessions.ts resolves those as they are): the same relative
+    // path in another tree is another file.
+    writes: [...new Set(owned.flatMap(run => run.definition.nodes.filter(def => run.nodes.some(node => node.id === def.id && node.state === 'running'))
+      .flatMap(node => (node.writes ?? []).map(path => run.root ? `${run.root}/${path}` : path))))],
   }
   const prefix = `dag-session:${hash(projectRoot)}:`
   await $.store.set(`${prefix}${sessionId}`, own)
@@ -1299,6 +1304,29 @@ async function loadRuns($: EngineInterface): Promise<void> {
       debug($, `skipped unreadable checkpoint ${entry.name}: ${message(error)}`)
     }
   }
+}
+
+// The folder a run works in: its root when it started in a worktree, otherwise the session's own folder (types.ts Run.root).
+function rootOf(run: Run): string {
+  return run.root ?? projectRoot
+}
+
+// The folder the session works in now. $.session.root() follows /cd and EnterWorktree, while projectRoot stays where the
+// session started and holds its run store.
+async function workingRoot($: EngineInterface): Promise<string> {
+  try {
+    return (await $.session.root()) || projectRoot
+  } catch (error) {
+    // A host or a test harness without the call: every run works in the session's own folder, as before runs had a root.
+    debug($, `session.root unavailable: ${message(error)}`)
+    return projectRoot
+  }
+}
+
+// The folder an Edit or Write lands in: its run's for a node worker, the session's current one otherwise.
+async function editRoot($: EngineInterface, agentId: string | undefined): Promise<string> {
+  const owner = ownNodeOfAgent(agentId)
+  return owner ? rootOf(owner.run) : workingRoot($)
 }
 
 async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string, purpose = 'prune'): Promise<boolean> {
@@ -1452,6 +1480,8 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
       description: `${run.name}: ${def.task_summary ?? def.label ?? def.id}`.slice(0, 80),
       subagentType: target.subagentType,
       model,
+      // Without a cwd the worker runs where the session is now, which is not the run's folder once the session moved.
+      ...(run.root ? { cwd: run.root } : {}),
     })
   } catch (error) {
     spawned = { deny: message(error) }
@@ -1840,7 +1870,7 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
   for (const node of run.nodes) {
     if (node.state === 'failed' && verdictFailure(run, node.id)) findings.set(node.id, await reviewerFindings($, run, node.id))
   }
-  const plan = reworkPlan(run, findings, projectRoot, reviewLedger)
+  const plan = reworkPlan(run, findings, rootOf(run), reviewLedger)
   if (!plan) return undefined
   const now = await $.clock.now()
   if ('skip' in plan) {
@@ -1868,17 +1898,17 @@ const LEDGER_FILES = 200
 
 type BeforeFix = { scopes: string[]; files: string[] }
 
-// One round's ledger folder, project-relative: git diff --no-index runs in the project root and names the before-state copies
-// by this path, and fixDiffText strips it from their headers.
+// One round's ledger folder, relative to the session's folder, which holds the run store: git diff --no-index names the
+// before-state copies by this path (by its absolute path for a run in a worktree), and fixDiffText strips it from their headers.
 function ledgerFolder(runId: string, round: number): string {
   return `${RUNS_SUBDIR}/${runId}/review-fix-${round}`
 }
 
-// The files in the given write scopes, tracked or new but not ignored, as project-relative paths.
-async function ledgerFiles($: EngineInterface, scopes: readonly string[]): Promise<string[]> {
+// The files in the given write scopes, tracked or new but not ignored, as paths relative to the run's root.
+async function ledgerFiles($: EngineInterface, scopes: readonly string[], root: string): Promise<string[]> {
   const files = new Set<string>()
   for (const scope of scopes) {
-    const listed = await $.process.run(['git', '-c', 'core.quotePath=false', 'ls-files', '-z', '-c', '-o', '--exclude-standard', '--', `:(literal)${scope}`], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+    const listed = await $.process.run(['git', '-c', 'core.quotePath=false', 'ls-files', '-z', '-c', '-o', '--exclude-standard', '--', `:(literal)${scope}`], { cwd: root, timeoutMs: GIT_READ_TIMEOUT_MS })
     if (listed.exitCode !== 0) throw new Error(`git ls-files ${scope} exited ${listed.exitCode}: ${listed.stderr.trim()}`)
     for (const path of listed.stdout.split('\0')) if (path !== '') files.add(path)
   }
@@ -1892,15 +1922,16 @@ async function ledgerFiles($: EngineInterface, scopes: readonly string[]): Promi
 // of the git listing itself drops the whole copy. A failure never stops the round.
 async function recordBeforeFix($: EngineInterface, run: Run, round: number, producers: readonly string[]): Promise<void> {
   const folder = `${projectRoot}/${ledgerFolder(run.runId, round)}`
+  const root = rootOf(run)
   const scopes = [...new Set(producers.flatMap(id => run.definition.nodes.find(def => def.id === id)?.writes ?? []))]
   try {
     const files: string[] = []
-    for (const path of (await ledgerFiles($, scopes)).slice(0, LEDGER_FILES)) {
+    for (const path of (await ledgerFiles($, scopes, root)).slice(0, LEDGER_FILES)) {
       // ls-files -c still lists a tracked file the producer deleted without git rm. It has no text to keep, and if the fix
       // brings it back, fixDiff shows it as added.
-      if (!(await $.fs.exists(`${projectRoot}/${path}`))) continue
+      if (!(await $.fs.exists(`${root}/${path}`))) continue
       try {
-        await $.fs.write(`${folder}/before/${path}`, await $.fs.read(`${projectRoot}/${path}`))
+        await $.fs.write(`${folder}/before/${path}`, await $.fs.read(`${root}/${path}`))
         files.push(path)
       } catch (error) {
         debug($, `review ledger: left ${path} out of the copy before review fix ${round} of ${run.runId}: ${message(error)}`)
@@ -1920,15 +1951,18 @@ function isBeforeFix(value: unknown): value is BeforeFix {
 
 // The fix's diff: each copied file against the same path now, and each file the scopes gained since, as git prints them, with
 // the copy's folder stripped from the headers. undefined when the copy was not recorded or before.json cannot be read.
-async function fixDiff($: EngineInterface, runId: string, round: number): Promise<string | undefined> {
+async function fixDiff($: EngineInterface, runId: string, round: number, root: string): Promise<string | undefined> {
   const folder = ledgerFolder(runId, round)
+  // git runs in the run's root. A run in a worktree keeps its copy in the session's store, so there the copy is named by its
+  // absolute path, which git prints without the leading slash.
+  const copies = root === projectRoot ? `${folder}/before` : `${projectRoot}/${folder}/before`
   let before: BeforeFix
   let current: string[]
   try {
     const parsed: unknown = JSON.parse(await $.fs.read(`${projectRoot}/${folder}/before.json`))
     if (!isBeforeFix(parsed)) throw new Error('before.json does not list scopes and files')
     before = parsed
-    current = await ledgerFiles($, before.scopes)
+    current = await ledgerFiles($, before.scopes, root)
   } catch (error) {
     debug($, `review ledger: no fix diff for ${runId} round ${round}: ${message(error)}`)
     return undefined
@@ -1940,16 +1974,16 @@ async function fixDiff($: EngineInterface, runId: string, round: number): Promis
     try {
       // The disk decides the after side: git still lists a tracked file the fix deleted without git rm, and git diff --no-index
       // on a missing path prints only an error.
-      const sides = [copied.has(path) ? `${folder}/before/${path}` : '/dev/null', (await $.fs.exists(`${projectRoot}/${path}`)) ? path : '/dev/null']
+      const sides = [copied.has(path) ? `${copies}/${path}` : '/dev/null', (await $.fs.exists(`${root}/${path}`)) ? path : '/dev/null']
       // git diff --no-index exits 0 when the two sides are equal and 1 when it printed a difference.
-      const diff = await $.process.run(['git', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+      const diff = await $.process.run(['git', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: root, timeoutMs: GIT_READ_TIMEOUT_MS })
       if (diff.exitCode === 1) parts.push(diff.stdout)
       else if (diff.exitCode !== 0) debug($, `review ledger: git diff of ${path} exited ${diff.exitCode}: ${diff.stderr.trim()}`)
     } catch (error) {
       debug($, `review ledger: could not diff ${path}: ${message(error)}`)
     }
   }
-  return fixDiffText(parts, `${folder}/before`)
+  return fixDiffText(parts, copies.replace(/^\//, ''))
 }
 
 // The ledger section a rerun review-spec or review-standards gets after a round that kept its findings; undefined for every
@@ -1958,7 +1992,7 @@ async function ledgerSection($: EngineInterface, run: Run, def: NodeDef): Promis
   const fix = run.reviewFix
   const last = fix?.history.at(-1)
   if (!reviewLedger || !isLedgerReviewer(def.id) || !fix || !last?.findings) return undefined
-  return ledgerBlock({ reviewerId: def.id, producers: last.producers, findings: last.findings, fixDiff: await fixDiff($, run.runId, fix.rounds) })
+  return ledgerBlock({ reviewerId: def.id, producers: last.producers, findings: last.findings, fixDiff: await fixDiff($, run.runId, fix.rounds, rootOf(run)) })
 }
 
 async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Promise<Run> {
@@ -2016,10 +2050,10 @@ function isCheckpointDir(path: string): boolean {
   return parts.length >= 2 && parts[parts.length - 2] === '.claude' && parts[parts.length - 1] === 'dag'
 }
 
-// A relative check path is joined to the project root without its `.` segments, so `.` is the project root itself.
-function resolveCheckPath(path: string): string {
+// A relative check path is joined to the run's root without its `.` segments, so `.` is the root itself.
+function resolveCheckPath(path: string, root: string): string {
   const parts = path.split('/').filter(part => part !== '' && part !== '.')
-  return parts.length ? `${projectRoot}/${parts.join('/')}` : projectRoot
+  return parts.length ? `${root}/${parts.join('/')}` : root
 }
 
 // Every regular file under dir, hidden and ignored ones included, as paths relative to dir in name order. A symbolic link
@@ -2079,9 +2113,9 @@ async function folderCheckResult($: EngineInterface, check: FileCheck, dir: stri
 }
 
 // A file check on a missing or unreadable path fails, absent included: a path that is not there proves nothing.
-async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<CheckResult> {
+async function fileCheckResult($: EngineInterface, check: FileCheck, root: string): Promise<CheckResult> {
   if (!projectPath(check.path) && !readOnlyAbsolutePath(check.path)) return { outcome: 'unknown', detail: `Path not allowed: ${check.path}` }
-  const path = projectPath(check.path) ? resolveCheckPath(check.path) : check.path
+  const path = projectPath(check.path) ? resolveCheckPath(check.path, root) : check.path
   let kind: string
   try {
     kind = (await $.fs.stat(path)).kind
@@ -2098,8 +2132,8 @@ async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<Ch
 // A program that cannot start or runs past its limit makes $.process.run reject, which fails the check whatever expect says.
 // The limit is the check's own timeoutMs, or the host's 30 s default without one (the parser keeps it within 1 s to 10 min).
 // The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
-async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<CheckResult> {
-  const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: check.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS })
+async function commandCheckResult($: EngineInterface, check: CommandCheck, root: string): Promise<CheckResult> {
+  const result = await $.process.run(check.argv, { cwd: root, timeoutMs: check.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS })
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
   const expectation = check.expect
   const truncated = (stream: 'stdout' | 'stderr') => expectation?.[stream] !== undefined && (stream === 'stdout' ? result.isStdoutTruncated : result.isStderrTruncated)
@@ -2126,11 +2160,11 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
     try {
       switch (check.kind) {
         case 'file': {
-          ({ outcome, detail } = await fileCheckResult($, check))
+          ({ outcome, detail } = await fileCheckResult($, check, rootOf(run)))
           break
         }
         case 'command': {
-          ({ outcome, detail, exitCode } = await commandCheckResult($, check))
+          ({ outcome, detail, exitCode } = await commandCheckResult($, check, rootOf(run)))
           break
         }
         default: {
@@ -2230,12 +2264,13 @@ async function endSnapshot($: EngineInterface, run: Run, nodeId: string): Promis
   }
   const writes = (def?.writes ?? []).map(path => `:(literal)${path}`)
   if (writes.length === 0) return { notes }
+  const root = rootOf(run)
   try {
-    const changed = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-color', 'HEAD', '--', ...writes], { cwd: projectRoot })
-    const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--', ...writes], { cwd: projectRoot })
+    const changed = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-color', 'HEAD', '--', ...writes], { cwd: root })
+    const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--', ...writes], { cwd: root })
     if (changed.exitCode !== 0 || untracked.exitCode !== 0) return { notes }
     const fresh = untracked.stdout.split('\0').filter(Boolean).slice(0, TRAJECTORY_NEW_FILES)
-    const added = await Promise.all(fresh.map(async path => `new file ${path}\n${await readOrEmpty($, `${projectRoot}/${path}`)}`))
+    const added = await Promise.all(fresh.map(async path => `new file ${path}\n${await readOrEmpty($, `${root}/${path}`)}`))
     return { notes, diff: [changed.stdout, ...added].filter(text => text !== '').join('\n') }
   } catch (error) {
     debug($, `trajectory: could not read the change of ${nodeId}: ${message(error)}`)
@@ -2305,13 +2340,13 @@ function screenDefinition(input: unknown): Result<{ definition: Definition; exis
 // definition goes through unjudged: the verify run reports a missing program anyway, only later.
 const PROGRAM_LOOKUP = 'while IFS= read -r p; do command -v "$p" >/dev/null 2>&1 || printf "%s\\n" "$p"; done'
 
-async function missingProgramProblem($: EngineInterface, definition: Definition): Promise<EngineError | undefined> {
+async function missingProgramProblem($: EngineInterface, definition: Definition, root: string): Promise<EngineError | undefined> {
   const uses = commandPrograms(definition)
   const names = [...new Set(uses.map(use => use.program))]
   if (names.length === 0) return undefined
   let missing: Set<string>
   try {
-    const result = await $.process.run(['sh', '-c', PROGRAM_LOOKUP], { cwd: projectRoot || undefined, stdin: `${names.join('\n')}\n`, timeoutMs: 5_000 })
+    const result = await $.process.run(['sh', '-c', PROGRAM_LOOKUP], { cwd: root || undefined, stdin: `${names.join('\n')}\n`, timeoutMs: 5_000 })
     if (result.exitCode !== 0) return undefined
     missing = new Set(result.stdout.split('\n').map(line => line.trim()).filter(name => names.includes(name)))
   } catch {
@@ -2325,7 +2360,7 @@ async function missingProgramProblem($: EngineInterface, definition: Definition)
 async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
   const screened = screenDefinition(input)
   if (!screened.ok) return screened
-  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition)
+  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition, await workingRoot($))
   if (missing) return { ok: false, error: missing }
   return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
 }
@@ -2348,11 +2383,14 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
     return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
   }
   if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
-  const missing = await missingProgramProblem($, definition)
+  // The run keeps the folder the session works in now, so a run started in a worktree runs there to the end, even if the
+  // session moves on.
+  const root = await workingRoot($)
+  const missing = await missingProgramProblem($, definition, root)
   if (missing) return err(missing)
   const now = await $.clock.now()
   const runId = `dag_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-  const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
+  const routed = await routeRun($, createRun(definition, { runId, sessionId, now, ...(root !== projectRoot ? { root } : {}) }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
   await record($, { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
@@ -2562,7 +2600,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   if (input.action === 'amend') {
     const parsed = parseDefinition(input.definition)
     if (!parsed.ok) return err(parsed.error)
-    const problem = verificationProblem(parsed.value) ?? await missingProgramProblem($, parsed.value)
+    const problem = verificationProblem(parsed.value) ?? await missingProgramProblem($, parsed.value, rootOf(run))
     if (problem) return err(problem)
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
@@ -4334,15 +4372,19 @@ export function register(on: On, options: PluginOptions) {
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
     if ((e.tool !== 'Edit' && e.tool !== 'Write') || !secureScan || !semgrepTarget(e.file_path)) return next(e)
     let hits: SemgrepHit[] = []
+    let root = projectRoot
     try {
+      // The folder the edit is in: the one it works in (a worktree), else the session's own, so a file of either is scanned.
+      const working = await editRoot($, e.agentId)
+      root = [working, projectRoot].find(candidate => candidate && e.file_path.startsWith(`${candidate}/`) && !e.file_path.startsWith(`${candidate}/.claude/`)) ?? ''
       const before = await readOrEmpty($, e.file_path)
       const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
-      if (after !== undefined) hits = await scanEdit($, e.file_path, before, after)
+      if (after !== undefined) hits = await scanEdit($, e.file_path, before, after, root)
     } catch (error) {
       debug($, `secure-coding scan skipped ${e.file_path}: ${message(error)}`)
     }
     if (hits.length === 0) return next(e)
-    const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
+    const shown = root && e.file_path.startsWith(`${root}/`) ? e.file_path.slice(root.length + 1) : e.file_path
     const { kisa } = await guideRows($)
     const blocking = hits.filter(hit => hit.tier === 'block')
     if (blocking.length > 0) return { deny: semgrepRefusal(shown, blocking, kisa) }

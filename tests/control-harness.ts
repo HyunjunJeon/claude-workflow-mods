@@ -39,10 +39,13 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   // git: what a git call prints, keyed by its argv after 'git' joined with spaces ('show HEAD~1:./src/a.ts',
   // 'diff --no-color --no-ext-diff main -- :(literal)src/b.ts'); a call whose key is absent exits 128 as git does for an unknown
   // ref or path.
-  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
+  // root: what $.session.root() answers, the folder the session works in now (a worktree after EnterWorktree); session.cwd
+  // and session.start stay at /work, the folder the session started in.
+  const control = { sessionId: 'source', root: '/work', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', () => ({ value: control.root }))
   on('env.get', ($, e) => ({ value: e.name === 'TYPESAFE_API_KEY' ? KEY : e.name === 'HOME' ? options.home : undefined }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => { store.set(e.key, e.value); return { value: undefined } })

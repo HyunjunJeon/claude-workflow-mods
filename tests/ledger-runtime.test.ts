@@ -52,12 +52,12 @@ function promptOf(h: ReturnType<typeof harness>, id: string): string {
 }
 
 // code and docs complete, review-standards passes and review-spec fails, so the round reruns docs (agent-5).
-async function failSpecReview($: Engine, h: ReturnType<typeof harness>, key: string, docsWrites = ['README.md']): Promise<string> {
+async function failSpecReview($: Engine, h: ReturnType<typeof harness>, key: string, docsWrites = ['README.md'], root = '/work'): Promise<string> {
   const notes = defaultNotesFolder(key)
   await boot($)
   const runId = await start($, greetFlow(key, docsWrites))
-  h.files.set('/work/src/greet.ts', 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
-  h.files.set('/work/README.md', BEFORE_FIX)
+  h.files.set(`${root}/src/greet.ts`, 'export function greet(name: string) {\n  return `hello ${name}`\n}\n')
+  h.files.set(`${root}/README.md`, BEFORE_FIX)
   await finish($, h, 'agent-1')
   await finish($, h, 'agent-2')
   h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
@@ -68,10 +68,33 @@ async function failSpecReview($: Engine, h: ReturnType<typeof harness>, key: str
 }
 
 // docs makes its fix and the reviewers start again.
-async function fixDocs($: Engine, h: ReturnType<typeof harness>): Promise<void> {
-  h.files.set('/work/README.md', AFTER_FIX)
+async function fixDocs($: Engine, h: ReturnType<typeof harness>, root = '/work'): Promise<void> {
+  h.files.set(`${root}/README.md`, AFTER_FIX)
   await finish($, h, 'agent-5')
 }
+
+test('a run started in a worktree copies and diffs the worktree\'s files, while the copy stays in the session\'s run store', { plugins: [NO_INDEX_EXIT] }, async ($, on) => {
+  const h = harness(on)
+  const worktree = '/work/.claude/worktrees/x'
+  h.control.root = worktree
+  h.control.git.set(LS_README, 'README.md\0')
+  const runId = await failSpecReview($, h, 'greet-worktree-ledger', ['README.md'], worktree)
+  // The copy lives in the store; git runs in the worktree, so the before side is named by its absolute path.
+  const before = `/work/.claude/dag/runs/${runId}/review-fix-1/before`
+  expect(h.files.get(`${before}/README.md`)).toBe(BEFORE_FIX)
+  expect(h.processes.filter(run => run.argv.includes('ls-files')).map(run => run.init?.cwd)).toEqual([worktree])
+  h.control.git.set(`diff --no-index --no-color -- ${before}/README.md README.md`, [
+    `diff --git a${before}/README.md b/README.md`,
+    `--- a${before}/README.md`,
+    '+++ b/README.md',
+    '@@ -3 +3 @@',
+    '-Call greet(name) to say hello.',
+    '+Call greet(name); it returns the greeting string.',
+    '',
+  ].join('\n'))
+  await fixDocs($, h, worktree)
+  expect(promptOf(h, 'review-spec')).toContain('<fix-diff>\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-Call greet(name) to say hello.\n+Call greet(name); it returns the greeting string.\n</fix-diff>')
+})
 
 test('with the ledger on by default, the round copies the producer\'s files before the fix, records the findings it sent, and both rerun reviewers get the findings and the fix\'s diff in their task', { plugins: [NO_INDEX_EXIT] }, async ($, on) => {
   const h = harness(on)

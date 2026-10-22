@@ -42,13 +42,14 @@ function nodeOf(run: Run, id: string): NodeRun {
   return node
 }
 
-export function createRun(definition: Definition, ids: { runId: string; sessionId: string; now: number }): Run {
+export function createRun(definition: Definition, ids: { runId: string; sessionId: string; now: number; root?: string }): Run {
   return advance({
     schemaVersion: 1,
     runId: ids.runId,
     key: definition.key,
     name: definition.name,
     sessionId: ids.sessionId,
+    ...(ids.root ? { root: ids.root } : {}),
     status: 'running',
     createdAt: ids.now,
     updatedAt: ids.now,

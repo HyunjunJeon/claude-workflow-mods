@@ -145,6 +145,10 @@ export type Run = {
   definition: Definition
   definitionHash: string
   nodes: NodeRun[]
+  // The folder the run works in when the session worked elsewhere than where it started (a git worktree after
+  // EnterWorktree): nodes spawn there and checks, git reads and diffs run there. Absent means the session's own folder,
+  // where this record is stored.
+  root?: string
   cancelReason?: string
   settledNotified?: boolean
   handoff?: {
