@@ -1,0 +1,51 @@
+# Runs scripts/ci.sh: claude plugin validate, claude plugin test, the flow
+# definition check and the Semgrep rule tests, on pinned tool versions.
+# tsc is a local check only: the host typings in .claude-plugin/types/ are
+# generated when the plugin loads, so a fresh CI checkout has none and
+# scripts/ci.sh skips that step.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLAUDE_CODE_PACKAGE: "@anthropic-ai/claude-code@2.1.306"
+  DISABLE_AUTOUPDATER: "1"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install -g "$CLAUDE_CODE_PACKAGE"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install semgrep==1.181.1
+
+      - name: Run CI checks
+        run: bash scripts/ci.sh

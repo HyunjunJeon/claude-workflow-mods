@@ -1,0 +1,181 @@
+# CI: one script runs the repository's checks, and a GitHub Actions workflow runs it on every push to main and every PR.
+# Why: the repo has 1402 tests, a plugin manifest check, flow definitions and Semgrep rule tests but no .github/, and on
+# 2026-10-22 two sessions committed to this checkout within minutes of each other, so nothing caught a regression between
+# them. Facts checked that day:
+# - @anthropic-ai/claude-code 2.1.306 is the npm "stable" tag (latest 2.1.307); the package ships the native binary through
+#   optional dependencies and no plugin typings (only sdk-tools.d.ts). `claude plugin test` needs no session or login.
+# - tsc cannot run in CI: .claude-plugin/types/ is gitignored and written by Claude Code when it loads the plugin;
+#   claude-code-tools/index.d.ts is generated from the session's tool schemas. With a stub tools file tsc reports 18 errors
+#   (register.ts reads e.command, e.file_path). So CI skips tsc and says why; it stays a local check.
+# - bun eval/check-definition.ts exits 1 on lint warnings alone; 6 of 16 flow files carry expected warnings (slice files,
+#   older request wording), so CI needs a mode where warnings print but do not fail.
+# - docs/development.md already runs the Semgrep rule tests: `semgrep --test --metrics off --config skills/secure-coding/rules
+#   tests/semgrep` (semgrep 1.181). semgrep is not installed on this Mac.
+# - Local bun is 1.4.3; actionlint is installed.
+#
+# PREREQUISITE: `git status --short` prints nothing, and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p15-ci.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. No commit node: the user commits after reading the reviews. Nothing is
+# pushed: the workflow first runs on GitHub when the user pushes.
+#
+# Run plan (components -> waves):
+#   wave 1: ci-script, ci-workflow, ci-docs
+#   then:   review-spec, review-standards (generated)
+# No edges: the workflow and the docs get the script's contract (path, behaviour, CI=true rules) pasted in their prompts.
+# Categories: standard for ci-script (shell strictness, skip rules, a CLI flag in eval/check-definition.ts) and ci-workflow
+# (pinned actions and versions, checked against PyPI and actionlint); writing for ci-docs.
+# This session reloaded the plugin after 59007fb, so checks may set timeoutMs; ci-script's whole-script check uses 300000.
+# First run: dag_mvizthrq_1t4vby (2026-10-22), completed: every node passed its checks (ci-script ran the whole script to
+# "ci: all checks passed"), Spec and Standards verdicts PASS, 1410 tests at HEAD aeff2d0. AGENTS.md is excluded from git
+# (.git/info/exclude), so ci-docs's AGENTS.md lines stay local; docs/development.md carries the CI notes.
+
+key: improve-p15-ci-1
+name: CI script and GitHub Actions workflow
+goal: >
+  `bash scripts/ci.sh` runs claude plugin validate, claude plugin test, the flow definition check (warnings allowed via a
+  new --allow-warnings flag), the Semgrep rule tests and, when typings exist, tsc, failing on the first broken step and
+  ending with "ci: all checks passed"; .github/workflows/ci.yml runs it on GitHub with Claude Code 2.1.306, bun 1.4.3 and
+  semgrep 1.181 and passes actionlint; docs/development.md and AGENTS.md describe both.
+review:
+  request: |
+    추천 작업 진행
+    Agreed plan (2026-10-22), batch 2 item: CI (test, validate, semgrep). Decisions made while planning: tsc is not part of CI, because the host typings it needs are written by Claude Code at plugin load (the tools typings come from the session's tool schemas) and are not in git; CI prints that it skipped tsc. Flow files with lint warnings must not fail CI, but a definition that does not parse or lacks verify must.
+    Out of scope: committing host typings or extracting them from the binary, running the DAG-shape eval in CI, pushing to GitHub; this run leaves its changes uncommitted for the user.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - tests/AGENTS.md
+nodes:
+  - id: ci-script
+    label: Add scripts/ci.sh and check-definition --allow-warnings
+    category: standard
+    writes:
+      - scripts/ci.sh
+      - eval/check-definition.ts
+    verify:
+      - kind: command
+        argv: [bash, scripts/ci.sh]
+        timeoutMs: 300000
+        expect:
+          stdout:
+            lastLine: "ci: all checks passed"
+      - kind: command
+        argv: [bun, eval/check-definition.ts, flows/improvement/p12-mod-hardening.yaml]
+        expect:
+          exit: 1
+          stdout:
+            contains: "warning:"
+      - kind: command
+        argv: [bun, eval/check-definition.ts, --allow-warnings, flows/improvement/p12-mod-hardening.yaml]
+        expect:
+          stdout:
+            contains: "warning:"
+      - kind: command
+        argv: [bun, eval/check-definition.ts, --allow-warnings, eval/fixtures/missing.yaml]
+        expect:
+          exit: 1
+          stdout:
+            contains: "unreadable"
+    prompt: |
+      TASK: Add scripts/ci.sh, the one command that runs this repository's checks in order, and an --allow-warnings flag to eval/check-definition.ts.
+
+      CONTEXT:
+      - No package.json; the checks are the CLI commands in AGENTS.md ## COMMANDS and docs/development.md ## 개발: `claude plugin validate .` (passes with known advisory warnings), `claude plugin test .` (1402 tests, about 18 s), `bunx -p typescript@5 tsc -p . --noEmit` (needs the gitignored .claude-plugin/types/, written by Claude Code when it loads the plugin), `bun eval/check-definition.ts <files>`, and `semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep` (Semgrep rule fixtures; semgrep 1.181; not installed on this machine).
+      - eval/check-definition.ts parses each file, requires verify, then lints; it prints `OK <path> (<n> nodes)` or `FAIL <path>` followed by indented lines (`  warning: ...` for lint warnings, `  <code>: <message>` for errors) on stdout, and exits 1 if any file failed. Lint warnings alone make a file FAIL: on 2026-10-22 p4, p5, p6, p11, p12 and p13 under flows/improvement fail only on warnings.
+      - Style for TypeScript here: no semicolons, single quotes, 2-space indent (AGENTS.md). eval/check-definition.ts is not in the tsc include list; keep it plain and Bun-run.
+
+      REQUIRED:
+      1. eval/check-definition.ts: accept a leading `--allow-warnings` flag (anywhere among the arguments is fine; say which in the usage line). With it, a file whose only problems are lint warnings prints `OK <path> (<n> nodes, <k> warnings)` followed by its `  warning: ...` lines and does not make the exit code 1; parse errors, unreadable files and missing verify still print FAIL and exit 1. Without the flag the behaviour and output stay exactly as today. Update the usage comment and the usage message.
+      2. scripts/ci.sh (bash, `set -euo pipefail`, executable bit set, works from any working directory by changing to the repository root first). Steps in this order, each announced on stdout with a line `== <step name>`:
+         a. `claude --version`
+         b. `claude plugin validate .`
+         c. `claude plugin test .`
+         d. `bun eval/check-definition.ts --allow-warnings flows/improvement/*.yaml eval/fixtures/valid-definition.yaml`
+         e. Semgrep rule tests: if `semgrep` is on PATH run `semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep`; otherwise fail with a clear message when `CI` is `true`, and print `skipped: semgrep is not installed` and continue when it is not.
+         f. tsc: if .claude-plugin/types/claude-code/index.d.ts exists run `bunx -p typescript@5 tsc -p . --noEmit`; otherwise print `skipped: tsc needs .claude-plugin/types/, which Claude Code writes when it loads the plugin` and continue (in CI as well).
+         The script stops at the first failing step with that step's exit code and ends, only when every step passed or was skipped as above, with the stdout line `ci: all checks passed` as its very last line.
+      3. Run `bash scripts/ci.sh` here and confirm it ends with that line; confirm the skip paths by reading the script (semgrep is absent here; for the CI=true semgrep failure run `CI=true PATH=<a PATH without semgrep> bash scripts/ci.sh` only if it stays quick, or reason it from the code and say which in Output).
+
+      SCOPE: create scripts/ci.sh and edit eval/check-definition.ts only. Other nodes of this run write .github/workflows/ci.yml, docs/development.md and AGENTS.md at the same time; do not touch them, hooks/, tests/ or flows/.
+
+      VERIFY: `bash scripts/ci.sh` exits 0 and its last stdout line is `ci: all checks passed`; `bun eval/check-definition.ts flows/improvement/p12-mod-hardening.yaml` still exits 1 with a `warning:` line; with `--allow-warnings` it exits 0 and still prints the warning; `bun eval/check-definition.ts --allow-warnings eval/fixtures/missing.yaml` exits 1 with `unreadable`.
+
+      STOP WHEN: all four hold.
+
+      In ## Output give: the script's steps with their exact commands, the skip and CI=true rules as implemented, the new check-definition output line format, and the last 5 lines of the local `bash scripts/ci.sh` run.
+
+  - id: ci-workflow
+    label: Add the GitHub Actions workflow
+    category: standard
+    writes:
+      - .github/workflows/ci.yml
+    verify:
+      - kind: command
+        argv: [actionlint, .github/workflows/ci.yml]
+      - kind: file
+        path: .github/workflows/ci.yml
+        contains: "bash scripts/ci.sh"
+      - kind: file
+        path: .github/workflows/ci.yml
+        contains: "@anthropic-ai/claude-code@2.1.306"
+      - kind: file
+        path: .github/workflows/ci.yml
+        matches: "semgrep==1\\.181\\.\\d+"
+    prompt: |
+      TASK: Add .github/workflows/ci.yml, a GitHub Actions workflow that installs the pinned tools and runs `bash scripts/ci.sh`.
+
+      CONTRACT of scripts/ci.sh (another node writes it at the same time; rely on exactly this): it changes to the repository root, runs `claude --version`, `claude plugin validate .`, `claude plugin test .`, `bun eval/check-definition.ts --allow-warnings ...`, the Semgrep rule tests (`semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep`; when semgrep is missing it FAILS if the environment variable CI is `true`) and tsc only when .claude-plugin/types/ exists (never in CI; it prints a skip line); it exits non-zero at the first failing step and ends with `ci: all checks passed`.
+
+      REQUIRED:
+      1. Triggers: push to main and pull_request (any branch), plus workflow_dispatch. `permissions: contents: read`. A concurrency group per ref that cancels an older run in progress.
+      2. One job on ubuntu-latest with `timeout-minutes: 15`, env `DISABLE_AUTOUPDATER: "1"` (GitHub sets CI=true itself).
+      3. Steps: actions/checkout@v4; actions/setup-node@v4 with node-version 22; `npm install -g @anthropic-ai/claude-code@2.1.306` (keep the version in one workflow-level env variable such as CLAUDE_CODE_VERSION and reference it); oven-sh/setup-bun@v2 with bun-version 1.4.3; actions/setup-python@v5 with python-version 3.12; `pip install semgrep==1.181.<patch>` where <patch> is the newest 1.181 patch release on PyPI (check with `pip index versions semgrep` or `curl -s https://pypi.org/pypi/semgrep/json`; record the source in Output; if no 1.181 release exists, stop and report failed with what you found); then `bash scripts/ci.sh`.
+      4. A short comment at the top saying what the workflow runs and that tsc is a local check because the host typings are generated at plugin load.
+
+      SCOPE: create .github/workflows/ci.yml only. Other nodes write scripts/ci.sh, eval/check-definition.ts, docs/development.md and AGENTS.md at the same time; do not touch them. Do not push, open a PR or call any GitHub API that writes.
+
+      VERIFY: `actionlint .github/workflows/ci.yml` prints nothing and exits 0.
+
+      STOP WHEN: actionlint passes and the file holds the pinned versions above.
+
+      In ## Output give: the full workflow file text, the semgrep version chosen and how you found it, and the actionlint result.
+
+  - id: ci-docs
+    label: Document the CI script and workflow
+    category: writing
+    writes:
+      - docs/development.md
+      - AGENTS.md
+    verify:
+      - kind: file
+        path: docs/development.md
+        contains: "bash scripts/ci.sh"
+      - kind: file
+        path: AGENTS.md
+        contains: "bash scripts/ci.sh"
+      - kind: file
+        path: AGENTS.md
+        absent: "659 tests, ~4s"
+      - kind: command
+        argv: [git, diff, --check, --, docs/development.md, AGENTS.md]
+    prompt: |
+      TASK: Document the new CI script and workflow in docs/development.md (Korean; keep it Korean) and AGENTS.md (English).
+
+      CONTRACT (other nodes implement exactly this at the same time; describe exactly this):
+      - `bash scripts/ci.sh` runs, in order: `claude --version`, `claude plugin validate .`, `claude plugin test .`, `bun eval/check-definition.ts --allow-warnings flows/improvement/*.yaml eval/fixtures/valid-definition.yaml`, the Semgrep rule tests (`semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep`), and tsc (`bunx -p typescript@5 tsc -p . --noEmit`) only when .claude-plugin/types/ exists. It stops at the first failing step and ends with `ci: all checks passed`. Locally a missing semgrep is skipped with a message; with CI=true it fails.
+      - `bun eval/check-definition.ts --allow-warnings ...` prints lint warnings but exits 0 for a file whose only problems are warnings; without the flag warnings fail as before.
+      - .github/workflows/ci.yml runs the script on GitHub Actions for pushes to main, pull requests and manual dispatch, on ubuntu-latest with Claude Code 2.1.306 installed from npm (@anthropic-ai/claude-code), bun 1.4.3, Python 3.12 and semgrep 1.181.
+      - tsc is not in CI: .claude-plugin/types/ is gitignored and written by Claude Code when it loads the plugin, and claude-code-tools/index.d.ts comes from the session's tool schemas (with a stub, tsc reported 18 errors on 2026-10-22). Run tsc locally.
+      - To move CI to a newer Claude Code, change the version variable in the workflow after running `bash scripts/ci.sh` locally on that version.
+
+      REQUIRED:
+      1. docs/development.md, section `## 개발`: put `bash scripts/ci.sh` first in the command block as the one command that runs the set, keep the individual commands after it, and add a short paragraph (3-5 sentences) on what CI runs, the pinned versions, why tsc is local only, and how to bump the Claude Code version.
+      2. AGENTS.md, section `## COMMANDS`: add `bash scripts/ci.sh` with a short comment as the first line of the block; change the test comment `(659 tests, ~4s)` to the current count and time (1402 tests, ~18s); add `--allow-warnings` to the check-definition line with a comment that warnings then print without failing. In `## STRUCTURE`, add `.github/` (the CI workflow) and `scripts/` (ci.sh) entries in the tree's style. Change nothing else in AGENTS.md.
+
+      SCOPE: edit only docs/development.md and AGENTS.md. Other nodes write scripts/ci.sh, eval/check-definition.ts and .github/workflows/ci.yml at the same time.
+
+      VERIFY: `git diff --check -- docs/development.md AGENTS.md` prints nothing; `grep -n 'scripts/ci.sh' docs/development.md AGENTS.md` shows the new lines.
+
+      STOP WHEN: both files describe the contract and the check passes.
+
+      In ## Output give: each changed line with its file and line number.
