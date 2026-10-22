@@ -73,7 +73,8 @@ export async function removePath($: EngineInterface, flag: '-f' | '-rf', path: s
   return false
 }
 
-// A file the plugin reads for the anti-slop scan; a file that does not exist yet reads as empty.
+// A file the plugin reads (an edited file for the scans, a rule or guide file, a new file for the trajectory log); a file
+// that does not exist yet reads as empty.
 export async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
   try {
     return await $.fs.read(path)

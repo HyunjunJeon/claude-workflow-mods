@@ -125,7 +125,7 @@ function trajectoryDir(trajectory: Trajectory, runId?: string): string {
 }
 
 // Queues one trajectory event. Nothing in a run waits on the write: one that fails is logged and the run goes on.
-export async function record($: EngineInterface, trajectory: Trajectory, calls: TrajectoryCalls, input: TrajectoryInput): Promise<void> {
+export async function recordTrajectory($: EngineInterface, trajectory: Trajectory, calls: TrajectoryCalls, input: TrajectoryInput): Promise<void> {
   if (!trajectory.enabled || !trajectory.host.projectRoot()) return
   const event = { at: await $.clock.now(), sessionId: trajectory.host.sessionId(), ...input }
   const dir = trajectoryDir(trajectory, 'runId' in input ? input.runId : undefined)
@@ -190,12 +190,12 @@ export async function recordNodeEnd($: EngineInterface, trajectory: Trajectory, 
   try {
     const { notes, diff } = await endSnapshot($, trajectory, run, node.id)
     const { state, error, answer } = result.outcome
-    await record($, trajectory, calls, {
+    await recordTrajectory($, trajectory, calls, {
       kind: 'node.end', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, reason: end.reason, isAborted: end.isAborted,
       state, error, answer, verification: result.verification, expansion: result.expansion?.map(def => def.id), notes, diff, usage,
     })
     const rows = await $.session.messages({ agentId: end.agentId })
-    await record($, trajectory, calls, Array.isArray(rows)
+    await recordTrajectory($, trajectory, calls, Array.isArray(rows)
       ? { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: transcriptRows(rows) }
       : { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: [], error: rows.deny })
   } catch (error) {
@@ -210,7 +210,7 @@ export async function recordMainTurn($: EngineInterface, trajectory: Trajectory,
     if (!Array.isArray(rows)) return
     const fresh = rowsAfter(rows, trajectory.mainRows)
     trajectory.mainRows = fresh.mark
-    await record($, trajectory, calls, { kind: 'main.turn', turnId: turn.turnId, reason: turn.reason, durationMs: turn.durationMs, usage: turn.usage, rows: transcriptRows(fresh.rows) })
+    await recordTrajectory($, trajectory, calls, { kind: 'main.turn', turnId: turn.turnId, reason: turn.reason, durationMs: turn.durationMs, usage: turn.usage, rows: transcriptRows(fresh.rows) })
   } catch (error) {
     debug($, `could not record the main turn in the trajectory: ${message(error)}`)
   }

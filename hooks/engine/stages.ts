@@ -259,7 +259,7 @@ function guideLine(guides: string[], rows: string): string {
   return `GUIDES: from the ${SECURE_CODING_SKILL} skill you loaded, read ${guides.map(id => `references/${id}.md (${id}: ${SECURITY_GUIDES[id]})`).join(' and ')} from the skill's folder, and apply ${rows}. If the skill or a reference file cannot be read, end with \`DAG_NODE_STATUS: failed: missing-input: <the skill or file>\`; never judge from memory.`
 }
 
-// The plugin adds the Semgrep hits of a lens as candidates after the lens finishes (register.ts lensExpansion), so the lens
+// The plugin adds the Semgrep hits of a lens as candidates after the lens finishes (hooks/host/scan.ts lensExpansion), so the lens
 // spends its effort where a rule cannot see.
 const SEMGREP_LINE = 'SEMGREP: when semgrep is installed, the plugin runs the rules in skills/secure-coding/rules over the change after you finish and gives each hit in your lens its own verifier, recorded under ## Semgrep candidates in your notes. You need not list those lines. Spend your effort on what a rule cannot see: a control that is missing, and data that flows across functions or files.'
 

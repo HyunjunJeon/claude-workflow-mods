@@ -69,7 +69,7 @@ import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks,
 import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GIT_READ_TIMEOUT_MS, listIfPresent, message, readOrEmpty, recoverReport, removePath, SAFE_RUN_DIR, workingRoot, type AgentEnd, type CompletionClaim, type CompletionResult, type ToolInput } from './host/io.ts'
 import { collectLearning, createLearning, finishLearning, initializeLearning, observeLearnedSkill, pruneLearningData, readLearningLibrary, saveLearningSession, startLearning, updateLearningLibrary } from './host/learning.ts'
 import { BOARDS_SUBDIR, CHIP_PAINT, chipContexts, citeBlock, createBoards, handleBoardTool, inheritBoards, latestBoardTitle, loadBoards, type BoardCalls } from './host/boards.ts'
-import { createTrajectory, exportTrajectory, pruneTrajectories, record, recordMainTurn, recordNodeEnd, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
+import { createTrajectory, exportTrajectory, pruneTrajectories, recordMainTurn, recordNodeEnd, recordTrajectory, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
 import { createScan, guideRows, lensExpansion, resetScan, scanEdit, slopSkips } from './host/scan.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
@@ -1034,10 +1034,10 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   const started = { kind: 'node.start', runId: run.runId, nodeId: id, attempt: node.attempt + 1, subagentType: target.subagentType, category: node.routing?.category ?? def.category, recovery: node.recovery, prompt } as const
   if (spawned.agentId) {
     agentRuns.set(spawned.agentId, run.runId)
-    await record($, trajectory, trajectoryCalls($), { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
     return markRunning(run, id, spawned.agentId, now, spawned.model)
   }
-  await record($, trajectory, trajectoryCalls($), { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
 }
 
@@ -1084,7 +1084,7 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
       settleToasts.add(runId)
-      await record($, trajectory, trajectoryCalls($), { kind: 'run.settle', runId, ...settleRecord(run) })
+      await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.settle', runId, ...settleRecord(run) })
       exportTrajectory($, trajectory, runId)
       const failed = run.nodes.filter(node => node.state === 'failed')
       const toasted = failureToasts.get(runId)
@@ -1368,7 +1368,7 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
   const now = await $.clock.now()
   if ('skip' in plan) {
     $.ui.log(`No automatic review fix for ${run.runId}: ${plan.skip}`)
-    await record($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, skip: plan.skip })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, skip: plan.skip })
     return { run: withReworkSkip(run, plan.skip, now), reworked: false }
   }
   const reworked = reworkRun(run, plan.producers, plan.note, plan.reviewers, now, reviewLedger ? plan.findings : undefined)
@@ -1377,7 +1377,7 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
     return undefined
   }
   const round = reworked.value.reviewFix?.rounds
-  await record($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
   $.ui.log(`Automatic review fix ${run.runId}: ${plan.reviewers.join(', ')} failed on a FAIL verdict; rerunning ${plan.producers.join(', ')} with the findings, then the reviewers`)
   // Before returning: tick starts the producers right after, and the copy must hold their files as the reviewers judged them.
   if (reviewLedger && round !== undefined) await recordBeforeFix($, reworked.value, round, plan.producers)
@@ -1793,7 +1793,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   const routed = await routeRun($, createRun(definition, { runId, sessionId, now, ...(root !== projectRoot ? { root } : {}) }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
-  await record($, trajectory, trajectoryCalls($), { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
   // Only the model's own start answers the turn's request; a /dag run the person typed is not part of that answer. The
   // enforcement check matters because only auto decides the surface, so a level changed mid-turn leaves an old 'board'.
   if (by === 'model' && enforcement === 'auto' && turnSurface === 'board') boardAnswerRuns.add(runId)
@@ -1994,7 +1994,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (by === 'user') delete retried.value.rejected
     const routed = await routeRun($, retried.value, retried.value.nodes.filter(node => node.state === 'pending' || node.state === 'scheduled').map(node => node.id))
     runs.set(run.runId, routed)
-    await record($, trajectory, trajectoryCalls($), { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
     return ok(snapshotOf((await tick($, run.runId)) ?? routed, 0))
   }
   if (input.action === 'amend') {
@@ -2006,7 +2006,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
     runs.set(run.runId, routed)
-    await record($, trajectory, trajectoryCalls($), { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
     return ok({
       rerun: amended.value.rerun,
       snapshot: snapshotOf((await tick($, run.runId)) ?? routed, 0),
