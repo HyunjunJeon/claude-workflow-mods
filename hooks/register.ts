@@ -1092,15 +1092,19 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
       settleToasts.add(runId)
-      await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.settle', runId, ...settleRecord(run) })
-      exportTrajectory($, trajectory, runId)
-      const failed = run.nodes.filter(node => node.state === 'failed')
-      const toasted = failureToasts.get(runId)
-      if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
-        $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
+      // An earlier process or the run's previous owner (attach adopts a settled run) already announced this settle; retry,
+      // the review-fix round, amend and automatic recovery reset the flag, so a settle after one still raises all of this.
+      if (!run.settledNotified) {
+        await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.settle', runId, ...settleRecord(run) })
+        exportTrajectory($, trajectory, runId)
+        const failed = run.nodes.filter(node => node.state === 'failed')
+        const toasted = failureToasts.get(runId)
+        if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
+          $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
+        }
+        // Not awaited: this runs in the serialized queue, and the terminal's answer must not hold up the next state change.
+        notifySettled($, run, await $.clock.now())
       }
-      // Not awaited: this runs in the serialized queue, and the terminal's answer must not hold up the next state change.
-      notifySettled($, run, await $.clock.now())
     }
     announce($, run)
     return run
