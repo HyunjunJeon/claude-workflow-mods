@@ -44,6 +44,7 @@ import {
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { killByName, killRefusal } from './engine/kill-guard.ts'
 import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandidates, owaspCweRows, parseSemgrepReport, SEMGREP_RULES_DIR, semgrepArgv, semgrepCandidates, semgrepNote, semgrepRefusal, semgrepTarget, semgrepVersion, type GuideRows, type SemgrepHit } from './engine/semgrep.ts'
 import { addUsage, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
@@ -4293,6 +4294,17 @@ export function register(on: On, options: PluginOptions) {
       debug($, `anti-slop scan skipped ${e.file_path}: ${message(error)}`)
       return reply
     }
+  })
+
+  // A Bash call that stops processes by name or pattern (engine/kill-guard.ts) is refused before it runs when a node worker
+  // makes it, or the main conversation while this session's run has not settled: then other nodes' servers and test runs
+  // are live on this machine. Outside a run the main conversation answers to the person, who sees the command.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (e.tool !== 'Bash') return next(e)
+    const form = killByName(e.command)
+    if (form === undefined) return next(e)
+    const guarded = e.agentId ? ownNodeOfAgent(e.agentId) !== undefined : ownsUnsettledRun()
+    return guarded ? { deny: killRefusal(form) } : next(e)
   })
 
   // The secure-coding Semgrep rules (engine/semgrep.ts) on what an Edit or Write adds, in the main conversation or a node

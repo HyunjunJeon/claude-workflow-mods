@@ -151,6 +151,32 @@ function reviewFixLines(run: Run): string[] {
     : `${round}; the reviewers then passed.`]
 }
 
+// A node that settles a choice its task left open writes "Ruling: <decision> - <why> - <cost if wrong>" in its ## Output
+// (node-prompt.ts). The excerpt above keeps 1,200 characters of each Output, so a ruling low in a long Output never reached
+// the person. superlite's finish step lists a run's rulings in its closing message for the same reason.
+const RULING = /^\s*(?:[-*]\s+)?(?:\*\*)?Ruling(?:\*\*)?\s*:(?:\*\*)?\s*(\S.*)$/i
+const RULINGS_SHOWN = 20
+const RULING_CHARS = 300
+
+function rulingLines(output: string): string[] {
+  return output.split('\n').flatMap(line => {
+    const text = RULING.exec(line)?.[1]?.trim()
+    if (!text) return []
+    return [text.length <= RULING_CHARS ? text : `${text.slice(0, RULING_CHARS)}…`]
+  })
+}
+
+function rulingBlock(run: Run): string[] {
+  const rulings = run.nodes.flatMap(node => rulingLines(node.output ?? '').map(text => `- ${node.id}: ${text}`))
+  if (rulings.length === 0) return []
+  const left = rulings.length - RULINGS_SHOWN
+  return [
+    'Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:',
+    ...rulings.slice(0, RULINGS_SHOWN),
+    ...(left > 0 ? [`(${left} more rulings are in the node reports.)`] : []),
+  ]
+}
+
 // Placed before the closing lines so "prove every claim first" stays the last word; these lines only say what to draw once it is
 // proven. Only a run started in a turn whose answer the user wants on a board gets them: the run record itself belongs to the pane.
 const BOARD_ANSWER_LINES = [
@@ -177,6 +203,7 @@ export function settleMessage(run: Run, toolName: string, asked: SettleAsks = ne
     'Node results (outputs as each node reported them):',
     ...nodes,
     ...(budget <= 0 ? ['(Some outputs were left out to keep this message short; read the full reports or the run snapshot.)'] : []),
+    ...rulingBlock(run),
     ...reviewFixLines(run),
     ...(answerOnBoard ? BOARD_ANSWER_LINES : []),
     '',

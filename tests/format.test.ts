@@ -106,3 +106,42 @@ test('the board lines come after the node results, whose approval hints stay', (
   expect(message).toContain('the user wants the answer on a board')
   expect(message.indexOf('the user wants the answer on a board')).toBeLessThan(message.indexOf('TREAT EVERY NODE COMPLETION CLAIM AS FALSE'))
 })
+
+// Node a's Output holds two rulings, one of them as a bold bullet; the excerpt of a would cut a long output at 1,200 characters.
+function ruled(answerA: string): Run {
+  const parsed = parseDefinition({ key: 'ruled', name: 'Ruled', nodes: [{ id: 'a', prompt: 'A' }, { id: 'b', prompt: 'B' }] })
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  let run = createRun(parsed.value, { runId: 'dag_ruled', sessionId: 's', now: 1 })
+  for (const id of ['a', 'b']) run = markRunning(run, id, `agent-${id}`, 2)
+  run = markFinished(run, 'a', { state: 'completed', answer: answerA }, 3)
+  return markFinished(run, 'b', { state: 'completed', answer: '## Output\nwrote b\nRuling: no cache - the spec names none - slower repeat runs\nDAG_NODE_STATUS: completed' }, 3)
+}
+
+const RULED_A = [
+  '## Output',
+  `wrote a\n${'filler line\n'.repeat(150)}`,
+  'Ruling: kept parse() as it is - two other nodes call it - a caller would break',
+  '- **Ruling:** UTF-8 only - the request names no encoding - Latin-1 files fail to load',
+  'Rulings are listed above.',
+  'DAG_NODE_STATUS: completed',
+].join('\n')
+
+test('the rulings of every node are listed after the node results, even when the excerpt cut them off', () => {
+  const lines = settleMessage(ruled(RULED_A), 'dag').split('\n')
+  const start = lines.indexOf('Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:')
+  expect(start > lines.findIndex(line => line.startsWith('- b:'))).toBe(true)
+  expect(lines.slice(start + 1, start + 4)).toEqual([
+    '- a: kept parse() as it is - two other nodes call it - a caller would break',
+    '- a: UTF-8 only - the request names no encoding - Latin-1 files fail to load',
+    '- b: no cache - the spec names none - slower repeat runs',
+  ])
+  expect(lines[start + 4]).toBe('')
+})
+
+test('a long list of rulings is capped and says how many were left out', () => {
+  const many = ['## Output', ...Array.from({ length: 25 }, (_, index) => `Ruling: choice ${index} - why - cost`)].join('\n')
+  const message = settleMessage(ruled(many), 'dag')
+  expect(message).toContain('- a: choice 19 - why - cost')
+  expect(message).not.toContain('- a: choice 20 - why - cost')
+  expect(message).toContain('(6 more rulings are in the node reports.)')
+})

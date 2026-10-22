@@ -84,10 +84,13 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
     FOREGROUND_RULE,
     'When you finish, end your final report with an "## Output" section for the nodes that depend on you:',
     'the files you created or changed, the key facts, values, findings or decisions you produced, in compact form.',
+    'For each choice the task left open that you settled yourself, add a line "Ruling: <decision> - <why> - <cost if wrong>"; the person sees these lines when the run settles.',
     'Then end with exactly one final line:',
     `${STATUS_PREFIX} completed`,
     'or, if you could not complete the task:',
     `${STATUS_PREFIX} failed: <one-line reason>`,
+    'When you end failed, put two more lines in ## Output for the next attempt, which sees nothing else of your work:',
+    '"Tried and failed: <each approach - how it failed - why>, newest first" and "Next: <the best next hypothesis and the files or lines to read first>".',
     ...(def.verify ? [`If a plugin-run check cannot pass even on a correct deliverable (it needs a program that is missing, or its pattern can never match), finish the task, show the deliverable is right another way, and end with ${STATUS_PREFIX} failed: ${CHECK_DEFECT} - <which check and why>. A retry cannot fix a check, so the main conversation amends it.`] : []),
   ].join('\n')
 }

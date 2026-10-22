@@ -167,3 +167,14 @@ Hypotheses:
 1. If <X> is the cause, changing <Y> will make the bug disappear or worse. (ranked, falsifiable; 3 to 5 in total)
 Root cause: <file and line, or "not yet determined">
 ```
+
+A node that ends failed, diagnosis or fix, also puts these two fields in its `## Output`.
+The plugin hands them to the next attempt, which sees nothing else of your work:
+
+```
+Tried and failed: <hypothesis or change - how it failed - why>, newest first
+Next: <the hypothesis ranked next, and the files or lines to read first>
+```
+
+When this attempt is the third and each fix failed in a different place, say so in `Next:`.
+Three fixes that fail in different places point at the design, not at one line.

@@ -9,7 +9,7 @@ when_to_use: A DAG node writes or changes code and has to prove the change with 
 A node that changes code also owns its proof.
 This skill covers useful tests, test boundaries, anti-patterns, test loops and mocking.
 No one can answer questions during a node, and nothing waits for a reply.
-Make those choices yourself and record them in `## Output`.
+Make those choices yourself and record each in `## Output` as `Ruling: <decision> - <why> - <cost if wrong>`.
 
 Follow the repository's test runner, file layout, naming and assertion style.
 The examples use bare `test` and `expect` as placeholders for that runner. Do not copy an import from here.
@@ -46,7 +46,7 @@ A test boundary (seam) is a public interface where behavior is observable withou
 Test at these boundaries, never against internals.
 
 Choose test boundaries from the prompt's public interface: exported function, CLI command, HTTP route, tool schema or configuration format.
-Focus on critical paths and complex logic; you cannot test every edge case.
+Focus on critical paths and complex logic; you cannot test every edge case, so the risk categories below choose which ones count.
 Choose the boundary before writing its tests. Do not test at an undecided boundary.
 
 List test boundaries in `## Output`, one line per boundary.
@@ -55,6 +55,35 @@ Example: `checkout(cart, payment) - catches wrong status and total handling; mis
 
 If the prompt and referenced code reveal no public interface, do not guess or test internals instead.
 End with `DAG_NODE_STATUS: failed: clarification: <which interface should be tested>` so the orchestrator can answer.
+
+### Which edge cases: risk categories
+
+Pick the edge cases by the kind of boundary, not by what comes to mind.
+For each boundary, find its row and write at least one named test per category, with an exact input and an exact expected result.
+A category that cannot occur at that boundary is skipped; say why in `## Output`.
+
+| Boundary kind | Categories |
+| --- | --- |
+| library, parser, evaluator | deep, numeric, encoding, state |
+| CLI command | protocol, encoding, state, file |
+| HTTP route | protocol, encoding, numeric, state |
+| web UI | protocol (through its API), encoding (rendering, XSS) |
+| file reader or generator | file, encoding, deep |
+| data pipeline | numeric, encoding, state, deep |
+| concurrent code | state (races, partial writes), protocol |
+| auth | protocol, state |
+
+- **deep**: nesting, recursion depth, very large input.
+- **numeric**: zero, negative, limits, overflow, precision, off-by-one ranges.
+- **encoding**: non-ASCII text, escaping, line endings, a value that breaks out of its format.
+- **state**: repeated calls, call order, a failure halfway through, stale data.
+- **protocol**: an unknown command, method or flag, a missing or extra argument, the error status or exit code.
+- **file**: a missing or unreadable file, an existing output, paths with spaces or `..`.
+
+Add the risks the domain itself implies: circular references in a spreadsheet, path traversal in a site generator's slugs.
+Skip the examples the prompt or spec already gives; the main tests cover them.
+Auth also needs a security review; that is the run's `review.security` axis, not this table.
+In `## Output`, add the categories each boundary covers to its boundary line.
 
 ## Anti-patterns
 
@@ -78,6 +107,11 @@ When changing existing tests or check policy, record the affected behavior or co
 **One slice at a time.** For behavior changes, use one boundary, one test and one minimal implementation per cycle.
 Then run the suite for that area.
 Keep behavior-preserving cleanup separate from red-to-green work and within the node's scope.
+
+**Never hide a test run.** Run tests in the foreground and read their summary line.
+Do not wait on a test inside a loop (`until npm test; do sleep 5; done`), and do not throw its output away (`npm test > /dev/null`).
+A hung test then looks like a slow one, and your turn or the 30-second verify limit runs out with no failure to read.
+A test that hangs is a failing test: find the loop or the wait in the code under test.
 
 ## Mocking
 
