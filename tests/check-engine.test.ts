@@ -81,6 +81,21 @@ test('equals compares the whole text after trailing whitespace is removed', () =
   expect(textProblem(' ok', { equals: 'ok' }, 'stdout')).toContain('equals')
 })
 
+// On 2026-10-22 a headless probe declared equals "A\n" for a file holding exactly A and a newline. The text side was trimmed
+// and the expected side was not, so the check could never hold; the node failed and the main model rewrote the check.
+test('trailing whitespace of the expected lastLine or equals is ignored as the text\'s is', () => {
+  expect(textProblem('A\n', { equals: 'A\n' }, 'a.txt')).toBeUndefined()
+  expect(textProblem('A', { equals: 'A\r\n' }, 'a.txt')).toBeUndefined()
+  expect(textProblem('', { equals: ' \n' }, 'stderr')).toBeUndefined()
+  expect(textProblem('a\nPASS\n', { lastLine: 'PASS\n' }, 'notes.md')).toBeUndefined()
+  expect(textProblem('a\nPASS', { lastLine: 'PASS  ' }, 'notes.md')).toBeUndefined()
+  // Only the end is trimmed: a leading or inner difference still fails, as does a different value.
+  expect(textProblem('A\n', { equals: ' A\n' }, 'a.txt')).toContain('equals')
+  expect(textProblem('A B\n', { equals: 'A  B\n' }, 'a.txt')).toContain('equals')
+  expect(textProblem('B\n', { equals: 'A\n' }, 'a.txt')).toContain('equals')
+  expect(textProblem('FAIL\n', { lastLine: 'PASS\n' }, 'notes.md')).toContain('lastLine')
+})
+
 test('with several fields the failing one is named even when the others hold', () => {
   const problem = textProblem(report, { contains: 'parse', absent: 'lint', lastLine: 'PASS 2 of 2' }, 'stdout')
   expect(problem).toContain('absent')

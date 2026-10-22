@@ -40,13 +40,14 @@ export function textProblem(text: string, expect: TextExpect, label: string): st
     }
     if (!pattern.test(text)) return `${label}: matches /${expect.matches.slice(0, QUOTE_LIMIT)}/m found no match`
   }
-  // Trailing whitespace (spaces, tabs, CR and LF) is not part of the text a check compares.
+  // Trailing whitespace (spaces, tabs, CR and LF) is not part of the text a check compares, on either side: an expected "A\n"
+  // against the trimmed text could never hold (a 2026-10-22 headless probe failed a correct node that way).
   const trimmed = text.trimEnd()
   if (expect.lastLine !== undefined) {
     const last = trimmed.slice(trimmed.lastIndexOf('\n') + 1)
-    if (last !== expect.lastLine) return `${label}: lastLine expected ${quote(expect.lastLine)}, got ${quote(last)}`
+    if (last !== expect.lastLine.trimEnd()) return `${label}: lastLine expected ${quote(expect.lastLine)}, got ${quote(last)}`
   }
-  if (expect.equals !== undefined && trimmed !== expect.equals) {
+  if (expect.equals !== undefined && trimmed !== expect.equals.trimEnd()) {
     return `${label}: equals expected ${quote(expect.equals)}, got ${quote(trimmed)}`
   }
   return undefined

@@ -20,6 +20,7 @@ export type TextField = (typeof TEXT_FIELDS)[number]
 // What a text must satisfy; every given field must hold. contains: the text includes it. absent: it does not.
 // matches: RegExp source compiled with the m flag, kept as a string so the definition hashes and persists it.
 // lastLine: the last line after trailing whitespace is removed equals it. equals: the whole text after trailing whitespace is removed equals it.
+// Both ignore the expected value's own trailing whitespace too.
 export type TextExpect = { [Field in TextField]?: string }
 
 // path is project-relative, or absolute for a read-only check outside the project (never inside .claude/dag).

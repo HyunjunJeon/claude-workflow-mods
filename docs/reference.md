@@ -314,7 +314,7 @@ TypeSafe 모델은 `jev-latest`를 사용합니다. 기본 확신도 `0.9`(세�
 | `lastLine` | 끝의 공백을 지운 텍스트의 마지막 줄이 이 문자열과 같음 |
 | `equals` | 끝의 공백을 지운 전체 텍스트가 이 문자열과 같음 |
 
-`lastLine`과 `equals`는 텍스트 끝의 공백과 줄바꿈만 지우고 앞쪽 공백은 그대로 비교합니다. `contains`, `absent`, `matches`는 텍스트를 그대로 봅니다.
+`lastLine`과 `equals`는 텍스트 끝의 공백과 줄바꿈만 지우고 앞쪽 공백은 그대로 비교합니다. 기대값 끝의 공백과 줄바꿈도 똑같이 지우므로 `equals: "A\n"`은 `equals: "A"`와 같습니다. `contains`, `absent`, `matches`는 텍스트를 그대로 봅니다.
 
 **파일 검사의 경로**
 
