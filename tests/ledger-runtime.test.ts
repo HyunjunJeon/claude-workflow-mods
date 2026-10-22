@@ -1,6 +1,6 @@
 import { expect, test, type Engine, type Plugin } from 'claude-code/testing'
 import { defaultNotesFolder } from '../hooks/engine/stages.ts'
-import { boot, checkpoint, finish, harness, ROOT, start } from './control-harness.ts'
+import { boot, checkpoint, finish, folder, harness, ROOT, start } from './control-harness.ts'
 
 // The review ledger (review_ledger) in a run: the review-fix round copies the producers' files before the fix, keeps the
 // findings it sent, and the rerun review-spec and review-standards get both with the fix's diff.
@@ -77,6 +77,7 @@ test('a run started in a worktree copies and diffs the worktree\'s files, while 
   const h = harness(on)
   const worktree = '/work/.claude/worktrees/x'
   h.control.root = worktree
+  folder(h, worktree, { '.git': 'gitdir: /work/.git/worktrees/x' })
   h.control.git.set(LS_README, 'README.md\0')
   const runId = await failSpecReview($, h, 'greet-worktree-ledger', ['README.md'], worktree)
   // The copy lives in the store; git runs in the worktree, so the before side is named by its absolute path.

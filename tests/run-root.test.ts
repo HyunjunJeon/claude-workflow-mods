@@ -1,11 +1,13 @@
 import { expect, test } from 'claude-code/testing'
-import { boot, checkpoint, finish, harness, ROOT, start } from './control-harness.ts'
+import { boot, checkpoint, finish, folder, harness, ROOT, start } from './control-harness.ts'
 import type { VerificationCheck } from '../hooks/engine/types.ts'
 
 // A run keeps the folder the session worked in when it started ($.session.root(), a git worktree after EnterWorktree): its
 // nodes spawn there and its checks run there, while its record stays in the store of the folder the session started in.
 
 const WORKTREE = '/work/.claude/worktrees/x'
+// A worktree folder holds a .git file; the harness answers fs.exists for a path only when a file or lock is at or under it.
+const WORKTREE_FILES = { '.git': 'gitdir: /work/.git/worktrees/x' }
 const CHECKS: VerificationCheck[] = [
   { kind: 'command', argv: ['check-control'] },
   { kind: 'file', path: 'out.md', contains: 'done' },
@@ -15,6 +17,7 @@ const RUN = { key: 'root', name: 'Root', nodes: [{ id: 'a', prompt: 'TASK: Write
 test('a run started in a worktree spawns its node there and runs its checks there, and its record stays in the session store', async ($, on) => {
   const h = harness(on)
   h.control.root = WORKTREE
+  folder(h, WORKTREE, WORKTREE_FILES)
   await boot($)
   const runId = await start($, RUN)
   expect(checkpoint(h, runId).root).toBe(WORKTREE)
@@ -52,6 +55,7 @@ test('the same definition started again in a worktree is a new run there, not th
   await boot($)
   const first = await start($, RUN)
   h.control.root = WORKTREE
+  folder(h, WORKTREE, WORKTREE_FILES)
   const second = await start($, RUN)
   expect(second).not.toBe(first)
   expect(checkpoint(h, second).root).toBe(WORKTREE)
@@ -68,6 +72,7 @@ test('a worktree worker\'s permission question names the worktree as the project
   })
   const h = harness(on)
   h.control.root = WORKTREE
+  folder(h, WORKTREE, WORKTREE_FILES)
   await boot($)
   await start($, RUN)
   await $.tool.call({ tool: 'Write', file_path: `${WORKTREE}/out.md`, content: 'done', agentId: 'agent-1', tool_use_id: 'write-1' } as never)
@@ -86,9 +91,61 @@ test('a root spelled with a trailing slash is the session\'s own folder, not a w
 test('the writes a worktree run shares with other sessions name the worktree, so another tree\'s run with the same paths does not overlap', async ($, on) => {
   const h = harness(on)
   h.control.root = WORKTREE
+  folder(h, WORKTREE, WORKTREE_FILES)
   await boot($)
   await start($, RUN)
   const own = [...h.store.values()].find((value): value is { sessionId: string; writes: string[] } =>
     typeof value === 'object' && value !== null && 'sessionId' in value && value.sessionId === 'source' && 'writes' in value)
   expect(own?.writes).toEqual([`${WORKTREE}/out.md`])
+})
+
+// The worktree a run started in can be removed while the run is active (git worktree remove, or ExitWorktree remove). Its next
+// node then stops with one error that says what to do, instead of the process errors a missing cwd gives, and no automatic
+// recovery follows: a retry cannot start anywhere until the worktree is back.
+const GONE = `The run's folder no longer exists: ${WORKTREE}. Its git worktree was removed while the run was active. Recreate the worktree at that path (git worktree add) and retry the node, or cancel the run.`
+
+function removeFolder(h: ReturnType<typeof harness>, path: string): void {
+  for (const file of h.files.keys()) if (file.startsWith(`${path}/`)) h.files.delete(file)
+  for (const lock of h.locks) if (lock === path || lock.startsWith(`${path}/`)) h.locks.delete(lock)
+}
+
+test('a node whose run\'s worktree was removed before it starts fails with the folder error, spawns no agent and asks for no recovery', async ($, on) => {
+  // The worktree goes while node a's check runs, the window in which a removal reaches a run with a node still to start.
+  on('process.run', { argv: 'remove-worktree' }, () => {
+    removeFolder(h, WORKTREE)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const h = harness(on)
+  h.control.root = WORKTREE
+  folder(h, WORKTREE, WORKTREE_FILES)
+  await boot($)
+  const runId = await start($, { key: 'gone', name: 'Gone', nodes: [
+    { id: 'a', prompt: 'TASK: Do a. STOP WHEN: done.', verify: [{ kind: 'command', argv: ['remove-worktree'] }] },
+    { id: 'b', prompt: 'TASK: Do b. STOP WHEN: done.', dependsOn: ['a'], verify: [{ kind: 'command', argv: ['check-control'] }] },
+  ] })
+  await finish($, h)
+  const run = checkpoint(h, runId)
+  expect(run.nodes.map(node => node.state)).toEqual(['completed', 'failed'])
+  expect(run.nodes[1]?.error).toBe(GONE)
+  expect(h.spawns).toHaveLength(1)
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toEqual([])
+})
+
+test('a node whose run\'s worktree was removed before its checks fails with the folder error as its verification error, and no check runs', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  folder(h, WORKTREE, WORKTREE_FILES)
+  await boot($)
+  const runId = await start($, RUN)
+  expect(h.spawns).toHaveLength(1)
+  // The node did its work, then the worktree was removed before the plugin ran its checks.
+  h.files.set(`${WORKTREE}/out.md`, 'done')
+  removeFolder(h, WORKTREE)
+  await finish($, h)
+  const node = checkpoint(h, runId).nodes[0]
+  expect(node?.state).toBe('failed')
+  expect(node?.verification).toMatchObject({ status: 'failed', evidence: [], error: GONE })
+  expect(node?.error).toBe(GONE)
+  expect(h.processes.filter(run => run.argv[0] === 'check-control')).toEqual([])
+  expect(h.requests.filter(request => 'recovery' in request.questions)).toEqual([])
 })

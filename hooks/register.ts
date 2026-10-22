@@ -866,6 +866,17 @@ function rootOf(run: Run): string {
   return run.root ?? projectRoot
 }
 
+// A run's worktree removed while the run was active (git worktree remove, ExitWorktree remove). Every spawn would get a
+// missing cwd and every check would reject with ENOENT, so a node stops with this one error instead, and attemptRecovery
+// skips it by the start: no retry can run anywhere until the worktree is back.
+const RUN_FOLDER_GONE = "The run's folder no longer exists: "
+
+async function missingRootError($: EngineInterface, run: Run): Promise<string | undefined> {
+  // A run without a root works in projectRoot, the folder the session started in, which stays.
+  if (run.root === undefined || await $.fs.exists(run.root)) return undefined
+  return `${RUN_FOLDER_GONE}${run.root}. Its git worktree was removed while the run was active. Recreate the worktree at that path (git worktree add) and retry the node, or cancel the run.`
+}
+
 // The folder the session works in now. $.session.root() follows /cd and EnterWorktree, while projectRoot stays where the
 // session started and holds its run store.
 async function workingRoot($: EngineInterface): Promise<string> {
@@ -997,6 +1008,8 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   if (def.agent === 'fork') {
     return failToStart(run, id, 'Fork agents cannot enforce the Sonnet worker minimum; amend the node to use a non-fork agent type.', await $.clock.now())
   }
+  const gone = await missingRootError($, run)
+  if (gone) return failToStart(run, id, gone, await $.clock.now())
   const stale = await clearStaleNotes($, run, def)
   if (stale) return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${stale}`, await $.clock.now()), id)
   const target = spawnTarget({ ...def, category: node.routing?.category ?? def.category })
@@ -1491,6 +1504,11 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
     debug($, `no automatic recovery for ${run.runId}/${node.id}: ${CHECK_DEFECT}`)
     return run
   }
+  // The same holds while the run's worktree is gone: a retry would stop at the same error (missingRootError).
+  if (node.error?.startsWith(RUN_FOLDER_GONE)) {
+    debug($, `no automatic recovery for ${run.runId}/${node.id}: the run's folder is gone`)
+    return run
+  }
   // A FAIL verdict repeats on a retry: the work it judged has to change first (see verdictFailure).
   if (verdictFailure(run, node.id)) {
     debug($, `no automatic recovery for ${run.runId}/${node.id}: FAIL verdict`)
@@ -1640,6 +1658,9 @@ async function commandCheckResult($: EngineInterface, check: CommandCheck, root:
 async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<NonNullable<NodeRun['verification']>> {
   const checks = run.definition.nodes.find(def => def.id === node.id)?.verify
   if (!checks?.length) return { status: 'missing', evidence: [], error: 'No verification contract was declared; amend this node with verify checks.' }
+  // Checks run in the run's folder: without it they would fail on the missing cwd, each with its own process error.
+  const gone = await missingRootError($, run)
+  if (gone) return { status: 'failed', evidence: [], error: gone }
   const evidence: VerificationEvidence[] = []
   for (const check of checks) {
     let outcome: VerificationOutcome = 'unknown'
