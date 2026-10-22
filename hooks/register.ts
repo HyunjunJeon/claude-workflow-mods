@@ -1315,7 +1315,8 @@ function rootOf(run: Run): string {
 // session started and holds its run store.
 async function workingRoot($: EngineInterface): Promise<string> {
   try {
-    return (await $.session.root()) || projectRoot
+    // Spelled as projectRoot is, without a trailing slash, so the same folder never reads as a worktree.
+    return (await $.session.root()).replace(/\/+$/, '') || projectRoot
   } catch (error) {
     // A host or a test harness without the call: every run works in the session's own folder, as before runs had a root.
     debug($, `session.root unavailable: ${message(error)}`)
@@ -1480,8 +1481,9 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
       description: `${run.name}: ${def.task_summary ?? def.label ?? def.id}`.slice(0, 80),
       subagentType: target.subagentType,
       model,
-      // Without a cwd the worker runs where the session is now, which is not the run's folder once the session moved.
-      ...(run.root ? { cwd: run.root } : {}),
+      // Without a cwd the worker runs where the session is now, which is not the run's folder once the session moved, also
+      // for a run that started in the session's own folder.
+      cwd: rootOf(run),
     })
   } catch (error) {
     spawned = { deny: message(error) }
@@ -1976,7 +1978,9 @@ async function fixDiff($: EngineInterface, runId: string, round: number, root: s
       // on a missing path prints only an error.
       const sides = [copied.has(path) ? `${copies}/${path}` : '/dev/null', (await $.fs.exists(`${root}/${path}`)) ? path : '/dev/null']
       // git diff --no-index exits 0 when the two sides are equal and 1 when it printed a difference.
-      const diff = await $.process.run(['git', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: root, timeoutMs: GIT_READ_TIMEOUT_MS })
+      // quotePath off, as in every other git read here: an absolute copy path with non-ASCII letters would come back quoted
+      // and escaped, and fixDiffText could not strip it.
+      const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: root, timeoutMs: GIT_READ_TIMEOUT_MS })
       if (diff.exitCode === 1) parts.push(diff.stdout)
       else if (diff.exitCode !== 0) debug($, `review ledger: git diff of ${path} exited ${diff.exitCode}: ${diff.stderr.trim()}`)
     } catch (error) {
@@ -2321,10 +2325,12 @@ function planningWarning(): string[] {
 
 // The checks start runs before it creates anything, in start's order: parse, then the key, then verification. A key that already
 // holds this same definition comes back as `existing` and skips verification, as start's `reused` reply does. Start and a dry run share this.
-function screenDefinition(input: unknown): Result<{ definition: Definition; existing: Run | undefined }> {
+// root is the folder the run would work in: only a run of that folder is reused, so the same definition started again in a
+// worktree runs there instead of returning the run of the session's own folder.
+function screenDefinition(input: unknown, root: string): Result<{ definition: Definition; existing: Run | undefined }> {
   const parsed = parseDefinition(input)
   if (!parsed.ok) return parsed
-  const reusable = findReusable([...runs.values()], parsed.value)
+  const reusable = findReusable([...runs.values()].filter(run => rootOf(run) === root), parsed.value)
   if (!reusable.ok) return reusable
   if (reusable.value) return { ok: true, value: { definition: parsed.value, existing: reusable.value } }
   const problem = verificationProblem(parsed.value)
@@ -2358,9 +2364,10 @@ async function missingProgramProblem($: EngineInterface, definition: Definition,
 
 // A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
 async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
-  const screened = screenDefinition(input)
+  const root = await workingRoot($)
+  const screened = screenDefinition(input, root)
   if (!screened.ok) return screened
-  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition, await workingRoot($))
+  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition, root)
   if (missing) return { ok: false, error: missing }
   return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
 }
@@ -2374,7 +2381,10 @@ function effectiveApproval(): StartApproval {
 // `approveHeld` is set when that person typed it in the composer: /dag run of the definition one of their runs holds for
 // approval is then their answer to it, and approves it the way /dag approve does. Every other reuse returns the run as is.
 async function startDefinition($: EngineInterface, input: unknown, by: 'model' | 'user', approveHeld = false): Promise<ToolReply> {
-  const screened = screenDefinition(input)
+  // The run keeps the folder the session works in now, so a run started in a worktree runs there to the end, even if the
+  // session moves on.
+  const root = await workingRoot($)
+  const screened = screenDefinition(input, root)
   if (!screened.ok) return err(screened.error)
   const { definition, existing } = screened.value
   if (existing?.rejected && by === 'model') return err(rejectedByUser(existing))
@@ -2383,9 +2393,6 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
     return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
   }
   if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
-  // The run keeps the folder the session works in now, so a run started in a worktree runs there to the end, even if the
-  // session moves on.
-  const root = await workingRoot($)
   const missing = await missingProgramProblem($, definition, root)
   if (missing) return err(missing)
   const now = await $.clock.now()
@@ -4115,7 +4122,8 @@ export function register(on: On, options: PluginOptions) {
     const node = owner?.run.nodes.find(current => current.id === owner.nodeId)
     const context: JevContext = {
       request: userRequest,
-      projectRoot,
+      // A worker of a run in a worktree works there; from the session's own folder its files would all sit under .claude/.
+      projectRoot: owner ? rootOf(owner.run) : projectRoot,
       ...(owner ? { goal: owner.run.definition.goal ?? owner.run.name } : {}),
       ...(def ? { task: node?.promptOverride ?? def.prompt } : {}),
     }

@@ -20,7 +20,7 @@ const NO_INDEX_EXIT: Plugin = {
   name: 'ledger-no-index-exit',
   register(on) {
     on('process.run', async ($, e, next) => {
-      if (e.argv[0] !== 'git' || e.argv[2] !== '--no-index') return next(e)
+      if (e.argv[0] !== 'git' || !e.argv.includes('--no-index')) return next(e)
       const done = await next(e)
       const stdout = done.value?.stdout ?? ''
       return { value: { exitCode: stdout === '' ? done.value?.exitCode ?? 128 : 1, stdout, stderr: done.value?.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -83,7 +83,7 @@ test('a run started in a worktree copies and diffs the worktree\'s files, while 
   const before = `/work/.claude/dag/runs/${runId}/review-fix-1/before`
   expect(h.files.get(`${before}/README.md`)).toBe(BEFORE_FIX)
   expect(h.processes.filter(run => run.argv.includes('ls-files')).map(run => run.init?.cwd)).toEqual([worktree])
-  h.control.git.set(`diff --no-index --no-color -- ${before}/README.md README.md`, [
+  h.control.git.set(`-c core.quotePath=false diff --no-index --no-color -- ${before}/README.md README.md`, [
     `diff --git a${before}/README.md b/README.md`,
     `--- a${before}/README.md`,
     '+++ b/README.md',
@@ -101,7 +101,7 @@ test('with the ledger on by default, the round copies the producer\'s files befo
   h.control.git.set(LS_README, 'README.md\0')
   const runId = await failSpecReview($, h, 'greet-ledger')
   const before = `.claude/dag/runs/${runId}/review-fix-1/before`
-  h.control.git.set(`diff --no-index --no-color -- ${before}/README.md README.md`, [
+  h.control.git.set(`-c core.quotePath=false diff --no-index --no-color -- ${before}/README.md README.md`, [
     `diff --git a/${before}/README.md b/README.md`,
     `--- a/${before}/README.md`,
     '+++ b/README.md',
@@ -164,9 +164,9 @@ test('a tracked file the producer already deleted is left out of the copy, and t
   const runId = await failSpecReview($, h, 'greet-ledger-gone', ['README.md', 'docs'])
   expect(JSON.parse(h.files.get(`${ROOT}/runs/${runId}/review-fix-1/before.json`) ?? 'null')).toEqual({ scopes: ['README.md', 'docs'], files: ['README.md'] })
   const before = `.claude/dag/runs/${runId}/review-fix-1/before`
-  h.control.git.set(`diff --no-index --no-color -- ${before}/README.md README.md`, `diff --git a/${before}/README.md b/README.md\n--- a/${before}/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-Call greet(name) to say hello.\n+Call greet(name); it returns the greeting string.\n`)
+  h.control.git.set(`-c core.quotePath=false diff --no-index --no-color -- ${before}/README.md README.md`, `diff --git a/${before}/README.md b/README.md\n--- a/${before}/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-Call greet(name) to say hello.\n+Call greet(name); it returns the greeting string.\n`)
   // Missing on both sides: real git prints nothing and exits 0.
-  h.control.git.set('diff --no-index --no-color -- /dev/null /dev/null', '')
+  h.control.git.set('-c core.quotePath=false diff --no-index --no-color -- /dev/null /dev/null', '')
 
   await fixDocs($, h)
   expect(promptOf(h, 'review-spec')).toContain('<fix-diff>\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-Call greet(name) to say hello.\n+Call greet(name); it returns the greeting string.\n</fix-diff>')
@@ -185,8 +185,8 @@ test('a file the fix deletes or adds reaches the rerun reviewers\' diff with /de
   h.files.delete('/work/docs/old.md')
   h.files.set('/work/docs/greet.md', 'greet page\n')
   h.control.git.set(LS_DOCS, 'docs/old.md\0docs/greet.md\0')
-  h.control.git.set(`diff --no-index --no-color -- ${before}/docs/old.md /dev/null`, `diff --git a/${before}/docs/old.md b/${before}/docs/old.md\ndeleted file mode 100644\n--- a/${before}/docs/old.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-old page\n`)
-  h.control.git.set('diff --no-index --no-color -- /dev/null docs/greet.md', 'diff --git a/docs/greet.md b/docs/greet.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/greet.md\n@@ -0,0 +1 @@\n+greet page\n')
+  h.control.git.set(`-c core.quotePath=false diff --no-index --no-color -- ${before}/docs/old.md /dev/null`, `diff --git a/${before}/docs/old.md b/${before}/docs/old.md\ndeleted file mode 100644\n--- a/${before}/docs/old.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-old page\n`)
+  h.control.git.set('-c core.quotePath=false diff --no-index --no-color -- /dev/null docs/greet.md', 'diff --git a/docs/greet.md b/docs/greet.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/greet.md\n@@ -0,0 +1 @@\n+greet page\n')
 
   await fixDocs($, h)
   expect(promptOf(h, 'review-spec')).toContain([
@@ -221,7 +221,7 @@ test('a file the host cannot read is left out of the copy alone, and the rerun r
   expect(h.files.has(`${folder}/before/docs/blob.bin`)).toBe(false)
   expect(h.logs.some(log => log.includes('docs/blob.bin') && log.includes('EINVAL'))).toBe(true)
   const before = `.claude/dag/runs/${runId}/review-fix-1/before`
-  h.control.git.set(`diff --no-index --no-color -- ${before}/README.md README.md`, `diff --git a/${before}/README.md b/README.md\n--- a/${before}/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-Call greet(name) to say hello.\n+Call greet(name); it returns the greeting string.\n`)
+  h.control.git.set(`-c core.quotePath=false diff --no-index --no-color -- ${before}/README.md README.md`, `diff --git a/${before}/README.md b/README.md\n--- a/${before}/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-Call greet(name) to say hello.\n+Call greet(name); it returns the greeting string.\n`)
 
   await fixDocs($, h)
   const prompt = promptOf(h, 'review-spec')
