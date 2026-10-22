@@ -1,5 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { hash } from '../engine/hash.ts'
+import type { parseOutcome } from '../engine/node-prompt.ts'
+import type { NodeDef, NodeRun, Run } from '../engine/types.ts'
 import { finalReport, type TranscriptRow } from '../ui/activity.ts'
 
 // The host helpers that register.ts and the host/ modules call with $, and the constants and types they share. validate
@@ -18,6 +20,20 @@ export const GIT_READ_TIMEOUT_MS = 10_000
 export type ToolInput = Readonly<Record<string, unknown>>
 
 export type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
+
+// A node agent's end as register.ts claims it (claimCompletion) and what processing it produced, which trajectory.ts records
+// (recordNodeEnd) before register.ts applies it (applyCompletion).
+export type CompletionClaim = {
+  readonly run: Run
+  readonly node: NodeRun
+  readonly report: string | undefined
+}
+export type CompletionResult = {
+  readonly outcome: ReturnType<typeof parseOutcome>
+  readonly verification?: NodeRun['verification']
+  // The verifier nodes a security lens's candidates expand into, built once the lens passed verification.
+  readonly expansion?: NodeDef[]
+}
 
 export function debug($: EngineInterface, text: string): void {
   $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
@@ -42,6 +58,24 @@ export async function removePath($: EngineInterface, flag: '-f' | '-rf', path: s
     debug($, `could not ${purpose} ${path}: ${message(error)}`)
   }
   return false
+}
+
+// A file the plugin reads for the anti-slop scan; a file that does not exist yet reads as empty.
+export async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return ''
+  }
+}
+
+export async function listIfPresent($: EngineInterface, dir: string): Promise<Awaited<ReturnType<EngineInterface['fs']['list']>>> {
+  try {
+    return (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
+  } catch (error) {
+    debug($, `could not list ${dir} for retention: ${message(error)}`)
+    return []
+  }
 }
 
 // $.fs.write is not atomic and the host has no rename, so a process exit during a direct write leaves a truncated file.

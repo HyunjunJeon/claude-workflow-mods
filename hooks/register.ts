@@ -42,11 +42,11 @@ import {
   advance,
   expandNodes,
 } from './engine/run.ts'
-import { retentionPlan, trajectoryOwner, trajectoryPlan, type RetentionFile, type TrajectoryEntry } from './engine/retention.ts'
+import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { killByName, killRefusal } from './engine/kill-guard.ts'
 import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandidates, owaspCweRows, parseSemgrepReport, SEMGREP_RULES_DIR, semgrepArgv, semgrepCandidates, semgrepNote, semgrepRefusal, semgrepTarget, semgrepVersion, type GuideRows, type SemgrepHit } from './engine/semgrep.ts'
-import { addUsage, cut, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
+import { addUsage, cut, settleRecord } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { archiveUnusedSkills, eligibleSkills, emptyLearningSession, learningCatalog, recordSkillOpportunity } from './engine/learning.ts'
@@ -66,9 +66,10 @@ import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
 import { adjacentBoardId, buildBoardView } from './ui/board-model.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
 import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
-import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GIT_READ_TIMEOUT_MS, message, recoverReport, removePath, SAFE_RUN_DIR, type AgentEnd, type ToolInput } from './host/io.ts'
+import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GIT_READ_TIMEOUT_MS, listIfPresent, message, readOrEmpty, recoverReport, removePath, SAFE_RUN_DIR, type AgentEnd, type CompletionClaim, type CompletionResult, type ToolInput } from './host/io.ts'
 import { collectLearning, createLearning, finishLearning, initializeLearning, observeLearnedSkill, pruneLearningData, readLearningLibrary, saveLearningSession, startLearning, updateLearningLibrary } from './host/learning.ts'
 import { BOARDS_SUBDIR, CHIP_PAINT, chipContexts, citeBlock, createBoards, handleBoardTool, inheritBoards, latestBoardTitle, loadBoards, type BoardCalls } from './host/boards.ts'
+import { createTrajectory, exportTrajectory, pruneTrajectories, record, recordMainTurn, recordNodeEnd, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
@@ -213,17 +214,15 @@ let guideRowsRead: Promise<GuideRows> | undefined
 const changeScans = new Map<string, Promise<Result<SemgrepHit[]>>>()
 // The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
 let repositoryAllows: ReadonlySet<string> | undefined
-// The trajectory log (trajectory.ts): its own write queue, so no run step waits on it, a counter that orders events of the same
-// millisecond, where the main conversation's log stopped, and each node agent's token counts until its node ends.
-let trajectoryLog = false
-// Startup removes trajectories (pruneTrajectories) older than this many days, then the oldest while the folder holds more than
-// this many megabytes; 0 turns each off.
-let trajectoryRetentionDays = 90
-let trajectoryMaxMb = 1024
-let trajectoryWrites: Promise<unknown> = Promise.resolve()
-let trajectorySeq = 0
-let mainRows: RowMark | undefined
-const agentUsage = new Map<string, Usage>()
+// The trajectory log's state (host/trajectory.ts): its switch and retention limits, its write queue, where the main
+// conversation's log stopped, and each node agent's token counts. Created once per module load, as its old module variables
+// were; the getters hand it this file's session id, project root and runs at the moment it reads them.
+const trajectory = createTrajectory({
+  sessionId: () => sessionId,
+  projectRoot: () => projectRoot,
+  runs: () => runs.values(),
+  rootOf,
+})
 // The review ledger (ledger.ts): the review-fix round keeps the findings it sends and the producers' files before the fix, and
 // the rerun review-spec and review-standards get both.
 let reviewLedger = true
@@ -747,15 +746,6 @@ function contextWanted(): boolean {
   return contextOnDisk || workflowContext.notes.length > 0 || [...runs.values()].some(run => run.sessionId === sessionId)
 }
 
-// A file the plugin reads for the anti-slop scan; a file that does not exist yet reads as empty.
-async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
-  try {
-    return await $.fs.read(path)
-  } catch {
-    return ''
-  }
-}
-
 // Semgrep is optional. The first scan of a session asks for its version once; without one every scan stays off.
 async function semgrepReady($: EngineInterface): Promise<boolean> {
   if (!secureScan) return false
@@ -979,15 +969,6 @@ async function editRoot($: EngineInterface, agentId: string | undefined): Promis
   return owner ? rootOf(owner.run) : workingRoot($)
 }
 
-async function listIfPresent($: EngineInterface, dir: string): Promise<Awaited<ReturnType<EngineInterface['fs']['list']>>> {
-  try {
-    return (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
-  } catch (error) {
-    debug($, `could not list ${dir} for retention: ${message(error)}`)
-    return []
-  }
-}
-
 async function pruneArtifacts($: EngineInterface): Promise<void> {
   if (!(retentionDays > 0)) return
   const contextDir = `${projectRoot}/${DAG_SUBDIR}/context`
@@ -1040,63 +1021,6 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
       debug($, `could not prune session record ${id}: ${message(error)}`)
     }
   }
-}
-
-// A trajectory folder holds one file per event, so a long run's can hold thousands. One with more than this many is left alone
-// rather than read, and so is never removed.
-const TRAJECTORY_FOLDER_FILES = 2000
-
-// The entries under the trajectories folder: each run or session folder together with its joined <run_id>.jsonl, sized by the
-// files the host lists and dated by the newest of them. A folder that cannot be listed or holds too many files is left out
-// whole, joined file included, so it can never be taken for an empty and old one.
-async function trajectoryEntries($: EngineInterface, dir: string): Promise<TrajectoryEntry[]> {
-  const found = new Map<string, TrajectoryEntry>()
-  const skipped = new Set<string>()
-  const join = (name: string, bytes: number, mtimeMs: number) => {
-    const entry = found.get(name) ?? { name, mtimeMs: 0, bytes: 0 }
-    found.set(name, { name, mtimeMs: Math.max(entry.mtimeMs, mtimeMs), bytes: entry.bytes + bytes })
-  }
-  for (const item of await listIfPresent($, dir)) {
-    if (item.isLink) continue
-    if (item.kind === 'file' && item.name.endsWith('.jsonl')) {
-      const name = item.name.slice(0, -'.jsonl'.length)
-      if (trajectoryOwner(name)) join(name, item.size, item.mtimeMs)
-    } else if (item.kind === 'dir' && trajectoryOwner(item.name)) {
-      join(item.name, 0, 0)
-      try {
-        const files = await $.fs.list(`${dir}/${item.name}`)
-        if (files.length > TRAJECTORY_FOLDER_FILES) {
-          skipped.add(item.name)
-          debug($, `skipped trajectory ${item.name}: it holds more than ${TRAJECTORY_FOLDER_FILES} files`)
-          continue
-        }
-        for (const file of files) join(item.name, file.size, file.mtimeMs)
-      } catch (error) {
-        skipped.add(item.name)
-        debug($, `skipped trajectory ${item.name}: could not list it: ${message(error)}`)
-      }
-    }
-  }
-  return [...found.values()].filter(entry => !skipped.has(entry.name))
-}
-
-// Removes the trajectories (trajectoryPlan) that are older than trajectory_retention_days or over trajectory_max_mb. It does not
-// depend on retention_days or on trajectory_log: a log that was turned off still gets cleaned up.
-async function pruneTrajectories($: EngineInterface): Promise<void> {
-  if (!projectRoot || !(trajectoryRetentionDays > 0 || trajectoryMaxMb > 0)) return
-  const dir = `${projectRoot}/${TRAJECTORY_SUBDIR}`
-  const plan = trajectoryPlan({
-    entries: await trajectoryEntries($, dir), now: await $.clock.now(), retentionDays: trajectoryRetentionDays, maxMb: trajectoryMaxMb,
-    currentSession: sessionId, unsettledRunIds: new Set([...runs.values()].filter(run => !isSettled(run)).map(run => run.runId)),
-  })
-  const removed: string[] = []
-  for (const name of plan) {
-    // The folder first: a joined file that outlived a failed removal is an entry of its own at the next start.
-    if (!(await removePath($, '-rf', `${dir}/${name}`, 'prune the trajectory'))) continue
-    await removePath($, '-f', `${dir}/${name}.jsonl`, 'prune the joined trajectory')
-    removed.push(name)
-  }
-  if (removed.length > 0) debug($, `pruned trajectories ${removed.join(', ')}`)
 }
 
 async function recoverRuns($: EngineInterface): Promise<void> {
@@ -1187,10 +1111,10 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   const started = { kind: 'node.start', runId: run.runId, nodeId: id, attempt: node.attempt + 1, subagentType: target.subagentType, category: node.routing?.category ?? def.category, recovery: node.recovery, prompt } as const
   if (spawned.agentId) {
     agentRuns.set(spawned.agentId, run.runId)
-    await record($, { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
+    await record($, trajectory, trajectoryCalls($), { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
     return markRunning(run, id, spawned.agentId, now, spawned.model)
   }
-  await record($, { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
+  await record($, trajectory, trajectoryCalls($), { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
 }
 
@@ -1237,8 +1161,8 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
       settleToasts.add(runId)
-      await record($, { kind: 'run.settle', runId, ...settleRecord(run) })
-      exportTrajectory($, runId)
+      await record($, trajectory, trajectoryCalls($), { kind: 'run.settle', runId, ...settleRecord(run) })
+      exportTrajectory($, trajectory, runId)
       const failed = run.nodes.filter(node => node.state === 'failed')
       const toasted = failureToasts.get(runId)
       if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
@@ -1291,18 +1215,6 @@ async function stopAgent($: EngineInterface, agentId: string): Promise<string | 
   } catch (error) {
     return message(error)
   }
-}
-
-type CompletionClaim = {
-  readonly run: Run
-  readonly node: NodeRun
-  readonly report: string | undefined
-}
-type CompletionResult = {
-  readonly outcome: ReturnType<typeof parseOutcome>
-  readonly verification?: NodeRun['verification']
-  // The verifier nodes a security lens's candidates expand into, built once the lens passed verification.
-  readonly expansion?: NodeDef[]
 }
 
 function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
@@ -1425,7 +1337,7 @@ async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Ti
   const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, wait.answer) : undefined
   const error = `The node agent ended its turn with background work pending and was not resumed within ${BACKGROUND_WAIT_MS / 60_000} minutes.`
   const result: CompletionResult = { outcome: { state: 'failed', error, ...(wait.answer ? { answer: wait.answer } : {}), ...(reportPath ? { reportPath } : {}) } }
-  await recordNodeEnd($, claim, result, { agentId, isAborted: false, ...(wait.answer ? { answer: wait.answer } : {}) })
+  await recordNodeEnd($, trajectory, trajectoryCalls($), claim, result, { agentId, isAborted: false, ...(wait.answer ? { answer: wait.answer } : {}) })
   await applyCompletion($, claim, result)
 }
 
@@ -1464,7 +1376,7 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   } catch (error) {
     result = { outcome: { state: 'failed', error: `Completion processing failed: ${message(error)}` } }
   }
-  await recordNodeEnd($, claim, result, end)
+  await recordNodeEnd($, trajectory, trajectoryCalls($), claim, result, end)
   await serialized(() => applyCompletion($, claim, result))
 }
 
@@ -1572,7 +1484,7 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
   const now = await $.clock.now()
   if ('skip' in plan) {
     $.ui.log(`No automatic review fix for ${run.runId}: ${plan.skip}`)
-    await record($, { kind: 'rework', runId: run.runId, skip: plan.skip })
+    await record($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, skip: plan.skip })
     return { run: withReworkSkip(run, plan.skip, now), reworked: false }
   }
   const reworked = reworkRun(run, plan.producers, plan.note, plan.reviewers, now, reviewLedger ? plan.findings : undefined)
@@ -1581,7 +1493,7 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
     return undefined
   }
   const round = reworked.value.reviewFix?.rounds
-  await record($, { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
+  await record($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
   $.ui.log(`Automatic review fix ${run.runId}: ${plan.reviewers.join(', ')} failed on a FAIL verdict; rerunning ${plan.producers.join(', ')} with the findings, then the reviewers`)
   // Before returning: tick starts the producers right after, and the copy must hold their files as the reviewers judged them.
   if (reviewLedger && round !== undefined) await recordBeforeFix($, reworked.value, round, plan.producers)
@@ -1907,103 +1819,6 @@ async function writeReport($: EngineInterface, runId: string, nodeId: string, re
   }
 }
 
-// A run's events go to a folder named for it; the main conversation's go to one named for the session.
-function trajectoryDir(runId?: string): string {
-  return `${projectRoot}/${TRAJECTORY_SUBDIR}/${runId ?? `session-${sessionId}`}`
-}
-
-// Queues one trajectory event. Nothing in a run waits on the write: one that fails is logged and the run goes on.
-async function record($: EngineInterface, input: TrajectoryInput): Promise<void> {
-  if (!trajectoryLog || !projectRoot) return
-  const event = { at: await $.clock.now(), sessionId, ...input }
-  const dir = trajectoryDir('runId' in input ? input.runId : undefined)
-  const path = `${dir}/${eventFileName(event.at, ++trajectorySeq, input.kind, 'nodeId' in input ? input.nodeId : undefined)}`
-  trajectoryWrites = trajectoryWrites.then(async () => {
-    await ensureDir($, dir)
-    await $.fs.write(path, trajectoryLine(event))
-  }).catch(error => debug($, `could not record the trajectory event ${input.kind}: ${message(error)}`))
-}
-
-// A settled run's events joined into one <run_id>.jsonl beside its folder, once the writes queued before it are done.
-function exportTrajectory($: EngineInterface, runId: string): void {
-  if (!trajectoryLog || !projectRoot) return
-  const dir = trajectoryDir(runId)
-  trajectoryWrites = trajectoryWrites.then(async () => {
-    const names = (await $.fs.list(dir)).filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl')).map(entry => entry.name).sort()
-    const lines: string[] = []
-    for (const name of names) lines.push(await $.fs.read(`${dir}/${name}`))
-    await $.fs.write(`${dir}.jsonl`, lines.join(''))
-  }).catch(error => debug($, `could not join the trajectory of ${runId}: ${message(error)}`))
-}
-
-const TRAJECTORY_NEW_FILES = 20
-
-// What a node's end leaves that a later attempt erases: the notes files its checks read outside the project, which
-// clearStaleNotes removes before a reviewer's next start, and, for a node that declares writes, their change against HEAD with
-// new files in full, which the next attempt overwrites.
-async function endSnapshot($: EngineInterface, run: Run, nodeId: string): Promise<{ notes: NotesFile[]; diff?: string }> {
-  const def = run.definition.nodes.find(current => current.id === nodeId)
-  const notes: NotesFile[] = []
-  const paths = new Set((def?.verify ?? []).flatMap(check => check.kind === 'file' && readOnlyAbsolutePath(check.path) ? [check.path] : []))
-  for (const path of paths) {
-    try {
-      if ((await $.fs.stat(path)).kind === 'file') notes.push({ path, text: await $.fs.read(path) })
-    } catch (error) {
-      debug($, `trajectory: could not read ${path}: ${message(error)}`)
-    }
-  }
-  const writes = (def?.writes ?? []).map(path => `:(literal)${path}`)
-  if (writes.length === 0) return { notes }
-  const root = rootOf(run)
-  try {
-    const changed = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-color', 'HEAD', '--', ...writes], { cwd: root })
-    const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--', ...writes], { cwd: root })
-    if (changed.exitCode !== 0 || untracked.exitCode !== 0) return { notes }
-    const fresh = untracked.stdout.split('\0').filter(Boolean).slice(0, TRAJECTORY_NEW_FILES)
-    const added = await Promise.all(fresh.map(async path => `new file ${path}\n${await readOrEmpty($, `${root}/${path}`)}`))
-    return { notes, diff: [changed.stdout, ...added].filter(text => text !== '').join('\n') }
-  } catch (error) {
-    debug($, `trajectory: could not read the change of ${nodeId}: ${message(error)}`)
-    return { notes }
-  }
-}
-
-// The end of one node attempt: its outcome and checks, what it left (endSnapshot), its token counts, and its transcript.
-// Awaited before the completion is applied, because applying it can start the attempt that erases the notes.
-async function recordNodeEnd($: EngineInterface, claim: CompletionClaim, result: CompletionResult, end: AgentEnd): Promise<void> {
-  if (!trajectoryLog) return
-  const { run, node } = claim
-  const usage = agentUsage.get(end.agentId)
-  agentUsage.delete(end.agentId)
-  try {
-    const { notes, diff } = await endSnapshot($, run, node.id)
-    const { state, error, answer } = result.outcome
-    await record($, {
-      kind: 'node.end', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, reason: end.reason, isAborted: end.isAborted,
-      state, error, answer, verification: result.verification, expansion: result.expansion?.map(def => def.id), notes, diff, usage,
-    })
-    const rows = await $.session.messages({ agentId: end.agentId })
-    await record($, Array.isArray(rows)
-      ? { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: transcriptRows(rows) }
-      : { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: [], error: rows.deny })
-  } catch (error) {
-    debug($, `could not record the end of ${run.runId}/${node.id} in its trajectory: ${message(error)}`)
-  }
-}
-
-// The main conversation's rows since the last turn it logged.
-async function recordMainTurn($: EngineInterface, turn: { turnId: string; reason: string; durationMs: number; usage?: Usage }): Promise<void> {
-  try {
-    const rows = await $.session.messages()
-    if (!Array.isArray(rows)) return
-    const fresh = rowsAfter(rows, mainRows)
-    mainRows = fresh.mark
-    await record($, { kind: 'main.turn', turnId: turn.turnId, reason: turn.reason, durationMs: turn.durationMs, usage: turn.usage, rows: transcriptRows(fresh.rows) })
-  } catch (error) {
-    debug($, `could not record the main turn in the trajectory: ${message(error)}`)
-  }
-}
-
 // Both start and a dry run say so when the person or the model has not loaded the planning skill (guide mode lets the start through).
 function planningWarning(): string[] {
   return planningLoaded || enforcement === 'off' ? [] : [`the ${PLANNING_SKILL} skill is not loaded in this session - load it and follow its node prompt contract.`]
@@ -2086,7 +1901,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   const routed = await routeRun($, createRun(definition, { runId, sessionId, now, ...(root !== projectRoot ? { root } : {}) }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
-  await record($, { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
+  await record($, trajectory, trajectoryCalls($), { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
   // Only the model's own start answers the turn's request; a /dag run the person typed is not part of that answer. The
   // enforcement check matters because only auto decides the surface, so a level changed mid-turn leaves an old 'board'.
   if (by === 'model' && enforcement === 'auto' && turnSurface === 'board') boardAnswerRuns.add(runId)
@@ -2287,7 +2102,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (by === 'user') delete retried.value.rejected
     const routed = await routeRun($, retried.value, retried.value.nodes.filter(node => node.state === 'pending' || node.state === 'scheduled').map(node => node.id))
     runs.set(run.runId, routed)
-    await record($, { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
+    await record($, trajectory, trajectoryCalls($), { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
     return ok(snapshotOf((await tick($, run.runId)) ?? routed, 0))
   }
   if (input.action === 'amend') {
@@ -2299,7 +2114,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
     runs.set(run.runId, routed)
-    await record($, { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
+    await record($, trajectory, trajectoryCalls($), { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
     return ok({
       rerun: amended.value.rerun,
       snapshot: snapshotOf((await tick($, run.runId)) ?? routed, 0),
@@ -2345,6 +2160,11 @@ async function openBoard($: EngineInterface, board: Board): Promise<ToolReply> {
 // The register.ts functions a board operation calls, bound to this $ (BoardCalls in host/boards.ts).
 function boardCalls($: EngineInterface): BoardCalls {
   return { ensureDir: dir => ensureDir($, dir), openBoard: board => openBoard($, board) }
+}
+
+// The register.ts function a trajectory write calls, bound to this $ (TrajectoryCalls in host/trajectory.ts).
+function trajectoryCalls($: EngineInterface): TrajectoryCalls {
+  return { ensureDir: dir => ensureDir($, dir) }
 }
 
 async function notifyHandoff($: EngineInterface, run: Run): Promise<void> {
@@ -3105,11 +2925,11 @@ export function register(on: On, options: PluginOptions) {
   antiSlopScan = options.anti_slop_scan !== false
   if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
   secureScan = options.secure_scan !== false
-  trajectoryLog = options.trajectory_log === true
+  trajectory.enabled = options.trajectory_log === true
   const trajectoryDays = options.trajectory_retention_days
-  if (typeof trajectoryDays === 'number' && Number.isInteger(trajectoryDays) && trajectoryDays >= 0 && trajectoryDays <= 3650) trajectoryRetentionDays = trajectoryDays
+  if (typeof trajectoryDays === 'number' && Number.isInteger(trajectoryDays) && trajectoryDays >= 0 && trajectoryDays <= 3650) trajectory.retentionDays = trajectoryDays
   const trajectoryMb = options.trajectory_max_mb
-  if (typeof trajectoryMb === 'number' && Number.isInteger(trajectoryMb) && trajectoryMb >= 0 && trajectoryMb <= 102_400) trajectoryMaxMb = trajectoryMb
+  if (typeof trajectoryMb === 'number' && Number.isInteger(trajectoryMb) && trajectoryMb >= 0 && trajectoryMb <= 102_400) trajectory.maxMb = trajectoryMb
   reviewLedger = options.review_ledger !== false
   const permissionScope = options.jev_permission_scope
   jevPermissionScope = permissionScope === 'all' || permissionScope === 'off' ? permissionScope : 'dag'
@@ -3174,7 +2994,7 @@ export function register(on: On, options: PluginOptions) {
       $.ui.log(`could not prune expired DAG artifacts: ${message(error)}`)
     }
     try {
-      await pruneTrajectories($)
+      await pruneTrajectories($, trajectory)
     } catch (error) {
       $.ui.log(`could not prune old trajectories: ${message(error)}`)
     }
@@ -3184,17 +3004,7 @@ export function register(on: On, options: PluginOptions) {
       $.ui.log(`could not restore workflow context: ${message(error)}`)
     }
     await restorePlanningFromContext($)
-    agentUsage.clear()
-    mainRows = undefined
-    if (trajectoryLog) {
-      // A resumed conversation's earlier rows were logged by the process that saw them.
-      try {
-        const rows = await $.session.messages()
-        if (Array.isArray(rows)) mainRows = rowsAfter(rows, undefined).mark
-      } catch (error) {
-        debug($, `could not mark where the main conversation's trajectory starts: ${message(error)}`)
-      }
-    }
+    await startTrajectory($, trajectory)
     try {
       await initializeLearning($, learning)
     } catch (error) {
@@ -3688,8 +3498,8 @@ export function register(on: On, options: PluginOptions) {
     if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
     if (e.agentId) clearWaiting($, e.agentId)
-    if (trajectoryLog && e.agentId && agentRuns.has(e.agentId) && e.usage) agentUsage.set(e.agentId, addUsage(agentUsage.get(e.agentId), e.usage) ?? e.usage)
-    if (trajectoryLog && !e.agentId) await recordMainTurn($, e)
+    if (trajectory.enabled && e.agentId && agentRuns.has(e.agentId) && e.usage) trajectory.agentUsage.set(e.agentId, addUsage(trajectory.agentUsage.get(e.agentId), e.usage) ?? e.usage)
+    if (trajectory.enabled && !e.agentId) await recordMainTurn($, trajectory, trajectoryCalls($), e)
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
       try {
