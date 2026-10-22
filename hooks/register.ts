@@ -44,6 +44,7 @@ import {
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { autocompleteRows, autocompleteWant } from './engine/autocomplete.ts'
 import { killByName, killRefusal } from './engine/kill-guard.ts'
 import { applyEdit, semgrepNote, semgrepRefusal, semgrepTarget, type SemgrepHit } from './engine/semgrep.ts'
 import { addUsage, cut, settleRecord } from './engine/trajectory.ts'
@@ -60,6 +61,7 @@ import { chunkArrived, fromTranscript, stepStarted, toolStarted, type Activity, 
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
+import { SETTLE_NOTIFIES, settleNotice, type SettleNotify } from './ui/settle-notice.ts'
 import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
 import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
@@ -71,6 +73,7 @@ import { collectLearning, createLearning, finishLearning, initializeLearning, ob
 import { BOARDS_SUBDIR, CHIP_PAINT, chipContexts, citeBlock, createBoards, handleBoardTool, inheritBoards, latestBoardTitle, loadBoards, type BoardCalls } from './host/boards.ts'
 import { createTrajectory, exportTrajectory, pruneTrajectories, recordMainTurn, recordNodeEnd, recordTrajectory, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
 import { createScan, guideRows, lensExpansion, resetScan, scanEdit, slopSkips } from './host/scan.ts'
+import { createDefinitionFiles, definitionPaths } from './host/autocomplete.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
@@ -178,6 +181,8 @@ let turnSurface: TurnSurface = 'chat'
 // start_approval from settings, and the /dag approval override that wins over it until the plugin's code reloads.
 let startApproval: StartApproval = 'off'
 let approvalOverride: StartApproval | undefined
+// settle_notify from settings: which settled runs of this session raise a native notification.
+let settleNotify: SettleNotify = 'long'
 let planningLoaded = false
 // Skill tool calls for the planning skill that a node worker has in flight; see the tool.call hook.
 let nodePlanningCalls = 0
@@ -188,7 +193,7 @@ let mainHeld = false
 let holdGeneration = 0
 // A keep-alive prompt is with the host and its turn has not started yet; it covers every completion until then.
 let keepAliveQueued = false
-// Only the terminal and desktop surfaces draw the pane and band; elsewhere progress goes out as text.
+// The terminal, desktop and vscode (the VS Code chat panel) surfaces draw the pane and band; elsewhere (mobile) progress goes out as text.
 let paneSurface = true
 // A /dag run|retry typed during a main model turn is persisted pending and started when that turn ends.
 let mainTurnBusy = false
@@ -212,6 +217,9 @@ const scan = createScan({
   projectRoot: () => projectRoot,
   rootOf,
 })
+// The definition files the prompt.autocomplete hook offers after /dag run and /dag preview, and when they were listed
+// (host/autocomplete.ts reuses the listing for 10 s).
+const definitionFiles = createDefinitionFiles()
 // The trajectory log's state (host/trajectory.ts): its switch and retention limits, its write queue, where the main
 // conversation's log stopped, and each node agent's token counts. Created once per module load, as its old module variables
 // were; the getters hand it this file's session id, project root and runs at the moment it reads them.
@@ -1091,10 +1099,25 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
         $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
       }
+      // Not awaited: this runs in the serialized queue, and the terminal's answer must not hold up the next state change.
+      notifySettled($, run, await $.clock.now())
     }
     announce($, run)
     return run
   }
+}
+
+// One native notification for a run of this session that has just settled, under settle_notify (settle-notice.ts decides). The
+// caller guards it with settleToasts, so a settle raises it once. Whatever the host answers stays out of the run: an unsent or
+// rejected notification only reaches the debug log.
+function notifySettled($: EngineInterface, run: Run, now: number): void {
+  const notice = settleNotice(run, sessionId, settleNotify, now, t)
+  if (!notice) return
+  $.ui.notify(notice.text, { title: notice.title }).then(sent => {
+    if (!sent.isSent) debug($, `the notification that ${run.runId} settled was not sent: ${sent.reason}`)
+  }).catch(error => {
+    debug($, `could not raise the notification that ${run.runId} settled: ${message(error)}`)
+  })
 }
 
 // The host refuses $.prompt.submit from inside a command.run hook ("it would wait on the turn this hook is holding"), so
@@ -2815,6 +2838,7 @@ export function register(on: On, options: PluginOptions) {
   if (options.node_messages === 'full') nodeMessages = 'full'
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
   if (START_APPROVALS.includes(options.start_approval as StartApproval)) startApproval = options.start_approval as StartApproval
+  if (SETTLE_NOTIFIES.includes(options.settle_notify as SettleNotify)) settleNotify = options.settle_notify as SettleNotify
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
   scan.antiSlopScan = options.anti_slop_scan !== false
   if (Array.isArray(options.anti_slop_skip)) scan.antiSlopSkip = new Set(options.anti_slop_skip)
@@ -2852,7 +2876,7 @@ export function register(on: On, options: PluginOptions) {
     repeatEpoch++
     repeatSuspended = false
     interactive = e.isInteractive
-    paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
+    paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop' || e.surface === 'vscode'
     sessionClosed = false
     keepAliveQueued = false
     resetScan(scan)
@@ -3096,6 +3120,18 @@ export function register(on: On, options: PluginOptions) {
     if (boards.chips.size === 0) return box
     const painted = chipSpans(box.text, boards.chips.keys()).map(span => ({ ...span, ...CHIP_PAINT }))
     return painted.length === 0 ? box : { ...box, decorations: [...(box.decorations ?? []), ...painted] }
+  })
+
+  // The typeahead asks for every word the person types, so this spawns no process and stays out of serialized(): the run ids
+  // come from the runs map in memory and the definition files from a $.fs.list walk reused for 10 s. The hook's budget
+  // (HookBudget.ms, 10 s) counts only its own code, never its $ calls. A word anywhere but the first argument of a /dag
+  // subcommand that takes a file or a run passes the rows beneath through untouched.
+  on('prompt.autocomplete', async ($, e, next) => {
+    const below = await next(e)
+    const want = autocompleteWant(e)
+    if (want === undefined) return below
+    const rows = autocompleteRows(e, want === 'files' ? await definitionPaths($, definitionFiles) : [], want === 'runs' ? [...runs.values()] : [])
+    return rows.length === 0 ? below : { suggestions: [...below.suggestions, ...rows] }
   })
 
   on('prompt.submit', async ($, e, next) => {

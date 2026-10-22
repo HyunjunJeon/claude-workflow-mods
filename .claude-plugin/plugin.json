@@ -122,6 +122,13 @@
       "options": ["off", "always"],
       "default": "off"
     },
+    "settle_notify": {
+      "type": "string",
+      "title": "Notify when a run settles",
+      "description": "Raise one native notification when a run of this session finishes completed or failed (never for a cancelled run). long: only runs that took at least 120 s from start to settle; always: every settled run; off: none",
+      "options": ["off", "long", "always"],
+      "default": "long"
+    },
     "anti_slop_scan": {
       "type": "boolean",
       "title": "Anti-slop scan after edits",

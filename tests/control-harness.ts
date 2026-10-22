@@ -28,6 +28,8 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const stats: string[] = []
   const statuses: (string | undefined)[] = []
   const toasts: { text: string; timeoutMs?: number }[] = []
+  // Every $.ui.notify the plugin raised, in order.
+  const notifications: { text: string; title: string | undefined }[] = []
   const notices: { toolUseId: string; text: string | undefined }[] = []
   const sends: EventOf['session.send'][] = []
   const prompts: string[] = []
@@ -41,9 +43,11 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   // git: what a git call prints, keyed by its argv after 'git' joined with spaces ('show HEAD~1:./src/a.ts',
   // 'diff --no-color --no-ext-diff main -- :(literal)src/b.ts'); a call whose key is absent exits 128 as git does for an unknown
   // ref or path.
+  // notify: how the host answers $.ui.notify: 'sent' on a channel, 'unsent' with no terminal to show it, 'rejected' as a hook's
+  // deny or a failed write does.
   // root: what $.session.root() answers, the folder the session works in now (a worktree after EnterWorktree); session.cwd
   // and session.start stay at /work, the folder the session started in.
-  const control = { sessionId: 'source', root: '/work', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
+  const control = { sessionId: 'source', root: '/work', notify: 'sent' as 'sent' | 'unsent' | 'rejected', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
@@ -165,6 +169,11 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   on('ui.log', ($, e) => { logs.push(e.text); logOptions.push('to' in e ? { to: e.to } : undefined); return { value: undefined } })
   on('ui.status', ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.toast', ($, e) => { toasts.push({ text: e.text, ...(e.timeoutMs === undefined ? {} : { timeoutMs: e.timeoutMs }) }); return { value: undefined } })
+  on('ui.notify', ($, e) => {
+    notifications.push({ text: e.text, title: e.title })
+    if (control.notify === 'rejected') throw new Error('the terminal refused the notification')
+    return { value: control.notify === 'sent' ? { isSent: true, channel: 'kitty' } : { isSent: false, reason: 'no-surface' } }
+  })
   on('ui.notice', ($, e) => { notices.push({ toolUseId: e.tool_use_id, text: e.text }); return { value: undefined } })
   on('prompt.submit', ($, e) => {
     prompts.push(e.text)
@@ -176,7 +185,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PermissionRequest', () => ({}))
-  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, tornWrites, moveErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, fileMeta, control }
+  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, tornWrites, moveErrors, logs, logOptions, stats, statuses, toasts, notifications, notices, sends, prompts, submits, locks, lockMtimes, fileMeta, control }
 }
 
 // The manifest's default enforcement is auto, which asks Jev about every user prompt. These suites were written for

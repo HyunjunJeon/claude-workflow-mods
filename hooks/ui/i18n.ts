@@ -62,6 +62,9 @@ export type Strings = {
   toastVerificationFailed: (run: string, node: string) => string
   toastHandoff: string
   toastSettledFailed: (run: string, failed: number) => string
+  // The native notification a settled run raises (settle-notice.ts): its result and node counts, nothing to click.
+  notifySettledCompleted: (run: string, done: number, total: number) => string
+  notifySettledFailed: (run: string, failed: number, done: number, total: number) => string
   toastPaneWaiting: (reason: string) => string
   toastApproval: (run: string) => string
   toastBoardUpdated: (title: string) => string
@@ -160,6 +163,8 @@ const EN: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: node ${node} failed verification`,
   toastHandoff: 'A DAG run was offered to this session. Open /dag sessions to accept it.',
   toastSettledFailed: (run, failed) => `DAG ${run} settled with ${failed} failed node(s)`,
+  notifySettledCompleted: (run, done, total) => `DAG ${run} completed ${done}/${total}`,
+  notifySettledFailed: (run, failed, done, total) => `DAG ${run} failed: ${failed} failed node(s), ${done}/${total} completed`,
   runDeferred: 'The run starts when the current turn ends.',
   toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
   toastBoardUpdated: title => `Board updated: ${title} · press b in the /dag pane`,
@@ -254,6 +259,8 @@ const KO: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: 노드 ${node} 검증 실패`,
   toastHandoff: '이 세션에 DAG 실행이 넘어왔습니다. /dag sessions에서 수락하세요.',
   toastSettledFailed: (run, failed) => `DAG ${run} 종료: 실패 노드 ${failed}개`,
+  notifySettledCompleted: (run, done, total) => `DAG ${run} 완료 ${done}/${total}`,
+  notifySettledFailed: (run, failed, done, total) => `DAG ${run} 실패: 실패 노드 ${failed}개, ${done}/${total} 완료`,
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
   toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
   toastBoardUpdated: title => `보드 갱신: ${title} · /dag 패널에서 b`,

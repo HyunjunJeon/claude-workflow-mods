@@ -399,7 +399,7 @@ const IMPORTER = {
 // stops, so only the restoration block on the next user prompt can tell it.
 test('scenario 6, context diet: plugin messages never carry the block, and a user prompt carries it once after a change the model has not seen', { options: { ...NO_RECOVERY.options, enforcement: 'strict' } }, async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.session.start({ surface: 'mobile', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: SKILL, text: '# planning' })
 
   await ask($, 'Build the importer')
