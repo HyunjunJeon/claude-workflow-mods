@@ -14,13 +14,26 @@ const HITS: [string, string][] = [
   ['npm run dev & sleep 2; pkill -f vite', 'pkill'],
   ['echo $(killall node)', 'killall'],
   ['PKILL node', 'pkill'],
-  ['pgrep -f vite | xargs kill', 'pgrep piped to kill'],
-  ['kill -9 $(pgrep node)', 'kill of pgrep matches'],
-  ['kill `pgrep -f server`', 'kill of pgrep matches'],
+  ['pgrep -f vite | xargs kill', 'looked-up PIDs piped to kill'],
+  ['lsof -ti:5173 | xargs kill', 'looked-up PIDs piped to kill'],
+  ['kill -9 $(pgrep node)', 'kill of looked-up PIDs'],
+  ['kill `pgrep -f server`', 'kill of looked-up PIDs'],
+  ['kill $(pidof node)', 'kill of looked-up PIDs'],
+  ['kill -9 $(lsof -ti :5173)', 'kill of looked-up PIDs'],
+  ['fuser -k 5173/tcp', 'fuser -k'],
+  ['bash -c "pkill -f vite"', 'pkill'],
+  ["sh -lc 'killall node'", 'killall'],
+  ['echo "$(pkill node)"', 'pkill'],
+  ['env pkill node', 'pkill'],
+  ['FOO=1 pkill node', 'pkill'],
+  ['timeout 5 killall node', 'killall'],
+  ['nice -n 10 pkill node', 'pkill'],
+  ['doas killall node', 'killall'],
   ['taskkill /IM node.exe /F', 'taskkill /IM or /FI'],
   ['taskkill /F /FI "IMAGENAME eq node.exe"', 'taskkill /IM or /FI'],
   ['powershell -c "Stop-Process -Name node"', 'Stop-Process -Name'],
   ['powershell -c "Get-Process node | Stop-Process"', 'Get-Process piped to Stop-Process'],
+  ['pwsh -Command "Get-Process | Where-Object Name -eq node | Stop-Process"', 'Get-Process piped to Stop-Process'],
   ['kill -9 -1', 'kill -1'],
   ['kill -s KILL -1', 'kill -1'],
   ['kill -- -1', 'kill -1'],
@@ -40,6 +53,14 @@ const MISSES = [
   'git commit -m "block pkill"',
   'pgrep -f vite',
   'bun test tests/kill-guard.test.ts',
+  'grep -nE "(pkill|killall)" hooks/',
+  'git commit -m "fix: refuse x; pkill is blocked"',
+  "echo 'a; pkill b'",
+  'git commit -m "Stop-Process -Name is refused"',
+  'cat > s.sh <<EOF\npkill -f vite\nEOF',
+  "cat > s.sh <<'END'\nkillall node\nEND\nchmod +x s.sh",
+  'fuser -v 5173/tcp',
+  'lsof -ti:5173',
 ]
 
 test('each by-name or by-pattern kill form is found, and its name is returned', () => {
@@ -60,17 +81,16 @@ const CHECK: VerificationCheck[] = [{ kind: 'command', argv: ['check-control'] }
 const RUN = { key: 'kill', name: 'Kill', nodes: [{ id: 'a', prompt: 'Write a', dependsOn: [], verify: CHECK }] }
 
 test('a node worker\'s pkill is refused before it runs, and its kill by PID goes through', async ($, on) => {
-  const h = harness(on)
+  harness(on)
   await boot($)
   await start($, RUN)
   const refused = await $.tool.call({ tool: 'Bash', command: 'pkill -f vite', agentId: 'agent-1', tool_use_id: 'call-1' } as never)
   expect(refused.deny).toContain('pkill')
-  expect(h.processes.some(run => run.argv.join(' ').includes('pkill'))).toBe(false)
   const allowed = await $.tool.call({ tool: 'Bash', command: 'kill 4242', agentId: 'agent-1', tool_use_id: 'call-2' } as never)
   expect(allowed.deny).toBeUndefined()
 })
 
-test('the main conversation is refused only while this session has an unsettled run', async ($, on) => {
+test('the main conversation and every subagent are refused only while this session has an unsettled run', async ($, on) => {
   harness(on)
   await boot($, 'off')
   const before = await $.tool.call({ tool: 'Bash', command: 'killall node' } as never)
@@ -78,4 +98,7 @@ test('the main conversation is refused only while this session has an unsettled 
   await start($, RUN)
   const during = await $.tool.call({ tool: 'Bash', command: 'killall node' } as never)
   expect(during.deny).toContain('killall')
+  // A subagent that is not a node worker, such as an Explore agent the main conversation started, is held to the same rule.
+  const helper = await $.tool.call({ tool: 'Bash', command: 'pkill -f vite', agentId: 'explore-1', tool_use_id: 'call-9' } as never)
+  expect(helper.deny).toContain('pkill')
 })

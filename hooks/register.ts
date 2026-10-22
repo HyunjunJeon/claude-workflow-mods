@@ -4296,15 +4296,14 @@ export function register(on: On, options: PluginOptions) {
     }
   })
 
-  // A Bash call that stops processes by name or pattern (engine/kill-guard.ts) is refused before it runs when a node worker
-  // makes it, or the main conversation while this session's run has not settled: then other nodes' servers and test runs
-  // are live on this machine. Outside a run the main conversation answers to the person, who sees the command.
+  // A Bash call that stops processes by name or pattern (engine/kill-guard.ts) is refused before it runs while this session's
+  // run has not settled, whoever makes it: a node worker, a subagent a worker or the main conversation started, or the main
+  // conversation itself. Then other nodes' servers and test runs are live on this machine. Node workers exist only during a
+  // run, and outside one the main conversation answers to the person, who sees the command.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (e.tool !== 'Bash') return next(e)
+    if (e.tool !== 'Bash' || !ownsUnsettledRun()) return next(e)
     const form = killByName(e.command)
-    if (form === undefined) return next(e)
-    const guarded = e.agentId ? ownNodeOfAgent(e.agentId) !== undefined : ownsUnsettledRun()
-    return guarded ? { deny: killRefusal(form) } : next(e)
+    return form === undefined ? next(e) : { deny: killRefusal(form) }
   })
 
   // The secure-coding Semgrep rules (engine/semgrep.ts) on what an Edit or Write adds, in the main conversation or a node

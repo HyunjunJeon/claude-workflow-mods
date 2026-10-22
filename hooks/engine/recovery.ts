@@ -2,7 +2,7 @@ import { downstream } from './graph.ts'
 import { isVerificationNode } from './lint.ts'
 import { isVerdictFailure } from './stages.ts'
 import { advance } from './run.ts'
-import { spawnTarget, truncate } from './node-prompt.ts'
+import { fullOutput, spawnTarget, truncate } from './node-prompt.ts'
 import { evidenceOutcome } from './check-eval.ts'
 import { fail, type RecoveryKind, type Result, type Run } from './types.ts'
 
@@ -14,25 +14,19 @@ export const MAX_AUTO_RECOVERIES = 2
 // fix note (skills/subagent-driven-development/fixing.md): at most 1,500 characters, enough for a few attempts and a plan.
 export const ATTEMPT_NOTE_CHARS = 1_500
 const NOTE_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?(?:Tried and failed|Next)(?:\*\*)?\s*:/i
-// Another field at the start of a line, such as "Ruling:" or "**Files changed:**", ends the one before it.
-const ANY_FIELD = /^(?:\*\*)?[A-Z][A-Za-z ]{0,40}(?:\*\*)?:/
+const TRIED_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Tried and failed(?:\*\*)?\s*:/i
+const CLOSING_TAG = /<\/previous_attempt/gi
 
-// The "Tried and failed:" and "Next:" fields of a failed report's ## Output, each with the lines that continue it, in the
-// order the worker wrote them. A field ends at a blank line, a heading or the next field.
+// The note fields that end a failed report's ## Output: from the first "Next:" or "Tried and failed:" line to the end, so a
+// pasted error line or a bullet inside a field stays with it. Next comes first, so a cut keeps it. A completed report may name
+// a "Next:" step too, but only a failed one lists what it tried, so without "Tried and failed:" there is no note.
 export function attemptNote(output: string): string | undefined {
-  const kept: string[] = []
-  let inField = false
-  for (const line of output.split('\n')) {
-    if (NOTE_FIELD.test(line)) {
-      inField = true
-      kept.push(line.trimEnd())
-    } else if (inField && line.trim() !== '' && !line.startsWith('#') && !ANY_FIELD.test(line)) {
-      kept.push(line.trimEnd())
-    } else {
-      inField = false
-    }
-  }
-  return kept.length === 0 ? undefined : truncate(kept.join('\n'), ATTEMPT_NOTE_CHARS)
+  const lines = output.split('\n')
+  const start = lines.findIndex(line => NOTE_FIELD.test(line))
+  if (start < 0) return undefined
+  const kept = lines.slice(start)
+  if (!kept.some(line => TRIED_FIELD.test(line))) return undefined
+  return truncate(kept.join('\n').trim(), ATTEMPT_NOTE_CHARS)
 }
 
 // A reviewer or audit that failed on its verdict judged the work and found it wrong. Retrying it reviews the same unchanged
@@ -73,7 +67,8 @@ export function recoverNode(input: Run, nodeId: string, decision: { kind: Recove
     if (current.id !== nodeId && !(affected.has(current.id) && current.state === 'skipped')) return current
     const { agentId, startedAt, finishedAt, error, answer, output, reportPath, verification, ...rest } = current
     if (current.id !== nodeId) return { ...rest, state: 'pending' as const }
-    const note = attemptNote(output ?? '')
+    // A worker's own text inside the data block: a closing tag in it would end the block early.
+    const note = attemptNote(fullOutput({ answer, output }))?.replace(CLOSING_TAG, '<\\/previous_attempt')
     return {
       ...rest,
       state: 'pending' as const,

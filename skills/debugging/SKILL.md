@@ -168,12 +168,12 @@ Hypotheses:
 Root cause: <file and line, or "not yet determined">
 ```
 
-A node that ends failed, diagnosis or fix, also puts these two fields in its `## Output`.
-The plugin hands them to the next attempt, which sees nothing else of your work:
+A node that ends failed, diagnosis or fix, finishes its `## Output` with these two fields, in this order and last.
+The plugin hands everything from `Next:` on to the next attempt, which sees nothing else of your work:
 
 ```
-Tried and failed: <hypothesis or change - how it failed - why>, newest first
 Next: <the hypothesis ranked next, and the files or lines to read first>
+Tried and failed: <hypothesis or change - how it failed - why>, newest first
 ```
 
 When this attempt is the third and each fix failed in a different place, say so in `Next:`.

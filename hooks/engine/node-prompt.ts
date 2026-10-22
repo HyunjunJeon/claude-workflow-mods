@@ -46,6 +46,13 @@ export function extractOutput(answer: string | undefined, limit = UPSTREAM_OUTPU
   return truncate(section.trim(), limit)
 }
 
+// A report's whole ## Output. A node's stored output is cut to what an upstream prompt carries (UPSTREAM_OUTPUT_CHARS), so a
+// reader looking for fields the prompt asks for at the end of Output reads the answer instead, which keeps both ends of a long
+// report (run.ts keepEnds). A run saved before answers were kept falls back to the stored output.
+export function fullOutput(node: { answer?: string; output?: string }): string {
+  return node.answer === undefined ? node.output ?? '' : extractOutput(node.answer, Number.POSITIVE_INFINITY)
+}
+
 function upstreamBlock(upstream: UpstreamResult[]): string[] {
   if (upstream.length === 0) return []
   return [
@@ -89,8 +96,8 @@ export function buildNodePrompt(run: Run, def: NodeDef, node: NodeRun, upstream:
     `${STATUS_PREFIX} completed`,
     'or, if you could not complete the task:',
     `${STATUS_PREFIX} failed: <one-line reason>`,
-    'When you end failed, put two more lines in ## Output for the next attempt, which sees nothing else of your work:',
-    '"Tried and failed: <each approach - how it failed - why>, newest first" and "Next: <the best next hypothesis and the files or lines to read first>".',
+    'When you end failed, finish ## Output with two fields for the next attempt, which sees nothing else of your work:',
+    '"Next: <the best next hypothesis and the files or lines to read first>", then "Tried and failed: <each approach - how it failed - why>, newest first".',
     ...(def.verify ? [`If a plugin-run check cannot pass even on a correct deliverable (it needs a program that is missing, or its pattern can never match), finish the task, show the deliverable is right another way, and end with ${STATUS_PREFIX} failed: ${CHECK_DEFECT} - <which check and why>. A retry cannot fix a check, so the main conversation amends it.`] : []),
   ].join('\n')
 }

@@ -1,4 +1,4 @@
-import { truncate } from './node-prompt.ts'
+import { fullOutput, truncate } from './node-prompt.ts'
 import { evidenceOutcome, VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { BOARD_TOOL } from './policy.ts'
 import type { Preview, WriteConflict } from './preview.ts'
@@ -153,10 +153,12 @@ function reviewFixLines(run: Run): string[] {
 
 // A node that settles a choice its task left open writes "Ruling: <decision> - <why> - <cost if wrong>" in its ## Output
 // (node-prompt.ts). The excerpt above keeps 1,200 characters of each Output, so a ruling low in a long Output never reached
-// the person. superlite's finish step lists a run's rulings in its closing message for the same reason.
+// the person. superlite's finish step lists a run's rulings in its closing message for the same reason. The block has its own
+// budget, a quarter of the excerpts' 12,000 characters, so a wide run of nodes that each record rulings stays readable.
 const RULING = /^\s*(?:[-*]\s+)?(?:\*\*)?Ruling(?:\*\*)?\s*:(?:\*\*)?\s*(\S.*)$/i
 const RULINGS_SHOWN = 20
 const RULING_CHARS = 300
+const RULINGS_TOTAL_CHARS = 3_000
 
 function rulingLines(output: string): string[] {
   return output.split('\n').flatMap(line => {
@@ -167,12 +169,19 @@ function rulingLines(output: string): string[] {
 }
 
 function rulingBlock(run: Run): string[] {
-  const rulings = run.nodes.flatMap(node => rulingLines(node.output ?? '').map(text => `- ${node.id}: ${text}`))
+  const rulings = run.nodes.flatMap(node => rulingLines(fullOutput(node)).map(text => `- ${node.id}: ${text}`))
   if (rulings.length === 0) return []
-  const left = rulings.length - RULINGS_SHOWN
+  const shown: string[] = []
+  let used = 0
+  for (const line of rulings) {
+    if (shown.length === RULINGS_SHOWN || used + line.length > RULINGS_TOTAL_CHARS) break
+    shown.push(line)
+    used += line.length
+  }
+  const left = rulings.length - shown.length
   return [
     'Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:',
-    ...rulings.slice(0, RULINGS_SHOWN),
+    ...shown,
     ...(left > 0 ? [`(${left} more rulings are in the node reports.)`] : []),
   ]
 }

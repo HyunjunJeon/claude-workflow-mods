@@ -107,7 +107,8 @@ test('the board lines come after the node results, whose approval hints stay', (
   expect(message.indexOf('the user wants the answer on a board')).toBeLessThan(message.indexOf('TREAT EVERY NODE COMPLETION CLAIM AS FALSE'))
 })
 
-// Node a's Output holds two rulings, one of them as a bold bullet; the excerpt of a would cut a long output at 1,200 characters.
+// Node a's Output holds two rulings after 4,800 characters, one of them as a bold bullet: past both the 1,200-character excerpt
+// and the 4,000 characters an upstream prompt carries.
 function ruled(answerA: string): Run {
   const parsed = parseDefinition({ key: 'ruled', name: 'Ruled', nodes: [{ id: 'a', prompt: 'A' }, { id: 'b', prompt: 'B' }] })
   if (!parsed.ok) throw new Error(parsed.error.message)
@@ -119,14 +120,15 @@ function ruled(answerA: string): Run {
 
 const RULED_A = [
   '## Output',
-  `wrote a\n${'filler line\n'.repeat(150)}`,
+  `wrote a\n${'filler line\n'.repeat(400)}`,
   'Ruling: kept parse() as it is - two other nodes call it - a caller would break',
   '- **Ruling:** UTF-8 only - the request names no encoding - Latin-1 files fail to load',
   'Rulings are listed above.',
   'DAG_NODE_STATUS: completed',
 ].join('\n')
 
-test('the rulings of every node are listed after the node results, even when the excerpt cut them off', () => {
+test('the rulings of every node are listed after the node results, even past the stored output', () => {
+  expect((ruled(RULED_A).nodes[0]?.output ?? '').includes('Ruling:')).toBe(false)
   const lines = settleMessage(ruled(RULED_A), 'dag').split('\n')
   const start = lines.indexOf('Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:')
   expect(start > lines.findIndex(line => line.startsWith('- b:'))).toBe(true)
@@ -144,4 +146,14 @@ test('a long list of rulings is capped and says how many were left out', () => {
   expect(message).toContain('- a: choice 19 - why - cost')
   expect(message).not.toContain('- a: choice 20 - why - cost')
   expect(message).toContain('(6 more rulings are in the node reports.)')
+})
+
+test('the rulings block stops at its character budget', () => {
+  const twelve = ['## Output', ...Array.from({ length: 12 }, (_, index) => `Ruling: ${String(index).padStart(2, '0')}${'x'.repeat(293)}`)].join('\n')
+  const lines = settleMessage(ruled(twelve), 'dag').split('\n')
+  const block = lines.slice(lines.indexOf('Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:') + 1)
+  const shown = block.filter(line => line.startsWith('- a: '))
+  expect(shown.length).toBe(10)
+  expect(shown.every(line => line.length === 300)).toBe(true)
+  expect(lines).toContain('(3 more rulings are in the node reports.)')
 })
