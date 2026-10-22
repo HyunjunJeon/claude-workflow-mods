@@ -36,7 +36,8 @@ function verifyRuns(h: ReturnType<typeof harness>): number {
   return h.processes.filter(run => run.argv[0] === 'check-control').length
 }
 
-test('a node that started a background command and ended its turn without a status line keeps running, then completes on its next turn end', async ($, on) => {
+// The 2026-10-22 GitHub CI run took 11.3 s for the session-learning test against the 5 s default, so these slow tests get 30 s.
+test('a node that started a background command and ended its turn without a status line keeps running, then completes on its next turn end', { timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on)
   await boot($)
   const runId = await start($, CHAIN)
@@ -56,7 +57,7 @@ test('a node that started a background command and ended its turn without a stat
   expect(h.spawns.map(spawn => spawn.description)).toEqual(['Chain: a', 'Chain: b'])
 })
 
-test('a waiting node with no next turn fails after 30 minutes with the reason, and a late turn end changes nothing', NO_RECOVERY, async ($, on) => {
+test('a waiting node with no next turn fails after 30 minutes with the reason, and a late turn end changes nothing', { ...NO_RECOVERY, timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on)
   await boot($)
   const runId = await start($, CHAIN)

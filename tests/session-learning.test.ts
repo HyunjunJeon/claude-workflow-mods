@@ -347,7 +347,8 @@ test('a long turn retains the user request after eighty tool calls', async ($, o
   expect(session(h).batch?.events.some(event => event.kind === 'user')).toBe(true)
 })
 
-test('the character bound retains the user request through large worker reports', async ($, on) => {
+// The 2026-10-22 GitHub CI run took 11.3 s for the session-learning test against the 5 s default, so these slow tests get 30 s.
+test('the character bound retains the user request through large worker reports', { timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on, { home: HOME })
   await boot($, 'off')
   await ask($)

@@ -1166,7 +1166,8 @@ const STOPS: Plugin = {
 
 const stopped = (h: Harness): string[] => [...h.files.keys()].filter(path => path.startsWith('/stopped/')).sort()
 
-test('scenario 11, background wait: a node that backgrounded its work and ended its turn without a status line is not verified early, its dependents wait, and the next turn completes it', { ...NO_RECOVERY, plugins: [STOPS] }, async ($, on) => {
+// The 2026-10-22 GitHub CI run took 11.3 s for the session-learning test against the 5 s default, so these slow tests get 30 s.
+test('scenario 11, background wait: a node that backgrounded its work and ended its turn without a status line is not verified early, its dependents wait, and the next turn completes it', { ...NO_RECOVERY, plugins: [STOPS], timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on)
   on('turn.step', async function* ($: unknown, e: { turnId: string; index: number }) {
     yield { kind: 'text', index: 0, text: 'the eval finished' }
@@ -1224,7 +1225,7 @@ test('scenario 11, background wait: a node that backgrounded its work and ended 
   expect(h.spawns).toHaveLength(3)
 })
 
-test('scenario 11, background wait: with no next turn the node fails after 30 minutes on the clock, its agent is stopped, dependents are skipped and a late turn end changes nothing', { ...NO_RECOVERY, plugins: [STOPS] }, async ($, on) => {
+test('scenario 11, background wait: with no next turn the node fails after 30 minutes on the clock, its agent is stopped, dependents are skipped and a late turn end changes nothing', { ...NO_RECOVERY, plugins: [STOPS], timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on)
   await boot($)
   const runId = await start($, evalFlow('eval-stalled'))
