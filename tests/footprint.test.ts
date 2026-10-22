@@ -1,4 +1,4 @@
-import { expect, test, type Engine } from 'claude-code/testing'
+import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { emptyContext } from '../hooks/engine/context.ts'
 import { hash } from '../hooks/engine/hash.ts'
@@ -82,18 +82,19 @@ test('session start prunes expired artifacts and keeps current and active peer f
   expect(h.store.has(`${PREFIX}peer`)).toBe(true)
 })
 
-// Registered before the shared harness so this gate, not its catch-all tool.call, answers Write.
-function writeGate(on: On, $: Engine) {
+// Registered before the shared harness so this stand-in, not its catch-all tool.call, answers Write.
+// The engine checks the call itself and reaches the stand-in only once the permission step lets the call through.
+function writeGate(on: On) {
   on('tool.check', () => ({ decision: 'ask' }))
-  on('tool.call', { tool: 'Write' }, async (_engine, e) => {
-    const verdict = await $.tool.check({ tool: e.tool, input: { file_path: e.file_path, content: e.content }, tool_use_id: e.tool_use_id })
-    if (verdict.decision !== 'allow') return { deny: verdict.reason ?? verdict.decision }
-    return { result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
-  })
+  on('tool.call', { tool: 'Write' }, async (_engine, e) => ({ result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }))
 }
 
+// Nobody can answer an ask in the kit, so the engine refuses it. A plugin deny reads "Permission to use Write denied by
+// plugin ..." and an allowed call resolves the stand-in's result, so neither matches this.
+const LEFT_AT_ASK = { isError: true, text: expect.stringMatching(/^Permission to use Write has been denied/) }
+
 test('dag permission scope skips Jev for main-loop asks but still evaluates node asks', { options: { jev_permission_scope: 'dag' } }, async ($, on) => {
-  writeGate(on, $)
+  writeGate(on)
   const h = footprint(on)
   await boot($)
   await start($, DEFINITION)
@@ -103,13 +104,13 @@ test('dag permission scope skips Jev for main-loop asks but still evaluates node
   expect(h.requests).toHaveLength(before)
   expect(h.files.get(`${ROOT}/decisions/source.json`)).toBe(decisionsBefore)
   const call = { tool: 'Write', file_path: '/work/a', content: 'x', agentId: 'agent-1', tool_use_id: 'node-call' } as const
-  expect(await $.tool.call(call)).toHaveProperty('deny')
+  expect(await $.tool.call(call)).toMatchObject(LEFT_AT_ASK)
   expect(h.requests).toHaveLength(before + 1)
   expect(h.requests.at(-1)?.state).toMatchObject({ task: 'Produce artifact' })
 })
 
 test('default permission scope skips Jev for main-loop asks but still evaluates node asks', async ($, on) => {
-  writeGate(on, $)
+  writeGate(on)
   const h = footprint(on)
   await boot($)
   await start($, DEFINITION)
@@ -119,13 +120,13 @@ test('default permission scope skips Jev for main-loop asks but still evaluates 
   expect(h.requests).toHaveLength(before)
   expect(h.files.get(`${ROOT}/decisions/source.json`)).toBe(decisionsBefore)
   const call = { tool: 'Write', file_path: '/work/a', content: 'x', agentId: 'agent-1', tool_use_id: 'node-call' } as const
-  expect(await $.tool.call(call)).toHaveProperty('deny')
+  expect(await $.tool.call(call)).toMatchObject(LEFT_AT_ASK)
   expect(h.requests).toHaveLength(before + 1)
   expect(h.requests.at(-1)?.state).toMatchObject({ task: 'Produce artifact' })
 })
 
 test('all permission scope evaluates a main-loop ask', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
-  writeGate(on, $)
+  writeGate(on)
   const h = footprint(on)
   await boot($)
   const before = h.requests.length

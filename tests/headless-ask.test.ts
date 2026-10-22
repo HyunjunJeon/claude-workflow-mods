@@ -9,17 +9,17 @@ const NOTE = 'Write needs approval that this non-interactive session cannot ask 
 const NEEDS = 'needs approval that this non-interactive session cannot ask for'
 const HINT = (tools: string) => `; needed approval this non-interactive session cannot give: ${tools} (allow them up front with --allowedTools)`
 
-// Registered before the shared harness so this gate, not its catch-all tool.call, answers Write.
-// The test bottom acts as the host permission gate, asking tool.check with the real tool_use_id.
-// It denies with the verdict as the reason, so an unchanged ask reads { deny: 'ask' }.
-function askGate(on: On, $: Engine) {
+// Registered before the shared harness so this stand-in, not its catch-all tool.call, answers Write.
+// The engine checks the call itself (plugin hooks, then tool.check) and reaches this stand-in for the tool only once
+// the permission step lets the call through, so a call that runs is a call that was allowed.
+function askGate(on: On) {
   on('tool.check', () => ({ decision: 'ask' }))
-  on('tool.call', { tool: 'Write' }, async (_engine, e) => {
-    const verdict = await $.tool.check({ tool: e.tool, input: { file_path: e.file_path, content: e.content }, tool_use_id: e.tool_use_id })
-    if (verdict.decision !== 'allow') return { deny: verdict.reason ?? verdict.decision }
-    return { result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
-  })
+  on('tool.call', { tool: 'Write' }, async (_engine, e) => ({ result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }))
 }
+
+// Nobody can answer an ask in the kit, so the engine refuses it. A plugin deny reads "Permission to use Write denied by
+// plugin ..." and an allowed call resolves the stand-in's result, so neither matches this.
+const LEFT_AT_ASK = { isError: true, text: expect.stringMatching(/^Permission to use Write has been denied/) }
 
 // A `claude -p` session: no surface, nobody to answer an ask.
 async function bootHeadless($: Engine) {
@@ -39,6 +39,11 @@ async function nodeCall($: Engine, h: ReturnType<typeof harness>, runId: string,
   return $.tool.call(call)
 }
 
+// The host's own query for a node's Write: the verdict itself, which the engine's refusal text does not carry.
+function nodeVerdict($: Engine, h: ReturnType<typeof harness>, runId: string, toolUseId: string) {
+  return $.tool.check({ tool: 'Write', input: { file_path: '/work/a', content: 'done' }, tool_use_id: toolUseId, agentId: agentOf(h, runId) })
+}
+
 function permissionRecords(h: ReturnType<typeof harness>): DecisionRecord[] {
   const text = h.files.get(`${ROOT}/decisions/source.json`)
   const records: DecisionRecord[] = text ? JSON.parse(text).records : []
@@ -50,12 +55,12 @@ function explained(h: ReturnType<typeof harness>): string[] {
 }
 
 test('a non-interactive node call left at ask is explained once, naming the node, the tool and the fix', async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'headless-call')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'headless-call')).toMatchObject(LEFT_AT_ASK)
   expect(explained(h)).toEqual([`${runId}/a: ${NOTE} (Jev low-confidence: allow at 0.88, jev_confidence 0.9); ${FIX}`])
   // The default destination puts it in the transcript; the debug log would hide it from a `claude -p` user.
   expect(h.logOptions[h.logs.findIndex(line => line.includes(NOTE))]?.to).not.toBe('debug')
@@ -66,24 +71,24 @@ test('a non-interactive node call left at ask is explained once, naming the node
 })
 
 test('the same node call asked again keeps the verdict and adds no second line', async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'again')).toEqual({ deny: 'ask' })
-  expect(await nodeCall($, h, runId, 'again')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'again')).toMatchObject(LEFT_AT_ASK)
+  expect(await nodeCall($, h, runId, 'again')).toMatchObject(LEFT_AT_ASK)
   expect(explained(h)).toHaveLength(1)
   expect(permissionRecords(h).map(record => record.note)).toHaveLength(2)
 })
 
 test('an interactive session leaves the node call at ask with no line and no note, but a record that names the node', async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await boot($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'interactive-call')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'interactive-call')).toMatchObject(LEFT_AT_ASK)
   expect(explained(h)).toEqual([])
   const [record] = permissionRecords(h)
   expect(record).toMatchObject({ runId, nodeId: 'a', selected: 'ask', outcome: 'low-confidence' })
@@ -120,27 +125,66 @@ test('a worker identified by the host agent id alone is explained when the dag s
 })
 
 test('a Jev failure without an answer is explained by its outcome alone', { options: { jev_model_fallback: false } }, async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.httpStatus = 503
   await bootHeadless($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'failed-jev')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'failed-jev')).toMatchObject(LEFT_AT_ASK)
   expect(explained(h)).toEqual([`${runId}/a: ${NOTE} (Jev http-error); ${FIX}`])
   expect(permissionRecords(h)).toMatchObject([{ runId, nodeId: 'a', note: `${NOTE} (Jev http-error); ${FIX}` }])
 })
 
 test('a confident Jev answer that settles the call adds no line and no note', async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.95 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'settled')).toHaveProperty('result')
+  // The stand-in's own create result, not the engine's refusal: a refused call resolves a result string too, so only this shape says it ran.
+  expect(await nodeCall($, h, runId, 'settled')).toMatchObject({ result: { type: 'create', filePath: '/work/a', content: 'done' } })
   expect(explained(h)).toEqual([])
   const [record] = permissionRecords(h)
   expect(record).toMatchObject({ runId, nodeId: 'a', selected: 'allow', outcome: 'applied' })
   expect(record).not.toHaveProperty('note')
+})
+
+// The refusal text cannot tell the bare ask from an ask with a reason or one the plugin reworded, so the host's own query
+// pins the verdict. Scope all lets Jev answer a query that carries no node task (the call's task is gone once the call
+// completes), and the request count shows Jev was asked: the ask is its low confidence or failure, not a skipped question.
+for (const [mode, bootSession] of [['non-interactive', bootHeadless], ['interactive', boot]] as const) {
+  test(`a node ask left at low confidence reads as the bare ask to the host (${mode} session)`, { options: { jev_permission_scope: 'all' } }, async ($, on) => {
+    askGate(on)
+    const h = harness(on)
+    h.control.permission = { choice: 'allow', confidence: 0.88 }
+    await bootSession($)
+    const runId = await start($, DEFINITION)
+    const before = h.requests.length
+    expect(await nodeVerdict($, h, runId, 'low-confidence-verdict')).toEqual({ decision: 'ask' })
+    expect(h.requests).toHaveLength(before + 1)
+  })
+}
+
+test('a node ask whose Jev request failed reads as the bare ask to the host', { options: { jev_permission_scope: 'all', jev_model_fallback: false } }, async ($, on) => {
+  askGate(on)
+  const h = harness(on)
+  h.control.httpStatus = 503
+  await bootHeadless($)
+  const runId = await start($, DEFINITION)
+  const before = h.requests.length
+  expect(await nodeVerdict($, h, runId, 'failed-jev-verdict')).toEqual({ decision: 'ask' })
+  expect(h.requests).toHaveLength(before + 1)
+})
+
+test('a node ask Jev allows confidently reads as that allow to the host', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
+  askGate(on)
+  const h = harness(on)
+  h.control.permission = { choice: 'allow', confidence: 0.95 }
+  await bootHeadless($)
+  const runId = await start($, DEFINITION)
+  const before = h.requests.length
+  expect(await nodeVerdict($, h, runId, 'allowed-verdict')).toMatchObject({ decision: 'allow', reason: 'Jev allow (0.95)' })
+  expect(h.requests).toHaveLength(before + 1)
 })
 
 // Every line the plugin logged for a call left at ask, whatever the tool.
@@ -169,12 +213,12 @@ function bashCheck($: Engine, agentId: string, toolUseId: string) {
 }
 
 test('a node call left at ask in a non-interactive session ends that node line of the settle summary with the hint', async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'hinted')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'hinted')).toMatchObject(LEFT_AT_ASK)
   await finish($, h)
   expect(settles(h)).toHaveLength(1)
   const line = headOf(settles(h)[0], 'a')
@@ -184,26 +228,26 @@ test('a node call left at ask in a non-interactive session ends that node line o
 })
 
 test('an interactive session leaves the settle summary without the hint', async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await boot($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'interactive-settle')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'interactive-settle')).toMatchObject(LEFT_AT_ASK)
   await finish($, h)
   expect(settles(h)).toHaveLength(1)
   expect(settles(h)[0]).not.toContain('needed approval')
 })
 
 test('two tools left at ask by one node attempt log two lines and the hint lists both, once each', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
-  expect(await nodeCall($, h, runId, 'first-tool')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'first-tool')).toMatchObject(LEFT_AT_ASK)
   expect(await bashCheck($, agentOf(h, runId), 'second-tool')).toEqual({ decision: 'ask' })
-  expect(await nodeCall($, h, runId, 'first-tool-again')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'first-tool-again')).toMatchObject(LEFT_AT_ASK)
   expect(asks(h)).toEqual([
     `${runId}/a: Write ${NEEDS} (Jev low-confidence: allow at 0.88, jev_confidence 0.9); ${FIX}`,
     `${runId}/a: Bash ${NEEDS} (Jev low-confidence: allow at 0.88, jev_confidence 0.9); allow it up front with --allowedTools Bash or a --permission-mode that covers it`,
@@ -213,13 +257,13 @@ test('two tools left at ask by one node attempt log two lines and the hint lists
 })
 
 test('a new attempt of the node left at ask again logs a new line and hints only for that attempt', { options: { auto_recovery: false } }, async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
   h.control.exitCode = 1
-  expect(await nodeCall($, h, runId, 'attempt-one')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'attempt-one')).toMatchObject(LEFT_AT_ASK)
   await finish($, h)
   expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'failed', attempt: 1 })
   expect(asks(h)).toHaveLength(1)
@@ -228,8 +272,8 @@ test('a new attempt of the node left at ask again logs a new line and hints only
   h.control.exitCode = 0
   await dag($, { action: 'retry', run_id: runId, node_id: 'a' })
   expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'running', attempt: 2 })
-  expect(await nodeCall($, h, runId, 'attempt-two')).toEqual({ deny: 'ask' })
-  expect(await nodeCall($, h, runId, 'attempt-two-again')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'attempt-two')).toMatchObject(LEFT_AT_ASK)
+  expect(await nodeCall($, h, runId, 'attempt-two-again')).toMatchObject(LEFT_AT_ASK)
   expect(asks(h)).toEqual([
     `${runId}/a: ${NOTE} (Jev low-confidence: allow at 0.88, jev_confidence 0.9); ${FIX}`,
     `${runId}/a: ${NOTE} (Jev low-confidence: allow at 0.88, jev_confidence 0.9); ${FIX}`,
@@ -240,13 +284,13 @@ test('a new attempt of the node left at ask again logs a new line and hints only
 })
 
 test('a retry that asks for nothing does not inherit the hint of the attempt before it', { options: { auto_recovery: false } }, async ($, on) => {
-  askGate(on, $)
+  askGate(on)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
   await bootHeadless($)
   const runId = await start($, DEFINITION)
   h.control.exitCode = 1
-  expect(await nodeCall($, h, runId, 'attempt-one')).toEqual({ deny: 'ask' })
+  expect(await nodeCall($, h, runId, 'attempt-one')).toMatchObject(LEFT_AT_ASK)
   await finish($, h)
   expect(headOf(settles(h)[0], 'a')).toContain(HINT('Write'))
 

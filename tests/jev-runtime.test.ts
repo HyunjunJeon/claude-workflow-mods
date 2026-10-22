@@ -324,10 +324,8 @@ for (const decision of DECISIONS) {
     const h = harness(on)
     on('tool.check', () => { h.order.push('baseline'); return { decision: 'ask', reason: 'baseline reason', rule: 'baseline rule' } })
     const executed: unknown[] = []
-    // The test bottom acts as the host permission gate, using the real call ID.
+    // The test's own tool.call stands for the tool; the engine reaches it only after the permission step.
     on('tool.call', { tool: PROBE }, async (_engine, e) => {
-      const verdict = await $.tool.check({ tool: e.tool, input: { file_path: e.file_path, content: e.content }, tool_use_id: e.tool_use_id })
-      if (verdict.decision !== 'allow') return { deny: verdict.reason ?? verdict.decision }
       executed.push(e.file_path)
       return { result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
     })
@@ -340,7 +338,9 @@ for (const decision of DECISIONS) {
     const call = { tool: PROBE, file_path: '/work/a', content: 'done', agentId, tool_use_id: 'scoped-call' } as const
     const result = await $.tool.call(call)
     expect(executed).toEqual(decision === 'allow' ? ['/work/a'] : [])
-    expect(decision === 'allow' ? result.result : result.deny).toBeDefined()
+    // A refused call resolves a result string too, so the allow arm needs the stand-in's own create result.
+    if (decision === 'allow') expect(result).toMatchObject({ result: { type: 'create', filePath: '/work/a', content: 'done' } })
+    else expect(result).toMatchObject({ isError: true, text: expect.stringContaining('denied by plugin dag-workflow: Jev deny (0.9)') })
     expect(body(h, 1).state).toEqual({
       tool: PROBE, input: { file_path: '/work/a', content: 'done' }, request: 'Change only A',
       projectRoot: '/work', goal: 'Ship a scoped change', task: 'Implement A',

@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CLAUDE_CODE_PACKAGE: "@anthropic-ai/claude-code@2.1.306"
+  CLAUDE_CODE_PACKAGE: "@anthropic-ai/claude-code@2.1.307"
   DISABLE_AUTOUPDATER: "1"
 
 jobs:
