@@ -46,3 +46,10 @@ test('a surface decision survives a reload and an unknown kind is still refused'
   expect(parseDecisionLog(log([surface]), '/p', 's')).toEqual([surface])
   expect(parseDecisionLog(log([{ ...surface, kind: 'canvas' }]), '/p', 's')).toEqual([])
 })
+
+test('a read-only decision survives a reload and keeps its note', () => {
+  const readonly: DecisionRecord = { ...record, kind: 'readonly', subject: 'Bash', proposed: 'allow', selected: 'ask', source: 'baseline', outcome: 'existing-decision', latencyMs: 0, threshold: 0, note: 'git status' }
+  const log = (records: unknown[]) => ({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records })
+  expect(parseDecisionLog(log([readonly]), '/p', 's')).toEqual([readonly])
+  expect(parseDecisionLog(log([{ ...readonly, kind: 'read-only' }]), '/p', 's')).toEqual([])
+})

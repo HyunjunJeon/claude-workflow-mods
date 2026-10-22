@@ -82,3 +82,60 @@ export function retentionPlan(input: RetentionInput): RetentionPlan {
     sessionKeys,
   }
 }
+
+// What the trajectory log (trajectory.ts) keeps under .claude/dag/trajectories: a folder per run id or per `session-<id>`, and
+// a settled run's events joined into <run_id>.jsonl beside it. An entry is the folder and its joined file together. A run's
+// folder is named for its run id, which ORPHAN_DIR already matches.
+const BYTES_PER_MB = 1024 * 1024
+const TRAJECTORY_SESSION = /^session-([A-Za-z0-9_-]+)$/
+
+export type TrajectoryEntry = {
+  name: string
+  // The newest of the folder's files and the joined file; an entry with no file is 0, the oldest.
+  mtimeMs: number
+  bytes: number
+}
+
+// Which run or session an entry belongs to, undefined for a name the plugin never wrote. This is the safe-name check: neither
+// pattern admits a dot or a slash, so a returned name cannot leave the trajectories folder.
+export function trajectoryOwner(name: string): { kind: 'run' | 'session'; id: string } | undefined {
+  if (ORPHAN_DIR.test(name)) return { kind: 'run', id: name }
+  const session = TRAJECTORY_SESSION.exec(name)?.[1]
+  return session === undefined ? undefined : { kind: 'session', id: session }
+}
+
+export type TrajectoryRetentionInput = {
+  entries: TrajectoryEntry[]
+  now: number
+  // 0 leaves the age limit off.
+  retentionDays: number
+  // 0 leaves the size cap off.
+  maxMb: number
+  currentSession: string
+  unsettledRunIds: ReadonlySet<string>
+}
+
+// The entries to delete, oldest first: every unprotected entry whose newest file is older than retentionDays, then, while the
+// rest still add up to more than maxMb, the unprotected entry with the oldest newest file. The current session's entry and an
+// unsettled run's are protected, but still count toward the total, so a cap they exceed alone removes every other entry.
+export function trajectoryPlan(input: TrajectoryRetentionInput): string[] {
+  const { entries, now, retentionDays, maxMb, currentSession, unsettledRunIds } = input
+  const removable = entries.filter(entry => {
+    const owner = trajectoryOwner(entry.name)
+    if (owner === undefined) return false
+    return owner.kind === 'run' ? !unsettledRunIds.has(owner.id) : owner.id !== currentSession
+  }).sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name))
+  const cutoff = now - retentionDays * DAY_MS
+  const doomed = new Set(retentionDays > 0 ? removable.filter(entry => entry.mtimeMs < cutoff) : [])
+  const maxBytes = maxMb * BYTES_PER_MB
+  if (maxBytes > 0) {
+    let total = entries.reduce((sum, entry) => doomed.has(entry) ? sum : sum + entry.bytes, 0)
+    for (const entry of removable) {
+      if (total <= maxBytes) break
+      if (doomed.has(entry)) continue
+      doomed.add(entry)
+      total -= entry.bytes
+    }
+  }
+  return removable.filter(entry => doomed.has(entry)).map(entry => entry.name)
+}

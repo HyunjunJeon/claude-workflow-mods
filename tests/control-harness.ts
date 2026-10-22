@@ -35,6 +35,8 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const submits: { text: string; context: readonly string[]; origin: string }[] = []
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
+  // The size and the change time fs.list answers for a file; a file without an entry is 1 byte, changed at 0.
+  const fileMeta = new Map<string, { size?: number; mtimeMs?: number }>()
   // permission: the Jev answer to a permission question; unset, the question gets the generic 'trivial' answer.
   // git: what a git call prints, keyed by its argv after 'git' joined with spaces ('show HEAD~1:./src/a.ts',
   // 'diff --no-color --no-ext-diff main -- :(literal)src/b.ts'); a call whose key is absent exits 128 as git does for an unknown
@@ -112,7 +114,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     const names = new Set([...files.keys()].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length).split('/')[0]))
     return { value: [...names].filter((name): name is string => name !== undefined).map(name => ({
       name, kind: files.has(prefix + name) ? 'file' as const : 'dir' as const,
-      size: 1, mtimeMs: 0, isLink: false,
+      size: fileMeta.get(prefix + name)?.size ?? 1, mtimeMs: fileMeta.get(prefix + name)?.mtimeMs ?? 0, isLink: false,
     })) }
   })
   on('fs.exists', ($, e) => {
@@ -174,7 +176,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PermissionRequest', () => ({}))
-  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, tornWrites, moveErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
+  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, tornWrites, moveErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, fileMeta, control }
 }
 
 // The manifest's default enforcement is auto, which asks Jev about every user prompt. These suites were written for

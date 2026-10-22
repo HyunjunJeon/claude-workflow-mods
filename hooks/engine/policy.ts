@@ -90,6 +90,8 @@ const SHELL_CLOSERS: ReadonlySet<string> = new Set(['done', 'fi'])
 const COMMAND_BUILTIN = 'command'
 // A `NAME=value` word before a command is skipped only for variables that change how output looks. Any other one
 // can change what runs (LD_PRELOAD, PATH, GIT_PAGER), and a bare `PATH=./bin;` still holds for the next segment.
+// Lowercase names are refused too: in zsh `path=(/x $path)` changes PATH, `functions[ls]=x` redefines ls and
+// `precmd_functions` runs code, and `a=-delete; find . $a` carries a flag past the checks below.
 const DISPLAY_ENV = /^(?:LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|CLICOLOR|COLUMNS|TERM|LC_[A-Za-z0-9_]*)=/
 // `NAME+=value` and `NAME[i]=value` assign too; left alone, a head like `PATH+=:/x/ls` would be read as the command `ls`.
 const ENV_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]=]*\])?\+?=/
@@ -336,7 +338,7 @@ export function readOnlyBashProblem(command: string): string | undefined {
     const head = tokens[0]
     if (!head) continue
     const assigned = ENV_ASSIGNMENT.exec(head)?.[1]
-    if (assigned) return `${assigned}= is an environment prefix that can change what runs (LD_PRELOAD, PATH, GIT_*)`
+    if (assigned) return `${assigned}= is refused here: a shell variable can change what runs (PATH, LD_PRELOAD, GIT_*, and in zsh also path or functions) or carry a flag past these checks; write the value into the command instead`
     if (SHELL_CLOSERS.has(head) && tokens.length === 1) continue
     if (head === 'for') {
       if (tokens.length >= 3 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[1] as string) && tokens[2] === 'in') continue

@@ -104,7 +104,8 @@ function expectRefused(cases: [string, string][]): void {
   for (const [command, problem] of cases) expect(`${command} => ${readOnlyBashProblem(command) ?? 'ok'}`).toBe(`${command} => ${problem}`)
 }
 
-const envReason = (name: string): string => `${name}= is an environment prefix that can change what runs (LD_PRELOAD, PATH, GIT_*)`
+const envReason = (name: string): string =>
+  `${name}= is refused here: a shell variable can change what runs (PATH, LD_PRELOAD, GIT_*, and in zsh also path or functions) or carry a flag past these checks; write the value into the command instead`
 
 test('a NAME=value prefix is skipped only for locale and display variables', async () => {
   expectAllowed([
@@ -133,6 +134,21 @@ test('a NAME=value prefix is skipped only for locale and display variables', asy
     ['PATH+=:/tmp/x/ls; ls', envReason('PATH')],
     ['path[1]=/tmp/x/ls; ls', envReason('path')],
   ])
+})
+
+test('a shell variable of any case is refused, standing alone or as a prefix, and the reason says to write the value into the command', async () => {
+  expectRefused([
+    ['d=/tmp/x; tail -1 $d/f', envReason('d')],
+    ['out=hooks; ls $out', envReason('out')],
+    ['path=(/x $path); ls', envReason('path')],
+    ['functions[ls]=x; ls', envReason('functions')],
+    ['precmd_functions=x; ls', envReason('precmd_functions')],
+    ['a=-delete; find . $a', envReason('a')],
+    ['D=/tmp/x; ls', envReason('D')],
+    ['http_proxy=x git log', envReason('http_proxy')],
+  ])
+  expectAllowed(['LC_ALL=C sort a', 'TZ=UTC date', 'LC_ALL=C TZ=UTC date'])
+  expect(readOnlyBashProblem('d=/tmp/x; tail -1 $d/f')).toContain('write the value into the command')
 })
 
 test('git global options are limited to choosing the repository and the pager', async () => {

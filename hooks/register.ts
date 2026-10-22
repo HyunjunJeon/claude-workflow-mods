@@ -1,4 +1,4 @@
-import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult, ToolCheckDecision } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
@@ -42,11 +42,11 @@ import {
   advance,
   expandNodes,
 } from './engine/run.ts'
-import { retentionPlan, type RetentionFile } from './engine/retention.ts'
+import { retentionPlan, trajectoryOwner, trajectoryPlan, type RetentionFile, type TrajectoryEntry } from './engine/retention.ts'
 import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { killByName, killRefusal } from './engine/kill-guard.ts'
 import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandidates, owaspCweRows, parseSemgrepReport, SEMGREP_RULES_DIR, semgrepArgv, semgrepCandidates, semgrepNote, semgrepRefusal, semgrepTarget, semgrepVersion, type GuideRows, type SemgrepHit } from './engine/semgrep.ts'
-import { addUsage, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
+import { addUsage, cut, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, archivedSkillPath, eligibleSkills, emptyLearningSession, emptyLibrary, learnedSkillPath, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearnedSkill, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
@@ -115,6 +115,8 @@ const MODE_BUDGET_MS = 8_000
 const ANSWER_DAG_LINE = '[dag-workflow] This answer selects work that runs as a DAG under enforcement auto, so the main-loop tools are now gated for the rest of this turn: plan it with the dag-workflow:planning skill and start a run.'
 // The planning skill's final audit never runs on trivial; the plugin holds it to that whatever the proposal or Jev said.
 const FINAL_AUDIT_CATEGORY = 'standard'
+// The command a readonly decision keeps in its note: enough to tell which command the host did not mark read-only.
+const DECISION_COMMAND_CHARS = 200
 const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
 const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
 const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
@@ -580,6 +582,10 @@ let repositoryAllows: ReadonlySet<string> | undefined
 // The trajectory log (trajectory.ts): its own write queue, so no run step waits on it, a counter that orders events of the same
 // millisecond, where the main conversation's log stopped, and each node agent's token counts until its node ends.
 let trajectoryLog = false
+// Startup removes trajectories (pruneTrajectories) older than this many days, then the oldest while the folder holds more than
+// this many megabytes; 0 turns each off.
+let trajectoryRetentionDays = 90
+let trajectoryMaxMb = 1024
 let trajectoryWrites: Promise<unknown> = Promise.resolve()
 let trajectorySeq = 0
 let mainRows: RowMark | undefined
@@ -868,7 +874,9 @@ async function ensureGitignore($: EngineInterface, root: string): Promise<void> 
   if (!(await $.fs.exists(path))) await $.fs.write(path, GITIGNORE)
 }
 
-async function persistDecisions($: EngineInterface, records: DecisionRecord[]): Promise<void> {
+// `report` takes a write failure: a record that is the session's own evidence is logged in the transcript, one written on
+// every tool call (the read-only shadow) goes to the debug log so a full disk does not add a line per call.
+async function persistDecisions($: EngineInterface, records: DecisionRecord[], report: (text: string) => void = text => $.ui.log(text)): Promise<void> {
   decisionRecords = appendDecisions(decisionRecords, records)
   const content = JSON.stringify({ schemaVersion: 1, projectRoot, sessionId, records: decisionRecords })
   const dir = `${projectRoot}/${DAG_SUBDIR}/decisions`
@@ -880,14 +888,33 @@ async function persistDecisions($: EngineInterface, records: DecisionRecord[]): 
   try {
     await result
   } catch (error) {
-    $.ui.log(`could not persist decision history: ${message(error)}`)
+    report(`could not persist decision history: ${message(error)}`)
   }
   $.ui.invalidate('ui.render')
 }
 
-function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: JevEvaluation, threshold = jevConfidence): DecisionRecord {
+// `evaluation` is what Jev answered; a record no Jev call is behind passes `{}`.
+function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: Pick<JevEvaluation, 'note' | 'backend'>, threshold = jevConfidence): DecisionRecord {
   const note = [input.note, evaluation.note].filter(Boolean).join('; ')
   return { ...input, ...(note ? { note } : {}), ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold }
+}
+
+// The main-conversation gate lets a Bash call through only when readOnlyBashProblem finds nothing, so a call that reaches
+// tool.check there (and Bash is not in main_allowed_tools) was judged read-only by this plugin. When the host's own
+// isReadOnly did not hold it too, the two judges differ; this records where, as evidence, and never touches the verdict.
+// A failure to record goes to the debug log.
+async function recordHostReadOnlyGap($: EngineInterface, input: unknown, verdict: ToolCheckDecision): Promise<void> {
+  try {
+    const command = typeof input === 'object' && input !== null && 'command' in input && typeof input.command === 'string' ? input.command : ''
+    // cut() masks before it cuts and adds a marker after the cut; the marker would take the note past 200 characters.
+    const note = cut(command, DECISION_COMMAND_CHARS).slice(0, DECISION_COMMAND_CHARS)
+    await persistDecisions($, [decisionRecord({
+      at: await $.clock.now(), kind: 'readonly', subject: 'Bash', proposed: 'allow', selected: verdict,
+      source: 'baseline', outcome: 'existing-decision', latencyMs: 0, stateHash: hash(note), note,
+    }, {}, 0)], text => debug($, text))
+  } catch (error) {
+    debug($, `could not record a read-only Bash call: ${message(error)}`)
+  }
 }
 
 async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Run> {
@@ -1402,6 +1429,63 @@ async function pruneArtifacts($: EngineInterface): Promise<void> {
       debug($, `could not prune session record ${id}: ${message(error)}`)
     }
   }
+}
+
+// A trajectory folder holds one file per event, so a long run's can hold thousands. One with more than this many is left alone
+// rather than read, and so is never removed.
+const TRAJECTORY_FOLDER_FILES = 2000
+
+// The entries under the trajectories folder: each run or session folder together with its joined <run_id>.jsonl, sized by the
+// files the host lists and dated by the newest of them. A folder that cannot be listed or holds too many files is left out
+// whole, joined file included, so it can never be taken for an empty and old one.
+async function trajectoryEntries($: EngineInterface, dir: string): Promise<TrajectoryEntry[]> {
+  const found = new Map<string, TrajectoryEntry>()
+  const skipped = new Set<string>()
+  const join = (name: string, bytes: number, mtimeMs: number) => {
+    const entry = found.get(name) ?? { name, mtimeMs: 0, bytes: 0 }
+    found.set(name, { name, mtimeMs: Math.max(entry.mtimeMs, mtimeMs), bytes: entry.bytes + bytes })
+  }
+  for (const item of await listIfPresent($, dir)) {
+    if (item.isLink) continue
+    if (item.kind === 'file' && item.name.endsWith('.jsonl')) {
+      const name = item.name.slice(0, -'.jsonl'.length)
+      if (trajectoryOwner(name)) join(name, item.size, item.mtimeMs)
+    } else if (item.kind === 'dir' && trajectoryOwner(item.name)) {
+      join(item.name, 0, 0)
+      try {
+        const files = await $.fs.list(`${dir}/${item.name}`)
+        if (files.length > TRAJECTORY_FOLDER_FILES) {
+          skipped.add(item.name)
+          debug($, `skipped trajectory ${item.name}: it holds more than ${TRAJECTORY_FOLDER_FILES} files`)
+          continue
+        }
+        for (const file of files) join(item.name, file.size, file.mtimeMs)
+      } catch (error) {
+        skipped.add(item.name)
+        debug($, `skipped trajectory ${item.name}: could not list it: ${message(error)}`)
+      }
+    }
+  }
+  return [...found.values()].filter(entry => !skipped.has(entry.name))
+}
+
+// Removes the trajectories (trajectoryPlan) that are older than trajectory_retention_days or over trajectory_max_mb. It does not
+// depend on retention_days or on trajectory_log: a log that was turned off still gets cleaned up.
+async function pruneTrajectories($: EngineInterface): Promise<void> {
+  if (!projectRoot || !(trajectoryRetentionDays > 0 || trajectoryMaxMb > 0)) return
+  const dir = `${projectRoot}/${TRAJECTORY_SUBDIR}`
+  const plan = trajectoryPlan({
+    entries: await trajectoryEntries($, dir), now: await $.clock.now(), retentionDays: trajectoryRetentionDays, maxMb: trajectoryMaxMb,
+    currentSession: sessionId, unsettledRunIds: new Set([...runs.values()].filter(run => !isSettled(run)).map(run => run.runId)),
+  })
+  const removed: string[] = []
+  for (const name of plan) {
+    // The folder first: a joined file that outlived a failed removal is an entry of its own at the next start.
+    if (!(await removePath($, '-rf', `${dir}/${name}`, 'prune the trajectory'))) continue
+    await removePath($, '-f', `${dir}/${name}.jsonl`, 'prune the joined trajectory')
+    removed.push(name)
+  }
+  if (removed.length > 0) debug($, `pruned trajectories ${removed.join(', ')}`)
 }
 
 async function recoverRuns($: EngineInterface): Promise<void> {
@@ -3662,6 +3746,10 @@ export function register(on: On, options: PluginOptions) {
   if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
   secureScan = options.secure_scan !== false
   trajectoryLog = options.trajectory_log === true
+  const trajectoryDays = options.trajectory_retention_days
+  if (typeof trajectoryDays === 'number' && Number.isInteger(trajectoryDays) && trajectoryDays >= 0 && trajectoryDays <= 3650) trajectoryRetentionDays = trajectoryDays
+  const trajectoryMb = options.trajectory_max_mb
+  if (typeof trajectoryMb === 'number' && Number.isInteger(trajectoryMb) && trajectoryMb >= 0 && trajectoryMb <= 102_400) trajectoryMaxMb = trajectoryMb
   reviewLedger = options.review_ledger !== false
   jevPermissionScope = options.jev_permission_scope === 'all' ? 'all' : 'dag'
   learningEnabled = options.session_learning !== false
@@ -3723,6 +3811,11 @@ export function register(on: On, options: PluginOptions) {
       await pruneArtifacts($)
     } catch (error) {
       $.ui.log(`could not prune expired DAG artifacts: ${message(error)}`)
+    }
+    try {
+      await pruneTrajectories($)
+    } catch (error) {
+      $.ui.log(`could not prune old trajectories: ${message(error)}`)
     }
     try {
       await loadMetadata($)
@@ -4022,6 +4115,10 @@ export function register(on: On, options: PluginOptions) {
 
   on('tool.check', async ($, e, next) => {
     const decided = await next(e)
+    // Only the model's own main-conversation call went through the main-loop gate: a subagent's call, a plugin's call
+    // (origin) and a $.tool.check query (no tool_use_id) did not, and a main_allowed_tools Bash skips the judge.
+    if (e.tool === 'Bash' && !e.agentId && e.tool_use_id && e.isReadOnly !== true && next.origin.plugin === 'engine'
+      && gatesMainLoop(enforcement, turnMode) && !extraAllowed.has('Bash')) await recordHostReadOnlyGap($, e.input, decided.decision)
     if (decided.decision !== 'ask') return decided
     const call = e.tool_use_id ? openCalls.get(e.tool_use_id) : undefined
     // The host sets agentId on a real call in a subagent loop; openCalls only knows calls whose tool.call reached this plugin.

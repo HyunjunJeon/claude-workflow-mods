@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { retentionPlan, type RetentionInput } from '../hooks/engine/retention.ts'
+import { retentionPlan, trajectoryPlan, type RetentionInput, type TrajectoryRetentionInput } from '../hooks/engine/retention.ts'
 import { createRun } from '../hooks/engine/run.ts'
 import type { SessionRecord } from '../hooks/engine/sessions.ts'
 import type { Run } from '../hooks/engine/types.ts'
@@ -116,4 +116,68 @@ test('an old board file of a closed session is picked while current, live, kept-
     ],
   })
   expect(result.boardFiles).toEqual(['gone.json'])
+})
+
+// trajectoryPlan: what the trajectory log keeps under trajectory_retention_days and trajectory_max_mb.
+const MB = 1024 * 1024
+const NOW = 200 * DAY
+
+function traj(name: string, ageDays: number, mb = 1) {
+  return { name, mtimeMs: NOW - ageDays * DAY, bytes: mb * MB }
+}
+
+function trajPlan(entries: ReturnType<typeof traj>[], overrides: Partial<TrajectoryRetentionInput> = {}) {
+  return trajectoryPlan({
+    entries, now: NOW, retentionDays: 90, maxMb: 0, currentSession: 'cur', unsettledRunIds: new Set(), ...overrides,
+  })
+}
+
+test('a trajectory whose newest file is older than the day limit goes and one at the limit stays', () => {
+  expect(trajPlan([traj('dag_old', 100), traj('dag_edge', 90), traj('dag_new', 10)])).toEqual(['dag_old'])
+})
+
+test('over the size cap the settled entry with the oldest newest file goes first, until the rest fits', () => {
+  const entries = [traj('dag_c', 10, 4), traj('dag_a', 30, 4), traj('dag_b', 20, 4)]
+  expect(trajPlan(entries, { maxMb: 10 })).toEqual(['dag_a'])
+  expect(trajPlan(entries, { maxMb: 5 })).toEqual(['dag_a', 'dag_b'])
+  expect(trajPlan(entries, { maxMb: 12 })).toEqual([])
+})
+
+test('the age limit runs first, and what it frees counts toward the cap', () => {
+  const entries = [traj('dag_old', 100, 8), traj('dag_a', 30, 6), traj('dag_b', 20, 6), traj('dag_c', 10, 6)]
+  expect(trajPlan(entries, { maxMb: 15 })).toEqual(['dag_old', 'dag_a'])
+  expect(trajPlan(entries, { maxMb: 26 })).toEqual(['dag_old'])
+})
+
+test('entries with the same newest file go in name order under the cap', () => {
+  const entries = [traj('dag_b', 5, 4), traj('dag_a', 5, 4), traj('dag_c', 5, 4)]
+  expect(trajPlan(entries, { maxMb: 8 })).toEqual(['dag_a'])
+})
+
+test('the current session\'s entry is never returned, however old or large', () => {
+  const entries = [traj('session-cur', 400, 50), traj('session-other', 400, 1), traj('dag_old', 400, 1)]
+  expect(trajPlan(entries, { maxMb: 1 })).toEqual(['dag_old', 'session-other'])
+})
+
+test('an unsettled run\'s entry is never returned, however old or large', () => {
+  const entries = [traj('dag_busy', 400, 50), traj('dag_done', 400, 1)]
+  expect(trajPlan(entries, { maxMb: 1, unsettledRunIds: new Set(['dag_busy']) })).toEqual(['dag_done'])
+  expect(trajPlan(entries, { maxMb: 1 })).toEqual(['dag_busy', 'dag_done'])
+})
+
+test('protected entries count toward the cap, so when they alone exceed it every other entry goes', () => {
+  const entries = [traj('dag_busy', 5, 20), traj('dag_a', 2, 1), traj('dag_b', 1, 1)]
+  expect(trajPlan(entries, { maxMb: 10, unsettledRunIds: new Set(['dag_busy']) })).toEqual(['dag_a', 'dag_b'])
+})
+
+test('0 days leaves the age limit off and 0 MB leaves the cap off, each on its own', () => {
+  const entries = [traj('dag_old', 400, 8), traj('dag_new', 1, 8)]
+  expect(trajPlan(entries, { retentionDays: 0, maxMb: 0 })).toEqual([])
+  expect(trajPlan(entries, { retentionDays: 0, maxMb: 10 })).toEqual(['dag_old'])
+  expect(trajPlan(entries, { retentionDays: 90, maxMb: 0 })).toEqual(['dag_old'])
+})
+
+test('a name the safe-name check rejects is never returned', () => {
+  const names = ['', '.', '..', 'a/b', '../dag_x', 'dag_', 'dag_a.b', 'dag_a b', 'notes', 'session-', 'session-a/b', 'session-..', 'session-a.b']
+  expect(trajPlan(names.map(name => traj(name, 400, 50)), { maxMb: 1 })).toEqual([])
 })

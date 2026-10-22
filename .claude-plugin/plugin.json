@@ -137,8 +137,24 @@
     "trajectory_log": {
       "type": "boolean",
       "title": "Trajectory log",
-      "description": "Record every run's trajectory under .claude/dag/trajectories/ for comparing runs: each node attempt's exact prompt, model, answer, verification, reviewer notes, change against HEAD, token counts and tool-call transcript, each review-fix round's findings, and the main conversation's turns. Secrets are masked and long text is cut. Each settled run is also joined into <run_id>.jsonl. Not pruned by retention_days",
+      "description": "Record every run's trajectory under .claude/dag/trajectories/ for comparing runs: each node attempt's exact prompt, model, answer, verification, reviewer notes, change against HEAD, token counts and tool-call transcript, each review-fix round's findings, and the main conversation's turns. Secrets are masked and long text is cut. Each settled run is also joined into <run_id>.jsonl. Startup removes old and excess trajectories by trajectory_retention_days and trajectory_max_mb, whether or not the log is on; retention_days does not apply to them",
       "default": false
+    },
+    "trajectory_retention_days": {
+      "type": "number",
+      "title": "Trajectory retention (days)",
+      "description": "At startup, remove the trajectory (folder and joined .jsonl) of a settled run, or of another session's main conversation, whose newest file is older than this many days; the current session and runs that have not settled are kept. 0 keeps everything",
+      "default": 90,
+      "min": 0,
+      "max": 3650
+    },
+    "trajectory_max_mb": {
+      "type": "number",
+      "title": "Trajectory size cap (MB)",
+      "description": "At startup, when .claude/dag/trajectories/ holds more than this many megabytes, remove settled runs' trajectories (and other sessions' main conversations), the one with the oldest newest file first, until it fits or only the current session and unsettled runs are left. A folder of more than 2000 files is skipped. 0 means no cap",
+      "default": 1024,
+      "min": 0,
+      "max": 102400
     },
     "review_ledger": {
       "type": "boolean",
