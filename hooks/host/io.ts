@@ -2,11 +2,20 @@ import type { EngineInterface } from 'claude-code'
 import { hash } from '../engine/hash.ts'
 import { finalReport, type TranscriptRow } from '../ui/activity.ts'
 
-// The host helpers that register.ts and host/learning.ts both call with $. validate follows $ only into top-level functions
-// of the module's own files, and refuses $ passed to a method or a callback, so a helper both files need lives here.
+// The host helpers that register.ts and the host/ modules call with $, and the constants and types they share. validate
+// follows $ only into top-level functions of the module's own files, and refuses $ passed to a method or a callback, so a
+// helper two files need lives here.
 
 export const DAG_SUBDIR = '.claude/dag'
 const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
+export const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
+export const ATTENTION_TOAST_MS = 12_000
+// A board edit runs inside serialized(), so a git read that hangs (an index lock, a stalled network disk) would hold spawns and
+// ticks behind it. git show and git diff against a local ref took 17-26 ms in this repository (git 2.54), so 10 s leaves room
+// for a slow disk and still gives the queue back.
+export const GIT_READ_TIMEOUT_MS = 10_000
+
+export type ToolInput = Readonly<Record<string, unknown>>
 
 export type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
 
