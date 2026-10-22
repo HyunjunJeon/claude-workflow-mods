@@ -313,7 +313,7 @@ test('refused main-loop tools remain visible in the transcript', async ($, on) =
   expect(h.logOptions[refusalLog]).not.toEqual({ to: 'debug' })
 })
 
-test('sessions refresh same-project records and manual handoff drains then explicitly accepts', async ($, on) => {
+test('sessions refresh same-project records and manual handoff drains then explicitly accepts', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   on('tool.check', () => ({ decision: 'ask' }))
   await boot($)

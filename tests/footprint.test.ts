@@ -108,7 +108,23 @@ test('dag permission scope skips Jev for main-loop asks but still evaluates node
   expect(h.requests.at(-1)?.state).toMatchObject({ task: 'Produce artifact' })
 })
 
-test('default permission scope still evaluates a main-loop ask', async ($, on) => {
+test('default permission scope skips Jev for main-loop asks but still evaluates node asks', async ($, on) => {
+  writeGate(on, $)
+  const h = footprint(on)
+  await boot($)
+  await start($, DEFINITION)
+  const before = h.requests.length
+  const decisionsBefore = h.files.get(`${ROOT}/decisions/source.json`)
+  expect(await $.tool.check({ tool: 'Write', input: { file_path: '/work/a', content: 'x' } })).toEqual({ decision: 'ask' })
+  expect(h.requests).toHaveLength(before)
+  expect(h.files.get(`${ROOT}/decisions/source.json`)).toBe(decisionsBefore)
+  const call = { tool: 'Write', file_path: '/work/a', content: 'x', agentId: 'agent-1', tool_use_id: 'node-call' } as const
+  expect(await $.tool.call(call)).toHaveProperty('deny')
+  expect(h.requests).toHaveLength(before + 1)
+  expect(h.requests.at(-1)?.state).toMatchObject({ task: 'Produce artifact' })
+})
+
+test('all permission scope evaluates a main-loop ask', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   writeGate(on, $)
   const h = footprint(on)
   await boot($)

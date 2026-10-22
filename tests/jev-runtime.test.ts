@@ -67,7 +67,17 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   on('session.start', () => ({ cwd: '/work' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('session.id', () => ({ value: control.sessionId }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', ($, e) => {
+    // persist swaps a checkpoint in with `mv -f <temp> <path>` and removes a failed temp file with `rm -f`.
+    const [program, source, destination] = [e.argv[0], e.argv.at(-2), e.argv.at(-1)]
+    const text = source === undefined ? undefined : files.get(source)
+    if (program === 'mv' && source !== undefined && destination !== undefined && text !== undefined) {
+      files.set(destination, text)
+      files.delete(source)
+    }
+    if (program === 'rm' && destination !== undefined) files.delete(destination)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('fs.list', () => ({ value: [] }))
   on('fs.exists', ($, e) => ({ value: files.has(e.path) || [...files.keys()].some(file => file.startsWith(e.path.replace(/\/$/, '') + '/')) }))
   on('fs.read', ($, e) => ({ value: files.get(e.path) ?? '' }))
@@ -152,7 +162,7 @@ test('new starts batch every node once, route spawns, and preserve definition an
 })
 
 for (const disabled of ['no-key', 'off']) {
-  test(`routing and permission never use HTTP when ${disabled}`, { options: { jev_enabled: disabled !== 'off', jev_model_fallback: disabled === 'off' } }, async ($, on) => {
+  test(`routing and permission never use HTTP when ${disabled}`, { options: { jev_enabled: disabled !== 'off', jev_model_fallback: disabled === 'off', jev_permission_scope: 'all' } }, async ($, on) => {
     const h = harness(on, disabled === 'no-key' ? null : 'fake-test-key')
     on('tool.check', () => ({ decision: 'ask', reason: 'approval', rule: 'test-rule' }))
     await boot($)
@@ -177,7 +187,7 @@ const MODEL_FALLBACKS = [
 ]
 
 for (const item of MODEL_FALLBACKS) {
-  test(`session model fallback with ${item.name} decides ${item.decision}`, async ($, on) => {
+  test(`session model fallback with ${item.name} decides ${item.decision}`, { options: { jev_permission_scope: 'all' } }, async ($, on) => {
     const h = harness(on, item.key)
     h.control.reply = response({}, item.status)
     h.control.model = item.model
@@ -283,7 +293,7 @@ const FALLBACKS = [
 ]
 
 for (const item of FALLBACKS) {
-  test(`${item.name} preserves the complete ask baseline`, async ($, on) => {
+  test(`${item.name} preserves the complete ask baseline`, { options: { jev_permission_scope: 'all' } }, async ($, on) => {
     const h = harness(on)
     h.control.reply = item.reply
     h.control.failure = item.failure
@@ -298,7 +308,7 @@ for (const item of FALLBACKS) {
 
 // The host keeps these dialogs whatever a hook allows, so Jev could only deny the person's own question.
 for (const tool of ['AskUserQuestion', 'ExitPlanMode']) {
-  test(`${tool} keeps its ask without asking Jev`, async ($, on) => {
+  test(`${tool} keeps its ask without asking Jev`, { options: { jev_permission_scope: 'all' } }, async ($, on) => {
     const h = harness(on)
     h.control.reply = response({ permission: choice('deny', 1) })
     on('tool.check', () => { h.order.push('baseline'); return { decision: 'ask', reason: 'baseline reason', rule: 'baseline rule' } })
@@ -310,7 +320,7 @@ for (const tool of ['AskUserQuestion', 'ExitPlanMode']) {
 }
 
 for (const decision of DECISIONS) {
-  test(`confident ${decision} controls the actual wrapped tool call`, async ($, on) => {
+  test(`confident ${decision} controls the actual wrapped tool call`, { options: { jev_permission_scope: 'all' } }, async ($, on) => {
     const h = harness(on)
     on('tool.check', () => { h.order.push('baseline'); return { decision: 'ask', reason: 'baseline reason', rule: 'baseline rule' } })
     const executed: unknown[] = []
@@ -350,7 +360,7 @@ function answerEvery(picks: Record<string, string>, confidence: number) {
   }
 }
 
-test('session-model routing applies from its own lower threshold while permissions keep jev_confidence', async ($, on) => {
+test('session-model routing applies from its own lower threshold while permissions keep jev_confidence', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on, null)
   h.control.modelFor = answerEvery({ a: 'architect', b: 'writing', c: 'trivial', permission: 'allow' }, 0.85)
   on('tool.check', () => ({ decision: 'ask', reason: 'baseline', rule: 'rule' }))
@@ -407,7 +417,7 @@ for (const jev of ['answers trivial', 'is off']) {
   })
 }
 
-test('configured confidence overrides the default threshold', { options: { jev_confidence: 0.99 } }, async ($, on) => {
+test('configured confidence overrides the default threshold', { options: { jev_confidence: 0.99, jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   h.control.reply = response({ permission: choice('allow', 0.95) })
   on('tool.check', () => ({ decision: 'ask', reason: 'baseline', rule: 'rule' }))
@@ -415,7 +425,7 @@ test('configured confidence overrides the default threshold', { options: { jev_c
   expect(await $.tool.check({ tool: PROBE, input: {} })).toEqual({ decision: 'ask', reason: 'baseline', rule: 'rule' })
 })
 
-test('a hung HTTP request keeps ask at exactly the virtual 5000ms deadline', async ($, on) => {
+test('a hung HTTP request keeps ask at exactly the virtual 5000ms deadline', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   let release: (value: HttpResponse) => void = () => { throw new Error('Transport not started') }
   h.transport(() => new Promise<HttpResponse>(resolve => { release = resolve }))
@@ -433,7 +443,7 @@ test('a hung HTTP request keeps ask at exactly the virtual 5000ms deadline', asy
   await h.clock.settle()
 })
 
-test('successful HTTP completion cancels its virtual deadline', async ($, on) => {
+test('successful HTTP completion cancels its virtual deadline', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   const deadlines: AbortSignal[] = []
   on('clock.after', { ms: 5_000 }, async ($, e, next) => {
     deadlines.push(next.signal)
@@ -453,7 +463,7 @@ test('successful HTTP completion cancels its virtual deadline', async ($, on) =>
   expect(deadlines[0]?.aborted).toBe(true)
 })
 
-test('identical concurrent permission questions share HTTP while each keeps its own decision record', async ($, on) => {
+test('identical concurrent permission questions share HTTP while each keeps its own decision record', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   let release: (value: HttpResponse) => void = () => { throw new Error('Transport not started') }
   h.transport(() => new Promise<HttpResponse>(resolve => { release = resolve }))
@@ -470,7 +480,7 @@ test('identical concurrent permission questions share HTTP while each keeps its 
   expect(log.records.filter((item: { kind: string }) => item.kind === 'permission')).toHaveLength(2)
 })
 
-test('different permission inputs never merge and resolved permission approvals are not cached', async ($, on) => {
+test('different permission inputs never merge and resolved permission approvals are not cached', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   h.control.reply = response({ permission: choice('allow', 1) })
   on('tool.check', () => ({ decision: 'ask' }))
@@ -483,7 +493,7 @@ test('different permission inputs never merge and resolved permission approvals 
   expect(h.requests).toHaveLength(3)
 })
 
-test('the call limit preserves ask and records why no further judgment ran', { options: { jev_max_calls: 1 } }, async ($, on) => {
+test('the call limit preserves ask and records why no further judgment ran', { options: { jev_max_calls: 1, jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   h.control.reply = response({ permission: choice('allow', 1) })
   on('tool.check', () => ({ decision: 'ask', reason: 'baseline' }))
@@ -496,7 +506,7 @@ test('the call limit preserves ask and records why no further judgment ran', { o
   expect(log.records.at(-1)).toMatchObject({ source: 'baseline', selected: 'ask', outcome: 'disabled', note: expect.stringContaining('budget-exhausted') })
 })
 
-test('a failed HTTP attempt consumes the limit before model fallback', { options: { jev_max_calls: 1 } }, async ($, on) => {
+test('a failed HTTP attempt consumes the limit before model fallback', { options: { jev_max_calls: 1, jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   h.control.failure = true
   h.control.model = modelReply('allow', 1)
@@ -522,7 +532,7 @@ test('the model limit counts split routing calls and leaves remaining proposals 
   expect(nodes[2]?.routing?.category).toBe('trivial')
 })
 
-test('clear cannot replenish the same session budget while a new session starts a new budget', { options: { jev_max_calls: 1 } }, async ($, on) => {
+test('clear cannot replenish the same session budget while a new session starts a new budget', { options: { jev_max_calls: 1, jev_permission_scope: 'all' } }, async ($, on) => {
   const h = harness(on)
   h.control.reply = response({ permission: choice('allow', 1) })
   on('tool.check', () => ({ decision: 'ask' }))

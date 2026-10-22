@@ -104,9 +104,9 @@
     "jev_permission_scope": {
       "type": "string",
       "title": "Jev permission scope",
-      "description": "all: Jev resolves every uncertain tool permission; dag: limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged",
+      "description": "dag (default): limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged; all: Jev resolves every uncertain tool permission, including the main conversation's, and sends the tool input to Jev",
       "options": ["all", "dag"],
-      "default": "all"
+      "default": "dag"
     },
     "enforcement": {
       "type": "string",

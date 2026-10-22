@@ -218,7 +218,8 @@ const learningAgents = new Set<string>()
 let learningTurnRequested = false
 let learningSpawning = false
 let learningSpawnName: string | undefined
-let learningWriteSequence = 0
+// Numbers temp files of atomicWrite and the names of learning agents, so each is unique within the process.
+let writeSequence = 0
 let learningQueue: Promise<unknown> = Promise.resolve()
 
 function learningSessionPath(id = sessionId): string {
@@ -232,11 +233,25 @@ async function learningDirectory($: EngineInterface, path: string): Promise<void
   if (stat.kind !== 'dir' || stat.isLink) throw new Error(`learning directory is not a plain directory: ${path}`)
 }
 
-async function learningWrite($: EngineInterface, path: string, text: string): Promise<void> {
-  const temp = `${path}.${hash(sessionId)}.${++learningWriteSequence}.tmp`
-  await $.fs.write(temp, text)
-  const moved = await $.process.run(['mv', '-f', temp, path])
-  if (moved.exitCode !== 0) throw new Error(`could not save learning data: ${moved.stderr.trim()}`)
+// $.fs.write is not atomic and the host has no rename, so a process exit during a direct write leaves a truncated file.
+// The text goes to a temp file beside the target and `mv -f` swaps it in; a failed write or move removes the temp file and
+// throws, and the target keeps its earlier text. One `mv -f` of a 50 KB file measured 2.0 ms on 2026-10-22 (100 calls in
+// 0.20 s under /usr/bin/time on this Mac, against 1.9 ms for a bare /usr/bin/true), so the move costs one process spawn
+// plus the host's call overhead, unmeasured here. `what` names the data in the error.
+async function atomicWrite($: EngineInterface, path: string, text: string, what: string): Promise<void> {
+  const temp = `${path}.${hash(sessionId)}.${++writeSequence}.tmp`
+  try {
+    await $.fs.write(temp, text)
+    const moved = await $.process.run(['mv', '-f', temp, path])
+    if (moved.exitCode !== 0) throw new Error(`could not save ${what}: ${moved.stderr.trim()}`)
+  } catch (error) {
+    await removePath($, '-f', temp, `remove the temp file of ${what}`)
+    throw error
+  }
+}
+
+function learningWrite($: EngineInterface, path: string, text: string): Promise<void> {
+  return atomicWrite($, path, text, 'learning data')
 }
 
 async function saveLearningSession($: EngineInterface, id = sessionId): Promise<void> {
@@ -460,7 +475,7 @@ async function startLearning($: EngineInterface, force = false, manual = false):
   if (!prepared.ok) return prepared.error.message
   const snapshot = prepared.value
   learningSpawning = true
-  learningSpawnName = `dag-learning-${hash(sessionId)}-${++learningWriteSequence}`
+  learningSpawnName = `dag-learning-${hash(sessionId)}-${++writeSequence}`
   try {
     const spawned = await $.agent.spawn({
       prompt: snapshot.prompt, name: learningSpawnName,
@@ -558,7 +573,7 @@ let reviewLedger = true
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
 let contextOnDisk = false
-let jevPermissionScope: 'all' | 'dag' = 'all'
+let jevPermissionScope: 'all' | 'dag' = 'dag'
 const activity = new Map<string, Activity>()
 const agentEventSources = new Set<string>()
 const handbacks = new Map<string, string>()
@@ -1235,7 +1250,7 @@ async function persist($: EngineInterface, run: Run): Promise<void> {
   runs.set(run.runId, run)
   updateStatus($)
   await ensureDir($, runsDir)
-  await $.fs.write(`${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n')
+  await atomicWrite($, `${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n', 'run checkpoint')
   // The session's first owned run makes its in-memory context durable.
   if (run.sessionId === sessionId && !contextOnDisk && workflowContext.sessionId === sessionId) {
     try {
@@ -3577,7 +3592,7 @@ export function register(on: On, options: PluginOptions) {
   secureScan = options.secure_scan !== false
   trajectoryLog = options.trajectory_log === true
   reviewLedger = options.review_ledger !== false
-  jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
+  jevPermissionScope = options.jev_permission_scope === 'all' ? 'all' : 'dag'
   learningEnabled = options.session_learning !== false
   for (const [key, set] of [
     ['learning_interval', (value: number) => { learningInterval = value }],

@@ -53,6 +53,15 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   on('process.run', ($: any, e: any) => {
     ran.push(e.argv)
     if (e.argv[0] === 'sleep') return { deny: 'sleep is not available in tests' }
+    // persist swaps a checkpoint in with `mv -f <temp> <path>` and removes a failed temp file with `rm -f`.
+    if (e.argv[0] === 'mv') {
+      const text = files.get(e.argv.at(-2))
+      if (text !== undefined) {
+        files.set(e.argv.at(-1), text)
+        files.delete(e.argv.at(-2))
+      }
+    }
+    if (e.argv[0] === 'rm') files.delete(e.argv.at(-1))
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('fs.list', ($: any, e: any) => {

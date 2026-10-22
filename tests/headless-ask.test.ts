@@ -90,7 +90,7 @@ test('an interactive session leaves the node call at ask with no line and no not
   expect(record).not.toHaveProperty('note')
 })
 
-test('a non-interactive main-conversation ask gets no line, no note and no node on its record', async ($, on) => {
+test('a non-interactive main-conversation ask gets no line, no note and no node on its record', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   on('tool.check', () => ({ decision: 'ask' }))
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
@@ -195,7 +195,7 @@ test('an interactive session leaves the settle summary without the hint', async 
   expect(settles(h)[0]).not.toContain('needed approval')
 })
 
-test('two tools left at ask by one node attempt log two lines and the hint lists both, once each', async ($, on) => {
+test('two tools left at ask by one node attempt log two lines and the hint lists both, once each', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   askGate(on, $)
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }
@@ -259,7 +259,7 @@ test('a retry that asks for nothing does not inherit the hint of the attempt bef
   expect(asks(h)).toHaveLength(1)
 })
 
-test('a non-interactive main-conversation call made while a node runs is not attributed to that node', async ($, on) => {
+test('a non-interactive main-conversation call made while a node runs is not attributed to that node', { options: { jev_permission_scope: 'all' } }, async ($, on) => {
   on('tool.check', () => ({ decision: 'ask' }))
   const h = harness(on)
   h.control.permission = { choice: 'allow', confidence: 0.88 }

@@ -19,6 +19,10 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const reads: string[] = []
   const readOnce = new Map<string, string>()
   const writeErrors = new Map<string, string>()
+  // Paths in writeErrors whose failing write leaves the first half of its text behind, as a host that dies mid-write does.
+  const tornWrites = new Set<string>()
+  // Destination -> stderr of a failing `mv`; the source stays where it was, as with a full disk.
+  const moveErrors = new Map<string, string>()
   const logs: string[] = []
   const logOptions: ({ to?: string } | undefined)[] = []
   const stats: string[] = []
@@ -65,19 +69,24 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
         : { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     let exitCode = e.argv[0] === 'check-control' ? control.exitCode : 0
+    let stderr = ''
     const path = e.argv.at(-1)
     if (e.argv[0] === 'sleep') return { deny: 'No wall-clock waits in tests' }
     if (options.home && e.argv[0] === 'mkdir' && e.argv.includes('-p') && path?.startsWith(options.home + '/')) locks.add(path)
-    if (options.home && e.argv[0] === 'mv') {
+    if (e.argv[0] === 'mv') {
       const source = e.argv.at(-2)
       const destination = e.argv.at(-1)
       const text = source ? files.get(source) : undefined
-      if (source && destination && text !== undefined) {
+      const moveError = destination ? moveErrors.get(destination) : undefined
+      if (moveError !== undefined) {
+        exitCode = 1
+        stderr = moveError
+      } else if (source && destination && text !== undefined) {
         files.set(destination, text)
         files.delete(source)
       } else exitCode = 1
     }
-    if (options.home && e.argv[0] === 'rm' && path) {
+    if (e.argv[0] === 'rm' && path) {
       files.delete(path)
       if (e.argv.includes('-rf')) {
         for (const file of files.keys()) if (file.startsWith(path + '/')) files.delete(file)
@@ -91,7 +100,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     if (e.argv[0] === 'rmdir' && path) {
       exitCode = locks.delete(path) ? 0 : 1
     }
-    return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.list', ($, e) => {
     const prefix = e.path.replace(/\/$/, '') + '/'
@@ -124,8 +133,13 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     return { value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } }
   })
   on('fs.write', ($, e) => {
-    const error = writeErrors.get(e.path) ?? writeErrors.get(e.path.replace(/\.[a-f0-9]+\.\d+\.tmp$/, ''))
-    if (error !== undefined) throw new Error(error)
+    // A temp file written for an atomic replace fails with the path it replaces.
+    const target = e.path.replace(/\.[a-f0-9]+\.\d+\.tmp$/, '')
+    const error = writeErrors.get(e.path) ?? writeErrors.get(target)
+    if (error !== undefined) {
+      if (tornWrites.has(e.path) || tornWrites.has(target)) files.set(e.path, e.text.slice(0, Math.floor(e.text.length / 2)))
+      throw new Error(error)
+    }
     files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -155,7 +169,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PermissionRequest', () => ({}))
-  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
+  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, tornWrites, moveErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
 }
 
 // The manifest's default enforcement is auto, which asks Jev about every user prompt. These suites were written for

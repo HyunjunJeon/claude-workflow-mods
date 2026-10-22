@@ -1,0 +1,220 @@
+# Mod hardening, batch 1: close the read-only Bash judge's bypass classes, write run checkpoints atomically, and
+# default Jev permission decisions to DAG workers.
+# Why: two outside reviews of the plugin (2026-10-22) were checked against ec65b71 and the Claude Code 2.1.306 binary.
+# Measured that day: readOnlyBashProblem passed 16 of 16 bypass commands (fd -x, rg --pre, tree -o/-R, any NAME= prefix,
+# git -c/--exec-path/--output, sort --compress-program, uniq IN OUT) and blocked none of 11 ordinary reads. The user's
+# shell alias runs claude with --dangerously-skip-permissions, so in the main conversation this judge is the only write
+# gate. persist() writes .claude/dag/runs/<id>.json with $.fs.write, which the mod docs say is not atomic, while the same
+# file already writes learning data through a temp file and mv -f. jev_permission_scope defaults to all, so a
+# main-conversation ask can be approved by Jev (external API or the session model) with the tool input sent to it.
+# Out of this batch (separate runs): the headless /dag run remeasure on 2.1.306 (eval/run.ts loads the working tree
+# through --plugin-dir, so it must not run while nodes edit it), decider: "person", splitting jev_enabled into separate
+# switches, the isReadOnly shadow gate, moving learned skills out of ~/.claude/skills.
+# Host typings: .claude-plugin/types/claude-code/index.d.ts was refreshed to 2.1.306 on 2026-10-22 (extracted from the
+# binary); tsc passed on it before this run.
+#
+# PREREQUISITE: `git status --short -- hooks tests docs .claude-plugin` prints nothing, and no other session edits this
+# checkout.
+# Run it with:  /dag run flows/improvement/p12-mod-hardening.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. No commit node: the user commits after reading the reviews.
+#
+# Run plan (components -> waves):
+#   wave 1: readonly-judge
+#   wave 2: atomic-checkpoint
+#   wave 3: jev-scope-default
+#   then:   review-spec, review-standards (generated)
+# The three lanes are independent in content but run as a chain: each runs the full suite (17 s, 1343 tests, CPU-bound
+# on 2026-10-22) as its gate, and a sibling's half-written file or red-first test would turn that gate red; the chain
+# also serializes the shared files (docs/reference.md for readonly-judge and jev-scope-default, hooks/register.ts and
+# tests for atomic-checkpoint and jev-scope-default). No edge carries data.
+# Categories: standard for readonly-judge (decides which flags of each listed command write files or run programs) and
+# atomic-checkpoint (changes the checkpoint write path, the shared test harness and failure semantics); trivial for
+# jev-scope-default (a default flip with docs and tests).
+# jev-scope-default is one vertical slice (one option's default across plugin.json, the host parse, docs and tests), so
+# its "one producer owns 3 files" lint warning is expected.
+#
+# Run history (2026-10-22):
+# - dag_mviujot7_x52mcq (this key): readonly-judge completed (5/5 checks). atomic-checkpoint attempt 1 stopped on scope:
+#   tests/runtime.test.ts and tests/jev-runtime.test.ts have private process.run stubs that did not emulate mv/rm (18
+#   tests red); attempt 2 (retry with those two files in scope) passed its own suite run (1352 pass, 18.26 s) but the
+#   runtime's `claude plugin test .` check hit the 30 s verify limit (not_run), so the run settled failed.
+# - dag_mviveygi_1w75e7 (key improve-p12-mod-hardening-2, inline definition): jev-scope-default only, with the suite run
+#   by the node into /tmp/dag-p12/jev-scope-suite.txt and checked by file (` 0 fail`), then the generated reviews over
+#   the whole uncommitted change: Spec verdict PASS, Standards verdict PASS (1353 pass, 13.97 s in the reviewer's shell).
+# A rerun of this file must add tests/runtime.test.ts and tests/jev-runtime.test.ts to atomic-checkpoint's writes and
+# scope, and must not gate a node on `claude plugin test .` while the suite runs close to the 30 s verify limit.
+
+key: improve-p12-mod-hardening-1
+name: Mod hardening batch 1 - read-only judge, atomic checkpoints, Jev scope
+goal: >
+  The main-conversation read-only Bash judge refuses fd/rg/tree/sort/uniq/git forms that write files or run programs and
+  every NAME=value prefix outside a short locale/display list, run checkpoints under .claude/dag/runs are written through a
+  temp file and mv -f, and jev_permission_scope defaults to dag; tests, docs/reference.md and plugin.json match, and
+  claude plugin test, tsc and claude plugin validate pass.
+review:
+  request: |
+    이 내용을 살펴보고, 현재 프로젝트를 개선할 방향에 대해 고려.
+    이런 가이드도 같이 전달 받았는데, 이 내용도 같이 고려해봤으면 좋겠음.
+    계획한 다음 단계를 계속 진행
+    Agreed plan (2026-10-22), batch 1 of the merged priorities: (1-1) block the read-only Bash judge's bypass classes by type, not as four patches: fd -x/-X/--exec*, rg --pre*, tree -o, any NAME= environment prefix, git -c, git log/diff --output; each rule gets a must-hit and a must-not-hit test. (1-2) Jev permission scope defaults to dag. (1-3) run checkpoints are written atomically with the temp file + mv -f path learningWrite already uses. The host typings refresh (1-0) is done.
+    Out of scope: the headless /dag run remeasure (1-4, a separate run), decider: "person" and splitting jev_enabled into separate switches, the isReadOnly shadow gate, moving learned skills, other $.fs.write callers (context, decisions, trajectory, boards), a commit.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - tests/AGENTS.md
+nodes:
+  - id: readonly-judge
+    label: Close the read-only Bash judge's bypass classes
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/policy.ts
+      - tests/policy.test.ts
+      - docs/reference.md
+    verify:
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - "import { readOnlyBashProblem as p } from './hooks/engine/policy.ts'; const bad = ['fd -x rm {}', 'fd . --exec touch x', 'fd -HX rm', 'rg --pre ./x.sh foo', 'rg --pre=./x.sh foo', 'tree -o out.txt', 'tree -R -H . x', 'LD_PRELOAD=/tmp/e.so ls', 'PATH=./bin ls', 'GIT_PAGER=sh git log', 'git -c core.pager=sh log', 'git --exec-path=/tmp log', 'git log --output=x', 'git diff --output x', 'sort --compress-program=sh a', 'uniq a b']; const good = ['ls -la', 'LC_ALL=C sort a', 'TZ=UTC date', 'git log --oneline -3', 'git -C hooks status', 'git --no-pager diff --stat', 'rg -n foo hooks', 'fd -e ts hooks', 'tree -L 2', 'uniq a', 'sort -u a']; const leaks = bad.filter(c => p(c) === undefined); const blocked = good.filter(c => p(c) !== undefined); console.log(JSON.stringify({ leaks, blocked })); process.exit(leaks.length + blocked.length > 0 ? 1 : 0)"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+      - kind: file
+        path: docs/reference.md
+        contains: "--pre"
+      - kind: file
+        path: docs/reference.md
+        matches: "LC_"
+    prompt: |
+      TASK: Make readOnlyBashProblem in hooks/engine/policy.ts refuse every listed form that writes files or runs programs, by class, while ordinary reads stay allowed.
+
+      CONTEXT (measured 2026-10-22 on this checkout; the judge gates Bash in the main conversation, where the user's shell alias runs claude with --dangerously-skip-permissions, so no host permission check stands behind it):
+      - readOnlyBashProblem (policy.ts, near line 248) currently returns undefined (allowed) for all of: `fd -x rm {}`, `fd . --exec touch x`, `fd -HX rm`, `rg --pre ./x.sh foo`, `rg --pre=./x.sh foo`, `tree -o out.txt`, `tree -R -H . x`, `LD_PRELOAD=/tmp/e.so ls`, `PATH=./bin ls`, `GIT_PAGER=sh git log`, `git -c core.pager=sh log`, `git --exec-path=/tmp log`, `git log --output=x`, `git diff --output x`, `sort --compress-program=sh a`, `uniq a b`.
+      - Causes: isLeaderToken (near line 92) treats ANY `NAME=value` first token as a leader and strips it; gitVerdict (near line 233) skips every global option before the subcommand (including `-c` and its value) and never inspects arguments for `--output`; READ_ONLY_COMMANDS (near line 77) admits fd, rg, tree, sort, uniq, file with flag checks only for find, sort -o and date -s (near line 282).
+
+      REQUIRED BEHAVIOUR:
+      1. Environment prefix: a leading `NAME=value` token is skipped only when NAME is one of LANG, LANGUAGE, TZ, NO_COLOR, FORCE_COLOR, CLICOLOR, COLUMNS, TERM, or starts with `LC_`. Any other `NAME=value` prefix is refused with a reason that says an environment prefix can change what runs (LD_PRELOAD, PATH, GIT_*).
+      2. git global options: before the subcommand allow only `-C <dir>`, `--no-pager`, `-P`, `--git-dir <d>`/`--git-dir=<d>`, `--work-tree <d>`/`--work-tree=<d>`, `--no-optional-locks`, `--literal-pathspecs`, `--glob-pathspecs`, `--noglob-pathspecs`, `--icase-pathspecs`; refuse every other global option (this covers `-c`, `--config-env`, `--exec-path`). After the subcommand refuse `--output`, `--output=...` and `--ext-diff` for every read-only subcommand, and `-O`/`--open-files-in-pager` (with or without `=`) for `git grep`.
+      3. fd: refuse `--exec`, `--exec-batch` (with or without `=`), and any short-flag cluster containing `x` or `X` (for example `-x`, `-X`, `-HX`); `-e ts`, `-E node_modules`, `-H` stay allowed.
+      4. rg: refuse `--pre` and `--pre=...`.
+      5. tree: refuse `-o` and `-R`.
+      6. sort: also refuse `--compress-program` (with or without `=`). uniq: refuse when it has two or more non-option arguments (the second is an output file).
+      7. Audit the rest of READ_ONLY_COMMANDS yourself with `man <name>` or `<name> --help` on this machine for flags that write a file or run a program (for example `file -C` compiles a magic file). Refuse each one you confirm, and list in ## Output every flag you added beyond items 1-6 with the man-page line that proves it. Do not refuse flags you cannot prove write or run something.
+      Reasons are short English phrases in the style of the existing ones (for example 'find with -exec/-delete can change files').
+
+      TESTS: in tests/policy.test.ts add, for each rule above, at least one command that must now be refused and one nearby ordinary command that must stay allowed (the repo convention: every rule has a must-hit and a must-not-hit case). Write the new refusal tests first and run them red before changing policy.ts. Import `test` and `expect` from 'claude-code/testing', as the file already does.
+
+      DOCS: docs/reference.md line 107 (Korean; keep it Korean) lists what read-only Bash allows. Add the refused forms (fd -x/--exec, rg --pre, tree -o/-R, git -c and other global options outside the allowed set, --output/--ext-diff, sort --compress-program, uniq with an output file, and any flags item 7 added) and state that a leading 변수=값 prefix is accepted only for LC_*, LANG, LANGUAGE, TZ, NO_COLOR, FORCE_COLOR, CLICOLOR, COLUMNS and TERM. Change no other line of docs/reference.md.
+
+      SCOPE: edit only hooks/engine/policy.ts, tests/policy.test.ts and line 107 of docs/reference.md. Later nodes of this run change hooks/register.ts, tests/control-harness.ts, tests/persistence.test.ts, .claude-plugin/plugin.json and other lines of docs/reference.md; do not touch them. Keep hooks/engine pure (no `$`, no clock).
+
+      VERIFY: run `command claude plugin test .` (all tests pass, about 17 s) and `bunx -p typescript@5 tsc -p . --noEmit` (no output). Then run this probe and expect exit 0 with `{"leaks":[],"blocked":[]}`: bun -e with the 16 commands listed in CONTEXT as must-refuse and these as must-allow: `ls -la`, `LC_ALL=C sort a`, `TZ=UTC date`, `git log --oneline -3`, `git -C hooks status`, `git --no-pager diff --stat`, `rg -n foo hooks`, `fd -e ts hooks`, `tree -L 2`, `uniq a`, `sort -u a`.
+
+      STOP WHEN: the probe prints no leaks and no blocked commands, and the suite and tsc pass.
+
+      In ## Output give: each rule with the function and line that implements it, the names of the new tests, any flags added under item 7 with their proof, and the last line of the test run.
+
+  - id: atomic-checkpoint
+    label: Write run checkpoints through a temp file and mv
+    category: standard
+    dependsOn:
+      - readonly-judge
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/control-harness.ts
+      - tests/persistence.test.ts
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+      - kind: file
+        path: hooks/register.ts
+        absent: "await $.fs.write(`${runsDir}/${run.runId}.json`"
+      - kind: file
+        path: tests/persistence.test.ts
+        contains: "atomic"
+    prompt: |
+      TASK: Make persist() in hooks/register.ts write each run checkpoint through a temp file and `mv -f`, sharing the helper learning data already uses.
+
+      CONTEXT:
+      - persist (hooks/register.ts near line 1234) does runs.set, updateStatus, ensureDir, then `await $.fs.write(`${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n')` directly. Claude Code's mod documentation says `$.fs.write` is not atomic and the API has no rename, so a process exit during the write can leave a truncated checkpoint; loadRuns (near line 1249) then skips it as unreadable and the run is lost on resume.
+      - The same file already writes learning data atomically: learningWrite (near line 235) writes `${path}.${hash(sessionId)}.${++learningWriteSequence}.tmp` with $.fs.write, then runs `$.process.run(['mv', '-f', temp, path])` and throws 'could not save learning data: <stderr>' on a non-zero exit.
+      - loadRuns only reads entries ending in `.json`, so `.tmp` leftovers are never loaded as runs.
+      - tests/control-harness.ts mocks process.run; its `mv` handling (near line 71) and its `rm` handling (near line 80) run only when `options.home` is set (the learning tests). With persist using mv, and removing the temp file with rm on failure, every hook test needs both to act on in-memory files, so generalize both branches to any in-memory file while keeping the learning tests' behaviour. tests/AGENTS.md: fault injection is `h.writeErrors.set(path, msg)`; prefer extending control-harness.ts over private harnesses; never wall-clock waits.
+
+      REQUIRED:
+      1. Extract one helper (for example `atomicWrite($, path, text)`) from learningWrite, keeping learning callers' behaviour and error text, and use it in persist for the run checkpoint.
+      2. When the temp write or the mv fails, remove the temp file best-effort (the file already has a removePath helper) and let the error propagate from persist exactly as a failed write does today; the previous checkpoint file must stay unchanged.
+      3. Measure on this machine the time of one `mv -f` of a 50 KB file (for example 100 iterations under /usr/bin/time in a temp directory you delete afterwards) and record the per-call milliseconds and the date in a short comment at the helper, because persist runs on every state change (AGENTS.md: comments give the why, often a measurement).
+      4. Change no other `$.fs.write` caller (context, decisions, trajectory, boards); list each one with its line in ## Output as a candidate for a later batch.
+
+      TESTS: in tests/persistence.test.ts add tests whose names contain the word 'atomic': (a) after a run starts, the checkpoint at /work/.claude/dag/runs/<id>.json parses and no `.tmp` file remains; (b) when the mv fails (or the temp write fails), the earlier checkpoint text is unchanged and no `.tmp` file remains. Run (b) red against the old persist before the change, or explain in ## Output why it cannot be red.
+
+      SCOPE: edit only hooks/register.ts (persist, learningWrite and the new helper), tests/control-harness.ts and tests/persistence.test.ts. The earlier node of this run changed hooks/engine/policy.ts, tests/policy.test.ts and docs/reference.md; a later node changes the jev_permission_scope lines of hooks/register.ts. Do not touch those.
+
+      VERIFY: `command claude plugin test .` passes in full (1343 tests or more) and `bunx -p typescript@5 tsc -p . --noEmit` prints nothing.
+
+      STOP WHEN: persist writes through the helper, the new tests pass, and the suite and tsc pass.
+
+      In ## Output give: the helper's name and line, the measured mv time, the harness change in one line, the new test names, the other $.fs.write callers with lines, and the last line of the test run.
+
+  - id: jev-scope-default
+    label: Default jev_permission_scope to dag
+    category: trivial
+    dependsOn:
+      - atomic-checkpoint
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - .claude-plugin/plugin.json
+      - hooks/register.ts
+      - tests
+      - docs/reference.md
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: .claude-plugin/plugin.json
+        contains: "\"default\": \"dag\""
+      - kind: file
+        path: hooks/register.ts
+        absent: "options.jev_permission_scope === 'dag' ? 'dag' : 'all'"
+      - kind: file
+        path: docs/reference.md
+        matches: "\\| `jev_permission_scope` +\\| `dag` "
+    prompt: |
+      TASK: Make `dag` the default of the jev_permission_scope option, so Jev resolves only DAG node workers' permission asks unless the user chooses `all`.
+
+      CONTEXT:
+      - .claude-plugin/plugin.json near line 104: the `jev_permission_scope` option has `"default": "all"` and options ["all", "dag"].
+      - hooks/register.ts near line 561: `let jevPermissionScope: 'all' | 'dag' = 'all'`; near line 3580: `jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'` (invalid values keep the default; AGENTS.md: invalid values silently keep the default).
+      - The tool.check hook (hooks/register.ts near line 3937) asks Jev only when the host's decision is `ask`. Under `all` a main-conversation ask can be approved by Jev (the external TYPESAFE API or the session model) and the tool input is sent to it; under `dag` the main conversation's asks keep the host's decision with no Jev request.
+      - docs/reference.md (Korean; keep it Korean) near line 266 says `jev_permission_scope`가 `all`(기본)이면 ...; near line 797 the settings table row starts with: | `jev_permission_scope` (padded with spaces) | `all` | Jev 도구 승인 범위. README.md does not mention the option (check with grep and change README.md only if it does).
+      - tests/footprint.test.ts near line 95 and tests/headless-ask.test.ts near line 107 already pass `jev_permission_scope: 'dag'` explicitly. Tests that relied on the default `all` (main-conversation asks reaching Jev) will fail after the flip: give those tests `jev_permission_scope: 'all'` in their options so they keep testing the `all` path; never weaken their assertions.
+
+      REQUIRED:
+      1. plugin.json default `dag`; keep the options list; reword the description so `dag` reads as the default if needed.
+      2. register.ts default `'dag'`, and the parse keeps `all` only for the exact string 'all' and uses `dag` for anything else.
+      3. docs/reference.md: the two lines quoted in CONTEXT (the 승인 범위 bullet and the settings table row) say `dag` is the default; change no other line. An earlier node edited the read-only Bash bullet, so find these lines by their text, not by number.
+      4. Add one test with no jev_permission_scope option: a main-conversation tool call whose host decision is `ask` makes no Jev request and keeps `ask`, while a DAG node worker's ask is still evaluated (copy the setup of the existing scope test in tests/footprint.test.ts).
+
+      SCOPE: edit only .claude-plugin/plugin.json, the two jev_permission_scope lines of hooks/register.ts, tests that need the explicit `all` option plus the new test, and the two jev_permission_scope lines of docs/reference.md. Earlier nodes of this run changed persist and the write helper in hooks/register.ts, tests/control-harness.ts, tests/persistence.test.ts, hooks/engine/policy.ts, tests/policy.test.ts and line 107 of docs/reference.md; leave those as they are.
+
+      VERIFY: `command claude plugin test .` passes in full, `bunx -p typescript@5 tsc -p . --noEmit` prints nothing, and `command claude plugin validate .` passes (the existing ".catch" warnings are known).
+
+      STOP WHEN: the default is dag in all three places, the new test passes, and the suite, tsc and validate pass.
+
+      In ## Output give: the changed lines per file, the tests you gave `all` explicitly, the new test name, and the last line of the test run.
