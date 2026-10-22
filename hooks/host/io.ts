@@ -1,0 +1,63 @@
+import type { EngineInterface } from 'claude-code'
+import { hash } from '../engine/hash.ts'
+import { finalReport, type TranscriptRow } from '../ui/activity.ts'
+
+// The host helpers that register.ts and host/learning.ts both call with $. validate follows $ only into top-level functions
+// of the module's own files, and refuses $ passed to a method or a callback, so a helper both files need lives here.
+
+export const DAG_SUBDIR = '.claude/dag'
+const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
+
+export type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
+
+export function debug($: EngineInterface, text: string): void {
+  $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
+}
+
+export function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+// Writes the `*` .gitignore of root's .claude/dag store if it is missing; the store folder must already exist.
+export async function ensureGitignore($: EngineInterface, root: string): Promise<void> {
+  const path = `${root}/${DAG_SUBDIR}/.gitignore`
+  if (!(await $.fs.exists(path))) await $.fs.write(path, GITIGNORE)
+}
+
+export async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string, purpose = 'prune'): Promise<boolean> {
+  try {
+    const removed = await $.process.run(['rm', flag, path])
+    if (removed.exitCode === 0) return true
+    debug($, `could not ${purpose} ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
+  } catch (error) {
+    debug($, `could not ${purpose} ${path}: ${message(error)}`)
+  }
+  return false
+}
+
+// $.fs.write is not atomic and the host has no rename, so a process exit during a direct write leaves a truncated file.
+// The text goes to a temp file beside the target and `mv -f` swaps it in; a failed write or move removes the temp file and
+// throws, and the target keeps its earlier text. One `mv -f` of a 50 KB file measured 2.0 ms on 2026-10-22 (100 calls in
+// 0.20 s under /usr/bin/time on this Mac, against 1.9 ms for a bare /usr/bin/true), so the move costs one process spawn
+// plus the host's call overhead, unmeasured here. `what` names the data in the error. The temp file's name carries the
+// writing session and `sequence`, the next number of register.ts's writeSequence, so it is unique within the process.
+export async function atomicWrite($: EngineInterface, path: string, text: string, what: string, sessionId: string, sequence: number): Promise<void> {
+  const temp = `${path}.${hash(sessionId)}.${sequence}.tmp`
+  try {
+    await $.fs.write(temp, text)
+    const moved = await $.process.run(['mv', '-f', temp, path])
+    if (moved.exitCode !== 0) throw new Error(`could not save ${what}: ${moved.stderr.trim()}`)
+  } catch (error) {
+    await removePath($, '-f', temp, `remove the temp file of ${what}`)
+    throw error
+  }
+}
+
+export async function recoverReport($: EngineInterface, agentId: string): Promise<string> {
+  const rows = await $.session.messages({ agentId })
+  if (!Array.isArray(rows)) {
+    $.ui.log(`cannot read the final report of agent ${agentId}: ${rows.deny}`)
+    return ''
+  }
+  return finalReport(rows as TranscriptRow[])
+}

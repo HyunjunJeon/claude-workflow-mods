@@ -23,7 +23,7 @@ Claude Code의 작업을 의존성 그래프(DAG)로 나누어 실행하는 Clau
 
 ## 빠른 시작
 
-Claude Code **v2.1.287 이상(Claude Mods 기능 포함)**이 필요합니다.  
+Claude Code **v2.1.299 이상(Claude Mods 기능 포함)**이 필요합니다.
 이 저장소를 내려받은 뒤, 작업할 프로젝트 디렉터리에서 플러그인을 불러옵니다.
 
 ```bash
