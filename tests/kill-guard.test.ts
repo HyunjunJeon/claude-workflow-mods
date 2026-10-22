@@ -54,18 +54,32 @@ const HITS: [string, string][] = [
   ['\\pkill node', 'pkill'],
   ['powershell -c "(Get-Process node).Kill()"', 'Get-Process piped to Stop-Process'],
   ['powershell -c "Get-Process node | % Kill"', 'Get-Process piped to Stop-Process'],
+  // Gaps closed on 2026-10-23, each by a context the ordinary commands in MISSES lack: a PowerShell command before the
+  // PowerShell forms, a grep or awk filter between ps and the kill, a pgrep, pidof or lsof feeding a loop that kills.
+  ['pwsh -c "kill -Name node"', 'Stop-Process -Name'],
+  ['powershell -c "Stop-Process -ProcessName node"', 'Stop-Process -Name'],
+  ['powershell -c "spps -N node"', 'Stop-Process -Name'],
+  ['powershell.exe -Command "spps -Na node -Force"', 'Stop-Process -Name'],
+  ["ps aux | grep vite | awk '{print $2}' | xargs kill", 'looked-up PIDs piped to kill'],
+  ["ps -ef | egrep 'vite|node' | awk '{print $2}' | xargs -r kill -9", 'looked-up PIDs piped to kill'],
+  ["ps aux | awk '/vite/ {print $2}' | xargs kill", 'looked-up PIDs piped to kill'],
+  ["kill $(ps aux | grep vite | awk '{print $2}')", 'kill of looked-up PIDs'],
+  ['kill -9 `ps -ef | grep -v grep | grep node | awk \'{print $2}\'`', 'kill of looked-up PIDs'],
+  ['for p in $(pgrep -f vite); do kill $p; done', 'kill in a loop over looked-up PIDs'],
+  ['for pid in `pidof node`; do kill -9 "$pid"; done', 'kill in a loop over looked-up PIDs'],
+  ['for p in $(pgrep -f vite)\ndo\n  kill $p\ndone', 'kill in a loop over looked-up PIDs'],
+  ['pgrep -f vite | while read p; do kill $p; done', 'kill in a loop over looked-up PIDs'],
+  ['powershell -c "Get-Process node | % { Stop-Process -Id $_.Id }"', 'Get-Process piped to Stop-Process'],
+  ['pwsh -c "gps node | ForEach-Object { spps -Id $_.Id -Force }"', 'Get-Process piped to Stop-Process'],
 ]
 
-// Known gaps, kept on purpose (kill-guard.ts says why): each pattern tried for them also refused ordinary commands such as
-// find tests/kill -name, rg 'Stop-Process' -n and a cleanup by process group through ps. Asserted so a change is a decision.
+// Known gaps, kept on purpose (kill-guard.ts says why): catching them needs more than a reading of one command line.
+// Asserted so a change is a decision.
 const GAPS = [
-  'pwsh -c "kill -Name node"',
-  'powershell -c "Stop-Process -ProcessName node"',
-  'powershell -c "spps -N node"',
-  "ps aux | grep vite | awk '{print $2}' | xargs kill",
-  "kill $(ps aux | grep vite | awk '{print $2}')",
-  'for p in $(pgrep -f vite); do kill $p; done',
-  'powershell -c "Get-Process node | % { Stop-Process -Id $_.Id }"',
+  // Stop-Process given processes a variable holds: the Get-Process by name is in an earlier statement.
+  'powershell -c "$p = Get-Process node; Stop-Process -InputObject $p"',
+  // The scans after a command word are bounded, so padding pushes the by-name option out of reach.
+  `powershell -c "Stop-Process ${'-Force '.repeat(40)}-Name node"`,
 ]
 
 // Refused on purpose: the command is read as text, so a kill word at a command start inside a quote or a heredoc counts.
@@ -106,6 +120,17 @@ const MISSES = [
   'grep spps tests/kill-guard.test.ts -n',
   "kill -- -$(ps -o pgid= $PID | tr -d ' ')",
   'ps -p 1234 -o pid= | xargs kill',
+  // Near the forms closed on 2026-10-23, without the context that makes them a kill by name.
+  'ps aux | grep -c vite',
+  "ps aux | grep vite | awk '{print $2}' > pids.txt",
+  'ps -o pid= -p "$PID" | xargs kill',
+  'for p in $(pgrep -f vite); do echo $p; done; kill $MYPID',
+  'for f in $(git ls-files); do grep -n kill $f; done',
+  'pgrep -f vite | while read p; do echo $p; done',
+  'pwsh -c "Get-ChildItem -Name"',
+  'pwsh -c "rg kill -n hooks"',
+  'powershell -c "Get-Process -Id 42 | % { Stop-Process -Id $_.Id }"',
+  'powershell -c "Get-Process node | % { $_.Id }"',
 ]
 
 test('each by-name or by-pattern kill form is found, and its name is returned', () => {
