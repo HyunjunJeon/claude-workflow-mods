@@ -32,7 +32,8 @@ export type CommandExpect = {
   stderr?: TextExpect
 }
 
-export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandExpect }
+// timeoutMs is the check's time limit in milliseconds; absent, the runtime uses DEFAULT_COMMAND_TIMEOUT_MS (verification.ts).
+export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandExpect; timeoutMs?: number }
 
 export type VerificationCheck = FileCheck | CommandCheck
 

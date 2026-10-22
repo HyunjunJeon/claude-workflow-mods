@@ -117,7 +117,7 @@ Thus `verify-repro` is run 1's whole verification wave. The two-axis review belo
   - `Root cause:` File and line, or "not yet determined".
 - Use one verification node (`trivial`, id `verify-repro`) that depends on diagnosis. It runs the recorded command exactly. It checks for a non-zero exit and the user's symptom line. It writes `Reproduction confirmed: exit <n>` to `notes/<bug>-repro-check.md`; this is its `verify` file check. If the command exits 0 or fails differently, end with `DAG_NODE_STATUS: failed: <what differs>`. Without `expect.exit` the runtime accepts only exit 0, so declare the expected failure natively: `expect` with the recorded exit code and a `stdout` or `stderr` text field naming the symptom (see "Checks for absence or expected failure"). This node independently checks both symptom and exit code. An unrelated command error is not a reproduction.
 - **Red-capable rule.** Diagnosis must already have run the command and observed failure. A command that exits 0 before the fix proves nothing. The failure must be the user's symptom, not another failure. Keep the verdict the same on every run: pin the clock, seed randomness and isolate files. For intermittent bugs, repeat the trigger inside the command and exit non-zero if any iteration fails. Remove inputs, steps and configuration one at a time until each remaining element is required to reproduce the failure.
-- **Fast.** The runtime kills checks after 30 seconds. First narrow slower loops to one test, a fixture or smaller input. Aim for seconds.
+- **Fast.** By default the runtime kills a check after 30 seconds, and only a check that is slow by nature sets `timeoutMs`. A reproduction check is not one: first narrow slower loops to one test, a fixture or smaller input. Aim for seconds.
 - **No loop.** If no red-capable loop can be built, do not guess hypotheses. List the attempts and end with `DAG_NODE_STATUS: failed: clarification: <what is needed>`. The main conversation asks for a reproducing environment, redacted artifact (log, HAR, payload), or permission for temporary instrumentation. Then it `retry`s the node with the answer.
 
 **Run 2 - fix.** After run 1 settles, read its Output and notes.
@@ -320,11 +320,16 @@ Every node in `start` and `amend` requires `verify` with 1-16 checks.
 Each check has one of these forms:
 
 - `{"kind": "file", "path": "<path>", "contains": "<text>", "absent": "<text>", "matches": "<regex>", "lastLine": "<text>", "equals": "<text>"}`; every text field is optional.
-- `{"kind": "command", "argv": [...], "expect": {"exit": 0, "stdout": {...}, "stderr": {...}}}`; `expect` and each of its keys are optional.
+- `{"kind": "command", "argv": [...], "expect": {"exit": 0, "stdout": {...}, "stderr": {...}}, "timeoutMs": 120000}`; `expect`, each of its keys and `timeoutMs` are optional.
 
 Missing checks return `verification_required`. Malformed checks return `invalid_verification`.
 After the worker reports completion, the runtime executes the checks itself.
-Commands run from the project root without a shell, with a 30-second limit. Exit 0 passes unless `expect.exit` names other codes.
+Commands run from the project root without a shell. Exit 0 passes unless `expect.exit` names other codes.
+A command check has a 30-second limit (30000 ms) unless it sets `timeoutMs`: whole milliseconds from 1000 to 600000.
+`start` and `amend` refuse `timeoutMs` on a file check, or a value outside that range or not a whole number, as `invalid_verification`.
+A check that runs past its limit is `not_run`, and its detail says a check that is slow by nature can set `timeoutMs` up to 600000.
+Keep checks fast and set `timeoutMs` only on a check that is slow by nature, such as `{"kind": "command", "argv": ["claude", "plugin", "test", "."], "timeoutMs": 120000}`.
+Never raise it to hide a hang, and aim for seconds in a reproduction check of the Debug chain.
 They use the host's PATH without a shell profile. `start`, `amend` and a dry run look up `argv[0]` and the commands of an `sh -c` script there and refuse a missing one; the Bash tool's `rg` is the usual trap, so use `grep -E`, or call a program the run installs by its path.
 The runtime writes `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking the node `completed`.
 A failed check or missing evidence fails the node and blocks its dependents.

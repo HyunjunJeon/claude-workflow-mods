@@ -12,7 +12,7 @@ import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessio
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES, verdictFailure } from './engine/recovery.ts'
 import { CHECK_DEFECT, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
-import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
+import { DEFAULT_COMMAND_TIMEOUT_MS, projectPath, readOnlyAbsolutePath, timeoutAdvice, verificationProblem } from './engine/verification.ts'
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
@@ -2073,10 +2073,11 @@ async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<Ch
   return problem ? { outcome: 'failed', detail: problem } : { outcome: 'passed', detail: `File verified: ${check.path}` }
 }
 
-// A program that cannot start or runs past the limit makes $.process.run reject, which fails the check whatever expect says.
+// A program that cannot start or runs past its limit makes $.process.run reject, which fails the check whatever expect says.
+// The limit is the check's own timeoutMs, or the host's 30 s default without one (the parser keeps it within 1 s to 10 min).
 // The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
 async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<CheckResult> {
-  const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })
+  const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: check.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS })
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
   const expectation = check.expect
   const truncated = (stream: 'stdout' | 'stderr') => expectation?.[stream] !== undefined && (stream === 'stdout' ? result.isStdoutTruncated : result.isStderrTruncated)
@@ -2116,8 +2117,11 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
         }
       }
     } catch (error) {
+      const failure = message(error)
       outcome = check.kind === 'command' ? 'not_run' : 'unknown'
-      detail = `Verification could not run: ${message(error)}`
+      detail = `Verification could not run: ${failure}`
+      const advice = check.kind === 'command' ? timeoutAdvice(failure) : undefined
+      if (advice) detail += `\n${advice}`
     }
     const item = { check, passed: outcome === 'passed', outcome, detail, checkedAt: await $.clock.now(), ...(exitCode !== undefined ? { exitCode } : {}) }
     if (missingProgram(item)) item.outcome = 'not_run'
