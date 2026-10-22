@@ -26,7 +26,7 @@ semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep
 - `unreasoned-assertion`: 호스트 경계의 `as`와, `noUncheckedIndexedAccess`에서 코드가 이미 범위를 확인한 조회의 `as`입니다. 검사형으로 같은 동작을 낼 수 있는 곳(스택 `pop`, 문자 조회, 두 배열 비교, 그래프 레이아웃)은 2026-10-12에 바꿨습니다.
 
 엔진 로직은 `hooks/engine/`, 패널 모델은 `hooks/ui/`에 `$`를 쓰지 않는 순수 함수로 있습니다.  
-mods API(`$`) 호출은 `hooks/register.ts`와 `hooks/host/` 아래 모듈에만 있습니다. 훅 등록은 모두 `register.ts`에 남고, 세션 학습 하위 시스템(`hooks/host/learning.ts`), 보드 하위 시스템(`hooks/host/boards.ts`)과 실행 기록(`hooks/host/trajectory.ts`)은 `register.ts`가 의존성을 넘겨 주는 `createLearning(host)`, `createBoards(host)`와 `createTrajectory(host)`로 만듭니다. 이렇게 `$`를 다른 파일의 함수에 넘기는 방식은 Claude Code v2.1.299부터 쓸 수 있고, 개발과 CI는 2.1.307을 씁니다.
+mods API(`$`) 호출은 `hooks/register.ts`와 `hooks/host/` 아래 모듈에만 있습니다. 훅 등록은 모두 `register.ts`에 남고, 세션 학습 하위 시스템(`hooks/host/learning.ts`), 보드 하위 시스템(`hooks/host/boards.ts`), 실행 기록(`hooks/host/trajectory.ts`)과 anti-slop·시큐어코딩 스캔(`hooks/host/scan.ts`)은 `register.ts`가 의존성을 넘겨 주는 `createLearning(host)`, `createBoards(host)`, `createTrajectory(host)`와 `createScan(host)`로 만듭니다. 이렇게 `$`를 다른 파일의 함수에 넘기는 방식은 Claude Code v2.1.299부터 쓸 수 있고, 개발과 CI는 2.1.307을 씁니다.
 
 ## DAG 형태 평가
 

@@ -16,7 +16,7 @@ import { DEFAULT_COMMAND_TIMEOUT_MS, projectPath, readOnlyAbsolutePath, timeoutA
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
-import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
+import { isReviewStageNode, lensVerifyFolder, REVIEW_SECURITY_ID, securityLensOf } from './engine/stages.ts'
 import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
 import {
   amendRun,
@@ -43,9 +43,9 @@ import {
   expandNodes,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
-import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
 import { killByName, killRefusal } from './engine/kill-guard.ts'
-import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandidates, owaspCweRows, parseSemgrepReport, SEMGREP_RULES_DIR, semgrepArgv, semgrepCandidates, semgrepNote, semgrepRefusal, semgrepTarget, semgrepVersion, type GuideRows, type SemgrepHit } from './engine/semgrep.ts'
+import { applyEdit, semgrepNote, semgrepRefusal, semgrepTarget, type SemgrepHit } from './engine/semgrep.ts'
 import { addUsage, cut, settleRecord } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
@@ -70,6 +70,7 @@ import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GI
 import { collectLearning, createLearning, finishLearning, initializeLearning, observeLearnedSkill, pruneLearningData, readLearningLibrary, saveLearningSession, startLearning, updateLearningLibrary } from './host/learning.ts'
 import { BOARDS_SUBDIR, CHIP_PAINT, chipContexts, citeBlock, createBoards, handleBoardTool, inheritBoards, latestBoardTitle, loadBoards, type BoardCalls } from './host/boards.ts'
 import { createTrajectory, exportTrajectory, pruneTrajectories, record, recordMainTurn, recordNodeEnd, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
+import { createScan, guideRows, lensExpansion, resetScan, scanEdit, slopSkips } from './host/scan.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
@@ -204,16 +205,13 @@ const learning = createLearning({
   mainTurnBusy: () => mainTurnBusy,
   nextWriteSequence: () => ++writeSequence,
 })
-let antiSlopScan = true
-let antiSlopSkip: ReadonlySet<string> = new Set()
-let secureScan = true
-// The semgrep version a session found on its first scan, '' when there is none; undefined until it asks.
-let semgrepFound: string | undefined
-let guideRowsRead: Promise<GuideRows> | undefined
-// The Semgrep hits of a run's change, keyed by the run and the change, so the lenses of one review share one scan.
-const changeScans = new Map<string, Promise<Result<SemgrepHit[]>>>()
-// The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
-let repositoryAllows: ReadonlySet<string> | undefined
+// The edit scans' state (host/scan.ts): the anti-slop and secure-coding switches, the skip list, and what a session found or
+// read once (the semgrep version, the guide rows, a run change's hits, the rule files' allows). Created once per module load,
+// as its old module variables were; the getter hands it this file's project root at the moment it reads it.
+const scan = createScan({
+  projectRoot: () => projectRoot,
+  rootOf,
+})
 // The trajectory log's state (host/trajectory.ts): its switch and retention limits, its write queue, where the main
 // conversation's log stopped, and each node agent's token counts. Created once per module load, as its old module variables
 // were; the getters hand it this file's session id, project root and runs at the moment it reads them.
@@ -744,88 +742,6 @@ function submitRunNews($: EngineInterface, run: Run, text: string): ReturnType<E
 // Plain conversations keep requests in memory; the file appears once the session uses the DAG.
 function contextWanted(): boolean {
   return contextOnDisk || workflowContext.notes.length > 0 || [...runs.values()].some(run => run.sessionId === sessionId)
-}
-
-// Semgrep is optional. The first scan of a session asks for its version once; without one every scan stays off.
-async function semgrepReady($: EngineInterface): Promise<boolean> {
-  if (!secureScan) return false
-  if (semgrepFound === undefined) {
-    try {
-      const probe = await $.process.run(['semgrep', '--version'], { timeoutMs: 30_000 })
-      semgrepFound = (probe.exitCode === 0 && semgrepVersion(probe.stdout)) || ''
-    } catch {
-      semgrepFound = ''
-    }
-    debug($, semgrepFound ? `semgrep ${semgrepFound} runs the secure-coding rules` : 'semgrep is not installed; the secure-coding scan is off')
-  }
-  return semgrepFound !== ''
-}
-
-async function runSemgrep($: EngineInterface, cwd: string, targets: readonly string[]): Promise<Result<SemgrepHit[]>> {
-  try {
-    const done = await $.process.run(semgrepArgv(`${$.plugin.root}/${SEMGREP_RULES_DIR}`, targets), { cwd, timeoutMs: 120_000 })
-    return parseSemgrepReport(done.stdout)
-  } catch (error) {
-    return fail('semgrep_error', `semgrep could not run (${message(error)}).`)
-  }
-}
-
-// The names and lenses a hit cites, from the guide references the plugin ships.
-function guideRows($: EngineInterface): Promise<GuideRows> {
-  const reference = (id: string) => readOrEmpty($, `${$.plugin.root}/skills/secure-coding/references/${id}.md`)
-  guideRowsRead ??= Promise.all([reference('kisa'), reference('owasp')]).then(([kisa, owasp]) => ({ kisa: kisaRows(kisa), owasp: owaspCweRows(owasp) }))
-  return guideRowsRead
-}
-
-// The hits an Edit or Write would add, scanned before it lands. The new text goes to a copy at the same root-relative path
-// in a scratch folder, so the rules' path filters (tests/, *Test.java) match as they would in the project. root is the folder
-// the edit lands in (editRoot): measured from the session's own folder, every file of a worktree under .claude/ was skipped.
-async function scanEdit($: EngineInterface, path: string, before: string, after: string, root: string): Promise<SemgrepHit[]> {
-  if (!root || !path.startsWith(`${root}/`) || path.startsWith(`${root}/.claude/`) || !(await semgrepReady($))) return []
-  const rel = path.slice(root.length + 1)
-  const made = await $.process.run(['mktemp', '-d'], { timeoutMs: 10_000 })
-  const scratch = made.stdout.trim()
-  if (made.exitCode !== 0 || !scratch.startsWith('/')) return []
-  try {
-    await $.fs.write(`${scratch}/${rel}`, after)
-    const report = await runSemgrep($, scratch, [rel])
-    if (!report.ok) {
-      $.ui.log(`secure-coding scan skipped ${rel}: ${report.error.message}`)
-      return []
-    }
-    const added = addedLines(before, after)
-    return report.value.filter(hit => hit.path === rel && added.has(hit.line))
-  } finally {
-    await $.process.run(['rm', '-rf', scratch]).catch(() => undefined)
-  }
-}
-
-// The Semgrep hits on the lines a run's change added, read as the review nodes read the change: tracked files against
-// HEAD and untracked files whole. The lenses of one review share one scan; undefined when semgrep is not there.
-async function changeHits($: EngineInterface, run: Run): Promise<Result<SemgrepHit[]> | undefined> {
-  if (!(await semgrepReady($))) return undefined
-  const root = rootOf(run)
-  const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '-U0', '--no-color', '--relative', 'HEAD'], { cwd: root })
-  const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], { cwd: root })
-  if (diff.exitCode !== 0 || untracked.exitCode !== 0) return fail('semgrep_change', `git could not list the change (${(diff.stderr || untracked.stderr).trim()}).`)
-  const added = addedLinesByFile(diff.stdout)
-  const fresh = new Set(untracked.stdout.split('\0').filter(Boolean))
-  const targets = [...new Set([...added.keys(), ...fresh])].filter(path => semgrepTarget(path) && !path.startsWith('.claude/'))
-  if (targets.length === 0) return { ok: true, value: [] }
-  const key = `${run.runId}\0${hash(`${diff.stdout}\0${untracked.stdout}`)}`
-  let scan = changeScans.get(key)
-  if (!scan) {
-    scan = runSemgrep($, root, targets).then((report): Result<SemgrepHit[]> => report.ok
-      ? { ok: true, value: report.value.filter(hit => fresh.has(hit.path) || added.get(hit.path)?.has(hit.line) === true) }
-      : report)
-    changeScans.set(key, scan)
-  }
-  return scan
-}
-
-async function slopSkips($: EngineInterface): Promise<ReadonlySet<string>> {
-  repositoryAllows ??= new Set((await Promise.all(RULE_FILES.map(name => readOrEmpty($, `${projectRoot}/${name}`)))).flatMap(allowedPatterns))
-  return new Set([...antiSlopSkip, ...repositoryAllows])
 }
 
 async function persistContext($: EngineInterface): Promise<void> {
@@ -1367,7 +1283,7 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
           : detail
         outcome = { ...outcome, state: 'failed', error }
       } else if (securityLensOf(run.definition, node.id) !== undefined) {
-        const expanded = await lensExpansion($, run, node.id)
+        const expanded = await lensExpansion($, scan, run, node.id)
         if (expanded.ok) expansion = expanded.value
         else outcome = { ...outcome, state: 'failed', error: expanded.error.message }
       }
@@ -1378,45 +1294,6 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   }
   await recordNodeEnd($, trajectory, trajectoryCalls($), claim, result, end)
   await serialized(() => applyCompletion($, claim, result))
-}
-
-// A security lens that passed its checks: read its candidates and build one verifier node per candidate, after creating the
-// lens's verifier folder, which review-security's folder check needs even when there are no candidates. Any problem fails
-// the lens with the reason, so recovery or a retry can redo it; nothing is spawned from a candidates block read in part.
-async function lensExpansion($: EngineInterface, run: Run, lensId: string): Promise<Result<NodeDef[]>> {
-  const review = run.definition.review
-  const lens = securityLensOf(run.definition, lensId)
-  if (!review?.security || !lens) return fail('invalid_expansion', `"${lensId}" is not a security lens of this run.`)
-  const notes = lensNotesFile(review, lens)
-  let text: string
-  try {
-    text = await $.fs.read(notes)
-  } catch (error) {
-    return fail('invalid_candidates', `could not read ${notes} (${message(error)}).`)
-  }
-  const candidates = parseCandidates(text, review.security)
-  if (!candidates.ok) return fail('invalid_candidates', `${notes}: ${candidates.error.message}`)
-  let all = candidates.value
-  // The Semgrep rules cite kisa and owasp rows. Their hits in this lens join the lens's candidates, and the lens notes record
-  // them, or the scan's failure, so review-security counts a verifier for each.
-  const scan = review.security.some(guide => guide === 'kisa' || guide === 'owasp') ? await changeHits($, run) : undefined
-  if (scan) {
-    const merged = scan.ok ? mergeCandidates(all, semgrepCandidates(scan.value, lens, review.security, await guideRows($))) : undefined
-    all = merged?.all ?? all
-    try {
-      await $.fs.write(notes, lensNotesWithSemgrep(text, merged?.added ?? [], scan.ok ? undefined : scan.error.message))
-    } catch (error) {
-      return fail('invalid_expansion', `could not record the Semgrep candidates in ${notes} (${message(error)}).`)
-    }
-  }
-  const folder = lensVerifyFolder(review, lens)
-  try {
-    const made = await $.process.run(['mkdir', '-p', folder])
-    if (made.exitCode !== 0) return fail('invalid_expansion', `could not create ${folder}: ${made.stderr.trim() || `exit ${made.exitCode}`}`)
-  } catch (error) {
-    return fail('invalid_expansion', `could not create ${folder}: ${message(error)}`)
-  }
-  return verifierNodes(run.definition, lensId, all)
 }
 
 async function applyCompletion($: EngineInterface, claim: CompletionClaim, result: CompletionResult): Promise<void> {
@@ -2922,9 +2799,9 @@ export function register(on: On, options: PluginOptions) {
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
   if (START_APPROVALS.includes(options.start_approval as StartApproval)) startApproval = options.start_approval as StartApproval
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
-  antiSlopScan = options.anti_slop_scan !== false
-  if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
-  secureScan = options.secure_scan !== false
+  scan.antiSlopScan = options.anti_slop_scan !== false
+  if (Array.isArray(options.anti_slop_skip)) scan.antiSlopSkip = new Set(options.anti_slop_skip)
+  scan.secureScan = options.secure_scan !== false
   trajectory.enabled = options.trajectory_log === true
   const trajectoryDays = options.trajectory_retention_days
   if (typeof trajectoryDays === 'number' && Number.isInteger(trajectoryDays) && trajectoryDays >= 0 && trajectoryDays <= 3650) trajectory.retentionDays = trajectoryDays
@@ -2961,10 +2838,7 @@ export function register(on: On, options: PluginOptions) {
     paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
     sessionClosed = false
     keepAliveQueued = false
-    repositoryAllows = undefined
-    semgrepFound = undefined
-    guideRowsRead = undefined
-    changeScans.clear()
+    resetScan(scan)
     // A new process: the conversation it serves (a resume) has not been told this process's state yet.
     forgetDelivered()
     await restorePlanningLoaded($)
@@ -3630,15 +3504,15 @@ export function register(on: On, options: PluginOptions) {
   // the time the scan does, so a scan that throws returns the tool's answer untouched.
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
     if (e.tool !== 'Edit' && e.tool !== 'Write') return next(e)
-    if (RULE_FILES.some(name => e.file_path === `${projectRoot}/${name}`)) repositoryAllows = undefined
-    if (!antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
+    if (RULE_FILES.some(name => e.file_path === `${projectRoot}/${name}`)) scan.repositoryAllows = undefined
+    if (!scan.antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
     const request = userRequest
     const before = await readOrEmpty($, e.file_path)
     const reply = await next(e)
     if (reply.deny !== undefined || reply.isError) return reply
     try {
       const after = e.tool === 'Write' ? e.content : await readOrEmpty($, e.file_path)
-      const hits = scanSlop(e.file_path, before, after, await slopSkips($), request)
+      const hits = scanSlop(e.file_path, before, after, await slopSkips($, scan), request)
       if (hits.length === 0) return reply
       const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
       return { ...reply, context: [...(reply.context ?? []), slopNote(shown, hits)] }
@@ -3663,7 +3537,7 @@ export function register(on: On, options: PluginOptions) {
   // before the value reaches the file, and the other hits come back as context once the call is answered. A scan that
   // cannot run lets the call through.
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
-    if ((e.tool !== 'Edit' && e.tool !== 'Write') || !secureScan || !semgrepTarget(e.file_path)) return next(e)
+    if ((e.tool !== 'Edit' && e.tool !== 'Write') || !scan.secureScan || !semgrepTarget(e.file_path)) return next(e)
     let hits: SemgrepHit[] = []
     let root = projectRoot
     try {
@@ -3672,13 +3546,13 @@ export function register(on: On, options: PluginOptions) {
       root = [working, projectRoot].find(candidate => candidate && e.file_path.startsWith(`${candidate}/`) && !e.file_path.startsWith(`${candidate}/.claude/`)) ?? ''
       const before = await readOrEmpty($, e.file_path)
       const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
-      if (after !== undefined) hits = await scanEdit($, e.file_path, before, after, root)
+      if (after !== undefined) hits = await scanEdit($, scan, e.file_path, before, after, root)
     } catch (error) {
       debug($, `secure-coding scan skipped ${e.file_path}: ${message(error)}`)
     }
     if (hits.length === 0) return next(e)
     const shown = root && e.file_path.startsWith(`${root}/`) ? e.file_path.slice(root.length + 1) : e.file_path
-    const { kisa } = await guideRows($)
+    const { kisa } = await guideRows($, scan)
     const blocking = hits.filter(hit => hit.tier === 'block')
     if (blocking.length > 0) return { deny: semgrepRefusal(shown, blocking, kisa) }
     const reply = await next(e)
