@@ -1,5 +1,5 @@
 import { definitionHash, nodeFingerprint } from './definition.ts'
-import { extractOutput } from './node-prompt.ts'
+import { extractOutput, omittedLine } from './node-prompt.ts'
 import { VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
 import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type ReviewFinding, type Run, type RunStatus } from './types.ts'
@@ -12,7 +12,7 @@ const ENDED_BADLY: ReadonlySet<NodeState> = new Set(['failed', 'cancelled', 'ski
 function keepEnds(text: string, limit: number): string {
   if (text.length <= limit) return text
   const head = Math.floor(limit * 0.4)
-  return `${text.slice(0, head)}\n… (${text.length - limit} characters omitted)\n${text.slice(text.length - (limit - head))}`
+  return `${text.slice(0, head)}\n${omittedLine(text.length - limit)}\n${text.slice(text.length - (limit - head))}`
 }
 
 function clone(run: Run): Run {

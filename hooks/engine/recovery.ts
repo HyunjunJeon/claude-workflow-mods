@@ -15,17 +15,19 @@ export const MAX_AUTO_RECOVERIES = 2
 export const ATTEMPT_NOTE_CHARS = 1_500
 const NEXT_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Next(?:\*\*)?\s*:/i
 const TRIED_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Tried and failed(?:\*\*)?\s*:/i
-// Next is a short plan. When a worker skipped it, the last "Next:" before Tried can be a plan bullet near the top of Output with
-// the log after it, so the Next part keeps at most this much.
+// Next is a short plan written right before Tried. A "Next:" further up is a plan bullet with the log after it, not the
+// hypothesis the worker hands on, so it counts only within this many lines above Tried, and keeps at most this much.
+const NEXT_REACH_LINES = 8
 const NEXT_CHARS = 500
 
 // The two fields that end a failed report's ## Output: the last "Tried and failed:" line to the end, so a pasted error line or a
-// bullet inside it stays with it, and before it the last "Next:" field. Next comes first in the note, so a cut keeps it.
+// bullet inside it stays with it, and the "Next:" field just before it. Next comes first in the note, so a cut keeps it.
 export function attemptNote(output: string): string | undefined {
   const lines = output.split('\n')
   const tried = lines.findLastIndex(line => TRIED_FIELD.test(line))
   const end = tried < 0 ? lines.length : tried
-  const next = lines.slice(0, end).findLastIndex(line => NEXT_FIELD.test(line))
+  const found = lines.slice(0, end).findLastIndex(line => NEXT_FIELD.test(line))
+  const next = tried >= 0 && tried - found > NEXT_REACH_LINES ? -1 : found
   if (tried < 0 && next < 0) return undefined
   const parts = [
     ...(next < 0 ? [] : [truncate(lines.slice(next, end).join('\n').trim(), NEXT_CHARS)]),
@@ -86,13 +88,14 @@ export function recoverNode(input: Run, nodeId: string, decision: { kind: Recove
         `[Recovery ${used + 1}/${MAX_AUTO_RECOVERIES}] ${decision.kind}: ${decision.reason}`,
         ...(verification ? [
           '<verification_evidence>',
-          JSON.stringify({
+          // A check's output can quote a file the worker wrote. <\/ is still valid JSON for </.
+          escapeClosingTags(JSON.stringify({
             attempt: current.attempt,
             reportPath: verification.reportPath,
             checks: verification.evidence.map((item, index) => ({
               index: index + 1, outcome: evidenceOutcome(item), exitCode: item.exitCode, detail: item.detail.slice(0, 240),
             })),
-          }),
+          }), ['verification_evidence']),
           '</verification_evidence>',
         ] : []),
         ...(note ? [

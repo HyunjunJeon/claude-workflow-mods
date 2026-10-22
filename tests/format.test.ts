@@ -160,8 +160,15 @@ test('the rulings block stops at its character budget', () => {
 
 test('when the stored answer lost its Output heading to the length cut, no ruling comes from the reasoning before it', () => {
   // About 29,600 characters: the stored answer keeps the first 8,000 and the last 12,000, and the heading sits near 9,550.
-  const answer = `Ruling: <decision> - <why> - <cost if wrong> is the template\n${'n'.repeat(9_500)}\n## Output\nwrote a\n${'o'.repeat(20_000)}\nDAG_NODE_STATUS: completed`
+  const answer = `Ruling: <decision> - <why> - <cost if wrong> is the template\n${'n'.repeat(9_500)}\n## Output\nwrote a\n${'o'.repeat(20_000)}\nRuling: real one - x - y\nDAG_NODE_STATUS: completed`
   const run = ruled(answer)
   expect(run.nodes[0]?.answer?.includes('## Output')).toBe(false)
-  expect(settleMessage(run, 'dag')).not.toContain('is the template')
+  const message = settleMessage(run, 'dag')
+  expect(message).not.toContain('is the template')
+  expect(message).toContain('- a: real one - x - y')
+})
+
+test('a report without an Output heading keeps its rulings past 4,000 characters', () => {
+  const message = settleMessage(ruled(`did stuff\n${'w'.repeat(6_000)}\nRuling: chose Y - the spec is silent - Z breaks\nDAG_NODE_STATUS: completed`), 'dag')
+  expect(message).toContain('- a: chose Y - the spec is silent - Z breaks')
 })

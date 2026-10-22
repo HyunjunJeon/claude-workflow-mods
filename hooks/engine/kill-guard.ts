@@ -8,14 +8,15 @@
 // in $(...), an apostrophe in a comment, su -c, eval, an unquoted PowerShell script. Missing a kill stops another node's
 // server; refusing a command that only mentions pkill costs one reworded command, and the refusal says how.
 
-// Where a command word can start: the line start, a separator, a pipe, a subshell, a command substitution or a quote
-// (eval "...", su -c "...", bash -c '...').
-const START = String.raw`(?:^|[;&|(\n\`'"]|\$\()\s*`
+// Where a command word can start: the line start, a separator, a pipe, a subshell, a group or negation ({ !), a command
+// substitution, a quote (eval "...", su -c "...", bash -c '...') or a control-flow keyword. A leading backslash (\pkill) only
+// skips aliases.
+const START = String.raw`(?:^|[;&|(\n\`'"{!]|\$\(|\b(?:then|do|else|elif)\s)\s*\\?`
 // What can stand before the command word: variable assignments, words that run the next word as a command (with their
 // options, and timeout's duration), then a directory such as /usr/bin/.
 const PREFIX = String.raw`(?:(?:[A-Za-z_]\w*=\S*|(?:sudo|doas|exec|nohup|command|xargs|time|env|nice|ionice|stdbuf)(?:\s+-{1,2}[\w-]+(?:[ =][\w.:-]+)?)*|timeout(?:\s+-\S+)*\s+\d+(?:\.\d+)?[smhd]?)\s+)*(?:[^\s;&|()\`'"]*/)?`
-// Commands that print process ids by name, pattern or port.
-const LOOKUP = '(?:pgrep|pidof|lsof)'
+// Commands that print process ids by name, pattern or port; ps feeds grep and awk on the way to kill.
+const LOOKUP = '(?:pgrep|pidof|lsof|ps)'
 
 const FORMS: readonly { form?: string; pattern: RegExp }[] = [
   { pattern: new RegExp(`${START}${PREFIX}(pkill|killall)(?=$|[\\s;&|)\`'"])`, 'i') },
@@ -25,9 +26,14 @@ const FORMS: readonly { form?: string; pattern: RegExp }[] = [
   { form: 'taskkill /IM or /FI', pattern: new RegExp(`${START}${PREFIX}taskkill(?:\\.exe)?\\b[^;&|\\n]*\\s(?://?|-)(?:im|fi)\\b`, 'i') },
   // Process id -1 means every process the user may signal.
   { form: 'kill -1', pattern: new RegExp(`${START}${PREFIX}kill\\s+(?:(?:-s\\s+\\S+|-\\S+)\\s+)+-1(?=\\s*(?:$|[;&|)\\n'"]))`, 'i') },
-  // PowerShell, wherever it appears in the command; spps and kill are Stop-Process's aliases, gps is Get-Process's.
-  { form: 'Stop-Process -Name', pattern: /(?:stop-process|spps)\b[^;|\n]*\s-name\b/i },
-  { form: 'Get-Process piped to Stop-Process', pattern: /(?:get-process|gps)\b(?![^|;\n]*\s-id\b)[^;\n]*\|\s*(?:stop-process|spps|kill)\b(?![^|;\n]*\s-id\b)/i },
+  // PowerShell, wherever it appears in the command; spps and kill are Stop-Process's aliases, gps is Get-Process's. PowerShell
+  // takes any unique start of a parameter name (-N, -Na) and -ProcessName for -Name. Bash's own kill takes -n for a signal
+  // number, so through the kill alias only the whole parameter name counts. The scans after the command name are bounded:
+  // unbounded, 10,000 repeated "kill " words took 192 ms, each one scanning to the end of the line.
+  { form: 'Stop-Process -Name', pattern: /(?:stop-process|spps)\b[^;|\n]{0,200}\s-(?:n(?:a(?:me?)?)?|processname)\b/i },
+  { form: 'Stop-Process -Name', pattern: /\bkill\b[^;|\n]{0,200}\s-(?:name|processname)\b/i },
+  // Get-Process by name (no -Id) whose results are stopped: piped to Stop-Process, .Kill() on them, or % Kill.
+  { form: 'Get-Process piped to Stop-Process', pattern: /(?:get-process|gps)\b(?![^|;\n)]{0,200}\s-id\b)[^;\n]{0,300}(?:\|\s*(?:stop-process|spps|kill)\b(?![^|;\n"]{0,200}\s-id\b)|\)\.kill\(|\|\s*(?:%|foreach-object)\s+(?:\{[^}]*\.)?kill\b)/i },
 ]
 
 // The form a command uses to stop processes by name or pattern, or undefined when it names no such form.

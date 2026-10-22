@@ -46,6 +46,19 @@ const HITS: [string, string][] = [
   ['su -c "cd x; pkill node"', 'pkill'],
   ['eval "pkill node"', 'pkill'],
   ["watch 'killall node'", 'killall'],
+  // Review of 10a88af: control flow, a leading backslash, PowerShell aliases and abbreviations, and ps piped to kill.
+  ['if true; then pkill node; fi', 'pkill'],
+  ['while true; do pkill node; done', 'pkill'],
+  ['{ pkill node; }', 'pkill'],
+  ['! pkill node', 'pkill'],
+  ['\\pkill node', 'pkill'],
+  ['pwsh -c "kill -Name node"', 'Stop-Process -Name'],
+  ['powershell -c "Stop-Process -ProcessName node"', 'Stop-Process -Name'],
+  ['powershell -c "spps -N node"', 'Stop-Process -Name'],
+  ['powershell -c "(Get-Process node).Kill()"', 'Get-Process piped to Stop-Process'],
+  ['powershell -c "Get-Process node | % Kill"', 'Get-Process piped to Stop-Process'],
+  ["ps aux | grep vite | awk '{print $2}' | xargs kill", 'looked-up PIDs piped to kill'],
+  ["kill $(ps aux | grep vite | awk '{print $2}')", 'kill of looked-up PIDs'],
 ]
 
 // Refused on purpose: the command is read as text, so a kill word at a command start inside a quote or a heredoc counts.
@@ -75,6 +88,9 @@ const MISSES = [
   'fuser -v 5173/tcp',
   'lsof -ti:5173',
   "echo 'it is fine to pkill your own PID'",
+  'ps aux | grep node',
+  'powershell -c "Get-Process -Id 42 | % Kill"',
+  'powershell -c "Get-Process node | Select-Object Id"',
 ]
 
 test('each by-name or by-pattern kill form is found, and its name is returned', () => {
