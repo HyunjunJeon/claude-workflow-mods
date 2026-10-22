@@ -37,14 +37,33 @@ function active(session: SessionRecord, now: number): boolean {
   return session.status === 'active' && now - session.updatedAt >= 0 && now - session.updatedAt <= 60_000
 }
 
+function isAbsolute(scope: string): boolean {
+  return scope.startsWith('/')
+}
+
 function resolveScope(root: string, scope: string): string {
   const parts: string[] = []
-  for (const part of (scope.startsWith('/') ? scope : `${root}/${scope}`).split('/')) {
+  for (const part of (isAbsolute(scope) ? scope : `${root}/${scope}`).split('/')) {
     if (!part || part === '.') continue
     if (part === '..') parts.pop()
     else parts.push(part)
   }
   return '/' + parts.join('/')
+}
+
+// Two scopes overlap when one resolved path equals or contains the other.
+// A run in a git worktree publishes its writes as absolute paths under <root>/.claude/worktrees/<name>/.
+// A relative scope names the main folder's own tree, which is a separate working tree, so it
+// must not cover them: a main-folder run writing '.' would otherwise clash with every worktree run.
+function scopesOverlap(root: string, a: string, b: string): boolean {
+  const first = resolveScope(root, a)
+  const second = resolveScope(root, b)
+  if (isAbsolute(a) !== isAbsolute(b)) {
+    const claudeDir = resolveScope(root, '.claude') + '/'
+    if ((isAbsolute(a) ? first : second).startsWith(claudeDir)) return false
+  }
+  return first === second || first.startsWith(second.endsWith('/') ? second : second + '/')
+    || second.startsWith(first.endsWith('/') ? first : first + '/')
 }
 
 export function projectSessions(records: readonly SessionRecord[], root: string, now: number) {
@@ -65,10 +84,7 @@ export function sessionConflicts(records: readonly SessionRecord[], root: string
       for (const a of [...new Set(left.writes)].sort()) {
         for (const b of [...new Set(right.writes)].sort()) {
           if (/[?*[\]{}]/.test(a) || /[?*[\]{}]/.test(b)) continue
-          const first = resolveScope(root, a)
-          const second = resolveScope(root, b)
-          if (first === second || first.startsWith(second.endsWith('/') ? second : second + '/')
-            || second.startsWith(first.endsWith('/') ? first : first + '/')) {
+          if (scopesOverlap(root, a, b)) {
             conflicts.push({ sessionIds: [left.sessionId, right.sessionId], writes: [a, b] })
           }
         }

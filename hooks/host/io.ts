@@ -43,6 +43,19 @@ export function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+// The folder the session works in now. $.session.root() follows /cd and EnterWorktree, while projectRoot stays where the
+// session started and holds its run store.
+export async function workingRoot($: EngineInterface, projectRoot: string): Promise<string> {
+  try {
+    // Spelled as projectRoot is, without a trailing slash, so the same folder never reads as a worktree.
+    return (await $.session.root()).replace(/\/+$/, '') || projectRoot
+  } catch (error) {
+    // A host or a test harness without the call: every run works in the session's own folder, as before runs had a root.
+    debug($, `session.root unavailable: ${message(error)}`)
+    return projectRoot
+  }
+}
+
 // Writes the `*` .gitignore of root's .claude/dag store if it is missing; the store folder must already exist.
 export async function ensureGitignore($: EngineInterface, root: string): Promise<void> {
   const path = `${root}/${DAG_SUBDIR}/.gitignore`

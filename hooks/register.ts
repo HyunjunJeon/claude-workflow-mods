@@ -66,7 +66,7 @@ import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
 import { adjacentBoardId, buildBoardView } from './ui/board-model.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
 import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
-import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GIT_READ_TIMEOUT_MS, listIfPresent, message, readOrEmpty, recoverReport, removePath, SAFE_RUN_DIR, type AgentEnd, type CompletionClaim, type CompletionResult, type ToolInput } from './host/io.ts'
+import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GIT_READ_TIMEOUT_MS, listIfPresent, message, readOrEmpty, recoverReport, removePath, SAFE_RUN_DIR, workingRoot, type AgentEnd, type CompletionClaim, type CompletionResult, type ToolInput } from './host/io.ts'
 import { collectLearning, createLearning, finishLearning, initializeLearning, observeLearnedSkill, pruneLearningData, readLearningLibrary, saveLearningSession, startLearning, updateLearningLibrary } from './host/learning.ts'
 import { BOARDS_SUBDIR, CHIP_PAINT, chipContexts, citeBlock, createBoards, handleBoardTool, inheritBoards, latestBoardTitle, loadBoards, type BoardCalls } from './host/boards.ts'
 import { createTrajectory, exportTrajectory, pruneTrajectories, record, recordMainTurn, recordNodeEnd, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
@@ -877,23 +877,10 @@ async function missingRootError($: EngineInterface, run: Run): Promise<string | 
   return `${RUN_FOLDER_GONE}${run.root}. Its git worktree was removed while the run was active. Recreate the worktree at that path (git worktree add) and retry the node, or cancel the run.`
 }
 
-// The folder the session works in now. $.session.root() follows /cd and EnterWorktree, while projectRoot stays where the
-// session started and holds its run store.
-async function workingRoot($: EngineInterface): Promise<string> {
-  try {
-    // Spelled as projectRoot is, without a trailing slash, so the same folder never reads as a worktree.
-    return (await $.session.root()).replace(/\/+$/, '') || projectRoot
-  } catch (error) {
-    // A host or a test harness without the call: every run works in the session's own folder, as before runs had a root.
-    debug($, `session.root unavailable: ${message(error)}`)
-    return projectRoot
-  }
-}
-
 // The folder an Edit or Write lands in: its run's for a node worker, the session's current one otherwise.
 async function editRoot($: EngineInterface, agentId: string | undefined): Promise<string> {
   const owner = ownNodeOfAgent(agentId)
-  return owner ? rootOf(owner.run) : workingRoot($)
+  return owner ? rootOf(owner.run) : workingRoot($, projectRoot)
 }
 
 // The folder an edited file belongs to: the one the edit works in (a worktree), else the session's own, so a file of either is
@@ -1770,7 +1757,7 @@ async function missingProgramProblem($: EngineInterface, definition: Definition,
 
 // A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
 async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
-  const root = await workingRoot($)
+  const root = await workingRoot($, projectRoot)
   const screened = screenDefinition(input, root)
   if (!screened.ok) return screened
   const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition, root)
@@ -1789,7 +1776,7 @@ function effectiveApproval(): StartApproval {
 async function startDefinition($: EngineInterface, input: unknown, by: 'model' | 'user', approveHeld = false): Promise<ToolReply> {
   // The run keeps the folder the session works in now, so a run started in a worktree runs there to the end, even if the
   // session moves on.
-  const root = await workingRoot($)
+  const root = await workingRoot($, projectRoot)
   const screened = screenDefinition(input, root)
   if (!screened.ok) return err(screened.error)
   const { definition, existing } = screened.value
@@ -2074,9 +2061,11 @@ function trajectoryCalls($: EngineInterface): TrajectoryCalls {
 
 async function notifyHandoff($: EngineInterface, run: Run): Promise<void> {
   if (!run.handoff) return
+  // A worktree run keeps working in its worktree after /dag accept; the target session may stand in another folder.
+  const worktree = run.root === undefined ? '' : ` The run works in ${run.root}.`
   const sent = await $.session.send({
     to: { sessionId: run.handoff.to },
-    text: `[dag-handoff] Run ${run.runId} is ready for manual acceptance in ${projectRoot}. Use /dag accept ${run.runId} or the Sessions pane. Do not accept or start work automatically.`,
+    text: `[dag-handoff] Run ${run.runId} is ready for manual acceptance in ${projectRoot}.${worktree} Use /dag accept ${run.runId} or the Sessions pane. Do not accept or start work automatically.`,
   })
   if (!sent.isDelivered) $.ui.log(`Handoff remains available in Sessions; notification was not delivered: ${sent.reason ?? 'unknown reason'}`)
 }

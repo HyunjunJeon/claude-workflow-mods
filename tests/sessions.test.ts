@@ -94,6 +94,50 @@ test('sessionConflicts ignores unknown scopes and inactive or foreign sessions',
   expect(sessionConflicts(records, root, now)).toEqual([])
 })
 
+// A worktree run publishes its writes as absolute paths under <root>/.claude/worktrees/<name>/.
+// The main folder is a separate working tree, so a relative scope must not cover them.
+const work = '/work'
+const worktreeSession = (sessionId: string, writes: string[]) => session(sessionId, { projectRoot: work, writes })
+
+test('sessionConflicts does not match a relative scope against a write inside .claude/worktrees/', () => {
+  const records = [
+    worktreeSession('a', ['.']),
+    worktreeSession('b', ['/work/.claude/worktrees/x/out.md']),
+  ]
+  expect(sessionConflicts(records, work, now)).toEqual([])
+  expect(sessionConflicts([...records].reverse(), work, now)).toEqual([])
+})
+
+test('sessionConflicts still matches two absolute scopes in the same worktree', () => {
+  const records = [
+    worktreeSession('a', ['/work/.claude/worktrees/x/src']),
+    worktreeSession('b', ['/work/.claude/worktrees/x/src/a.ts']),
+  ]
+  expect(sessionConflicts(records, work, now)).toEqual([
+    { sessionIds: ['a', 'b'], writes: ['/work/.claude/worktrees/x/src', '/work/.claude/worktrees/x/src/a.ts'] },
+  ])
+})
+
+test('sessionConflicts still matches two relative scopes where one contains the other', () => {
+  const records = [
+    worktreeSession('a', ['src/a.ts']),
+    worktreeSession('b', ['src']),
+  ]
+  expect(sessionConflicts(records, work, now)).toEqual([
+    { sessionIds: ['a', 'b'], writes: ['src/a.ts', 'src'] },
+  ])
+})
+
+test('sessionConflicts still matches a relative scope against an absolute write outside .claude/', () => {
+  const records = [
+    worktreeSession('a', ['.']),
+    worktreeSession('b', ['/work/src/a.ts']),
+  ]
+  expect(sessionConflicts(records, work, now)).toEqual([
+    { sessionIds: ['a', 'b'], writes: ['.', '/work/src/a.ts'] },
+  ])
+})
+
 test('requestHandoff rejects wrong owner, project, target and stale sessions', () => {
   const input = run()
   for (const [record, context] of [

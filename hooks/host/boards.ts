@@ -7,7 +7,7 @@ import { err, ok, type ToolReply } from '../engine/format.ts'
 import { fail, type Result, type Run } from '../engine/types.ts'
 import type { Strings } from '../ui/i18n.ts'
 import { ACCENT } from '../ui/text.ts'
-import { ATTENTION_TOAST_MS, DAG_SUBDIR, GIT_READ_TIMEOUT_MS, message, SAFE_RUN_DIR, type ToolInput } from './io.ts'
+import { ATTENTION_TOAST_MS, DAG_SUBDIR, GIT_READ_TIMEOUT_MS, message, SAFE_RUN_DIR, workingRoot, type ToolInput } from './io.ts'
 
 // Boards: the state createBoards returns and the functions that take it. validate refuses $ passed to a method or a
 // callback, so each operation that calls the host is a top-level function taking ($, boards, ...), and the host gives only
@@ -110,22 +110,23 @@ function textLines(text: string): string[] {
   return lines
 }
 
-// What git prints for a board quote, run from the project root like a verify command. A git that cannot start or runs past
-// GIT_READ_TIMEOUT_MS rejects, and that refuses the edit the same way a non-zero exit does, with git's own complaint.
+// What git prints for a board quote, run from the folder the session works in (a worktree after EnterWorktree, else the
+// project root) like a verify command. A git that cannot start or runs past GIT_READ_TIMEOUT_MS rejects, and that refuses the
+// edit the same way a non-zero exit does, with git's own complaint.
 async function gitOutput($: EngineInterface, boards: Boards, args: string[], at: string): Promise<Result<string>> {
   const refused = (reason: string) => fail<string>('invalid_board_edit', `${at}: git ${args[0]} could not read it (${reason})`)
   try {
-    const result = await $.process.run(['git', ...args], { cwd: boards.host.projectRoot(), timeoutMs: GIT_READ_TIMEOUT_MS })
+    const result = await $.process.run(['git', ...args], { cwd: await workingRoot($, boards.host.projectRoot()), timeoutMs: GIT_READ_TIMEOUT_MS })
     return result.exitCode === 0 ? { ok: true, value: result.stdout } : refused(result.stderr.trim() || `exit ${result.exitCode}`)
   } catch (error) {
     return refused(message(error))
   }
 }
 
-// Lines start..end (1-based) of a project file for a code_peek: the worktree file, or with a ref the file as git holds it at
-// that ref. The ./ makes git read the path from the project root, which may be a folder inside the repository; a bare
-// <ref>:<path> starts at the repository root. peeksNeeded merges a range several edits ask for, so a refusal names the path
-// and no edit index.
+// Lines start..end (1-based) of a project file for a code_peek: the file in the folder the session works in, or with a ref the
+// file as git holds it at that ref. A worktree session quotes its own copy, the one it is changing, not the main folder's.
+// The ./ makes git read the path from that folder, which may be inside the repository; a bare <ref>:<path> starts at the
+// repository root. peeksNeeded merges a range several edits ask for, so a refusal names the path and no edit index.
 async function readPeek($: EngineInterface, boards: Boards, request: PeekRequest): Promise<Result<string[]>> {
   const at = request.ref ? `code_peek ${request.path}@${request.ref}` : `code_peek ${request.path}`
   let text: string
@@ -135,7 +136,7 @@ async function readPeek($: EngineInterface, boards: Boards, request: PeekRequest
     text = shown.value
   } else {
     try {
-      text = await $.fs.read(`${boards.host.projectRoot()}/${request.path}`)
+      text = await $.fs.read(`${await workingRoot($, boards.host.projectRoot())}/${request.path}`)
     } catch (error) {
       return fail('invalid_board_edit', `${at}: cannot read the file (${message(error)})`)
     }
@@ -181,12 +182,12 @@ async function readTrace($: EngineInterface, boards: Boards, request: TraceReque
   return { ok: true, value: text.split(/\r?\n/) }
 }
 
-// The lines of git diff <ref> [-- <path>] for a diff block; path is project-relative, as a pathspec from the project root is.
-// :(literal) makes git read the path as one file name, as the commit stage's checks do (stages.ts): a bare app/[id]/page.ts is
-// a pattern that also names app/i/page.ts, and a leading ":" is pathspec magic. --no-color and --no-ext-diff keep a plain
-// unified diff when the person's config sets color.ui=always or an external diff tool such as difftastic. An empty diff is no
-// read failure: the engine refuses it in the block's own words. diffsNeeded merges a diff several edits ask for, so a refusal
-// names the diff, not an edit index.
+// The lines of git diff <ref> [-- <path>] for a diff block; path is relative to the folder the session works in, as a pathspec
+// run from there is. :(literal) makes git read the path as one file name, as the commit stage's checks do (stages.ts): a
+// bare app/[id]/page.ts is a pattern that also names app/i/page.ts, and a leading ":" is pathspec magic. --no-color and
+// --no-ext-diff keep a plain unified diff when the person's config sets color.ui=always or an external diff tool such as
+// difftastic. An empty diff is no read failure: the engine refuses it in the block's own words. diffsNeeded merges a diff
+// several edits ask for, so a refusal names the diff, not an edit index.
 async function readDiff($: EngineInterface, boards: Boards, request: DiffRequest): Promise<Result<string[]>> {
   const at = request.path ? `diff ${request.ref} ${request.path}` : `diff ${request.ref}`
   const shown = await gitOutput($, boards, ['diff', '--no-color', '--no-ext-diff', request.ref, ...(request.path ? ['--', `:(literal)${request.path}`] : [])], at)

@@ -215,6 +215,47 @@ test('an update that points a diff at another ref runs git diff again and saves 
   expect(savedBoards(h)[0]?.blocks[0]).toEqual({ id: 'b1', type: 'diff', ref: 'main..feature', lines: ['diff --git a/b.ts b/b.ts', '+added'] })
 })
 
+// A session that entered a worktree (EnterWorktree) works there, while the board store stays with the folder it started in
+// (/work). Its blocks quote what the session is changing, so they read the worktree and not the main folder's copy.
+const WORKTREE = '/work/.claude/worktrees/x'
+
+test('in a worktree session a code_peek quotes the worktree\'s file, not the file of the folder the session started in', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  h.files.set('/work/src/sum.ts', SUM)
+  h.files.set(`${WORKTREE}/src/sum.ts`, OLD_SUM)
+  await boot($)
+  const boardId = await create($, 'Where I work')
+
+  const edited = await board($, { action: 'edit', board_id: boardId, edits: [{ op: 'insert', block: { type: 'code_peek', path: 'src/sum.ts', start: 2, end: 2 } }] })
+  expect(edited.isError).toBe(false)
+  expect(savedBoards(h)[0]?.blocks[0]).toMatchObject({ type: 'code_peek', path: 'src/sum.ts', lines: ['  return values.reduce((total, value) => total + value, 0)'] })
+})
+
+test('in a worktree session a code_peek at a git ref runs git in the worktree', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  h.control.git.set('show HEAD~1:./src/sum.ts', OLD_SUM)
+  await boot($)
+  const boardId = await create($, 'Before')
+
+  const edited = await board($, { action: 'edit', board_id: boardId, edits: [PEEK_AT('HEAD~1')] })
+  expect(edited.isError).toBe(false)
+  expect(h.processes.filter(e => e.argv[0] === 'git').map(e => e.init?.cwd)).toEqual([WORKTREE])
+})
+
+test('in a worktree session a diff block runs git diff in the worktree', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  h.control.git.set('diff --no-color --no-ext-diff HEAD~1 -- :(literal)src/sum.ts', `${PATCH.join('\n')}\n`)
+  await boot($)
+  const boardId = await create($, 'Change')
+
+  const edited = await board($, { action: 'edit', board_id: boardId, edits: [DIFF('HEAD~1', 'src/sum.ts')] })
+  expect(edited).toMatchObject({ isError: false, value: { inserted: ['b1'] } })
+  expect(h.processes.filter(e => e.argv[0] === 'git').map(e => e.init?.cwd)).toEqual([WORKTREE])
+})
+
 test('list returns this session\'s boards and an unknown board_id is unknown_board', async ($, on) => {
   harness(on)
   await boot($)
