@@ -596,7 +596,7 @@ let reviewLedger = true
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
 let contextOnDisk = false
-let jevPermissionScope: 'all' | 'dag' = 'dag'
+let jevPermissionScope: 'off' | 'dag' | 'all' = 'dag'
 const activity = new Map<string, Activity>()
 const agentEventSources = new Set<string>()
 const handbacks = new Map<string, string>()
@@ -3754,7 +3754,8 @@ export function register(on: On, options: PluginOptions) {
   const trajectoryMb = options.trajectory_max_mb
   if (typeof trajectoryMb === 'number' && Number.isInteger(trajectoryMb) && trajectoryMb >= 0 && trajectoryMb <= 102_400) trajectoryMaxMb = trajectoryMb
   reviewLedger = options.review_ledger !== false
-  jevPermissionScope = options.jev_permission_scope === 'all' ? 'all' : 'dag'
+  const permissionScope = options.jev_permission_scope
+  jevPermissionScope = permissionScope === 'all' || permissionScope === 'off' ? permissionScope : 'dag'
   learningEnabled = options.session_learning !== false
   for (const [key, set] of [
     ['learning_interval', (value: number) => { learningInterval = value }],
@@ -4127,14 +4128,31 @@ export function register(on: On, options: PluginOptions) {
     // The host sets agentId on a real call in a subagent loop; openCalls only knows calls whose tool.call reached this plugin.
     const worker = ownNodeOfAgent(e.agentId ?? call?.agentId)
     // The answer stays with the person: mark the node worker that will wait for it.
-    const asked = async (why: string) => {
+    const asked = async (why: string, verdict = decided) => {
       if (call) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
       if (!interactive && worker && noteAsk(worker.run.runId, worker.nodeId, worker.attempt, e.tool)) {
         $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
       }
-      return decided
+      return verdict
     }
     if (PERSON_TOOLS.has(e.tool)) return asked('Jev not asked: the host keeps the dialog of a tool that asks the person')
+    // An external node's effects reach beyond the project files, so only the person may approve its asks: no Jev, and no
+    // classifier's allow either (the verdict below is a person's ask on 2.1.304-2.1.307, see its comment).
+    if (worker?.run.definition.nodes.find(def => def.id === worker.nodeId)?.external) {
+      const note = `Run ${worker.run.runId}, node ${worker.nodeId} is external: the person decides, Jev not asked`
+      await persistDecisions($, [decisionRecord({
+        at: await $.clock.now(), kind: 'permission', subject: e.tool, proposed: 'ask', selected: 'ask',
+        source: 'rule', outcome: 'existing-decision', latencyMs: 0, stateHash: hash(note),
+        runId: worker.run.runId, nodeId: worker.nodeId, note,
+      }, {}, 0)])
+      // decider is what makes this ask person-only on Claude Code 2.1.304-2.1.306. 2.1.307 removed it from ToolCheckResult
+      // and treats every ask a hook rewords as a person's, so there the engine drops the field; the assertion lets one source typecheck on both.
+      return asked(`Jev not asked: node ${worker.nodeId} is external and the person decides`, {
+        decision: 'ask', decider: 'person',
+        reason: `Node ${worker.nodeId} is marked external, so its effects outside the project files need the person's approval`,
+      } as typeof decided)
+    }
+    if (jevPermissionScope === 'off') return asked('Jev not asked: jev_permission_scope is off')
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
     if (jevPermissionScope === 'dag' && context?.task === undefined) return asked('Jev not asked: jev_permission_scope is dag and the call carries no node task')
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })

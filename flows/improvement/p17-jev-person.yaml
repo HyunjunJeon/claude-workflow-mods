@@ -1,0 +1,130 @@
+# Jev permission, the rest of the 2026-10-22 plan: external nodes' asks go to the person, and permission decisions can be
+# turned off on their own.
+# Why: the outside reviews asked to separate "the model thinks this is fine" from "the user authorized it": a DAG start
+# approval does not authorize a push, deploy or sent message a node meets later. A node marked `external: true` already
+# skips the automatic review fix, but its permission asks still go to Jev, which can turn them into allow. Claude Code
+# 2.1.304 added `decider: "person"` to a mod's tool.check answer: "only the permission dialog or a host's callback can
+# approve the ask, and it is refused with the mod's reason where nobody can be asked". Separately, jev_enabled switches
+# routing, recovery classification and permission decisions together; auto_recovery already turns recovery off alone,
+# but permission decisions had no switch of their own beyond the all/dag scope.
+#
+# PREREQUISITE: `git status --short` prints nothing, and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p17-jev-person.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. No commit node: the user commits after reading the reviews.
+#
+# Run plan (components -> waves):
+#   wave 1: jev-person, docs
+#   then:   review-spec, review-standards (generated)
+# No edge: docs gets the contract pasted in its prompt and edits only docs/reference.md.
+# Categories: standard for jev-person (one slice through the tool.check hook, the option parse, plugin.json and tests;
+# its "owns several files" warning is expected); writing for docs.
+#
+# Run history (2026-10-22):
+# - dag_mvj7zz9m_jhjpl1 (this key) settled failed: jev-person's change was done, but the installed Claude Code moved to
+#   2.1.307 mid-run and `claude plugin test .` failed 13 pre-existing tests there (the 2.1.307 testing kit checks
+#   permissions inside $.tool.call and refuses an unanswered ask before a test's own tool.call hook).
+# - dag_mvj8n08o_4cctso diagnosed 2.1.307 from its embedded typings (/tmp/dag-307/host-diff-notes.md): the tool.call ->
+#   tool.check order is unchanged; ToolCheckResult lost `decider`, and every ask a hook rewords is a person's ask.
+# - dag_mvj90mrf_0kd9mk (key improve-p17-jev-person-2, inline definition) kept `decider: 'person'` through a typed
+#   assertion so the external ask is person-only on 2.1.304-2.1.307, pinned CI to 2.1.307 and ported the 13 tests;
+#   Spec and Standards verdicts PASS, 1458 tests pass.
+
+key: improve-p17-jev-person-1
+name: External nodes ask the person; Jev permissions can be off
+goal: >
+  A tool call whose host decision is ask and that comes from a DAG node marked external: true is answered
+  { decision: 'ask', decider: 'person' } without asking Jev, and jev_permission_scope accepts off (no Jev permission
+  decisions at all) beside dag (default) and all; plugin.json, docs/reference.md and tests match, and claude plugin test,
+  tsc and claude plugin validate pass.
+review:
+  request: |
+    남은 후보 작업들 진행. 3번부터
+    Item 3 as agreed (2026-10-22): Jev permission rest. Contract: (1) In tool.check, when the host's decision is ask and the call belongs to a node of this session's run whose definition has external: true, the plugin does not ask Jev and returns { decision: 'ask', decider: 'person' } with a reason naming the node, so only the permission dialog (or a host callback) can approve it and a session where nobody can be asked refuses it; it records one permission decision with source rule and selected ask. (2) jev_permission_scope accepts off, dag and all; off asks Jev about no permission (every ask stays with the host's flow), dag stays the default, any other value keeps the default. (3) Asks that are not ask, PERSON_TOOLS, and non-external node calls behave exactly as before.
+    Out of scope: classifying main-conversation calls as external and changing routing or recovery; plugin.json gains no option key other than the off value of jev_permission_scope; this run leaves its changes uncommitted for the user.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - tests/AGENTS.md
+nodes:
+  - id: jev-person
+    label: Send external nodes' asks to the person; add jev_permission_scope off
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - .claude-plugin/plugin.json
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: hooks/register.ts
+        contains: "decider: 'person'"
+      - kind: file
+        path: .claude-plugin/plugin.json
+        matches: "\"jev_permission_scope\"[\\s\\S]{0,800}\"off\""
+    prompt: |
+      TASK: In the tool.check hook, give an external node's ask to the person instead of Jev, and let jev_permission_scope be off.
+
+      CONTEXT:
+      - hooks/register.ts, the tool.check hook (search `on('tool.check'`): it awaits `next(e)`, records the isReadOnly shadow decision, returns early unless the host's decision is `ask`, finds the node worker with `ownNodeOfAgent(e.agentId ?? call?.agentId)` (run, nodeId, attempt), keeps PERSON_TOOLS with the host (`asked(...)`), skips Jev under `jevPermissionScope === 'dag'` when the call carries no node task, and otherwise asks Jev and may return { decision: 'allow' | 'deny' }. `asked(why)` marks the worker waiting and, in a non-interactive session, logs a headless note once.
+      - The node definition is `run.definition.nodes.find(def => def.id === nodeId)`; `external?: boolean` is on NodeDef (hooks/engine/types.ts), "true when the node changes anything outside the project files (push, deploy, database, storage, settings, messages)".
+      - Claude Code 2.1.304+ (.claude-plugin/types/claude-code/index.d.ts, search `decider?: ToolCheckDecider`): a tool.check answer may carry `decider: 'person'` with decision 'ask'; only the permission dialog or a host's callback can approve it, no classifier's allow, and where nobody can be asked it is a deny with this verdict's reason as the model's error. Read the full doc comment there before writing.
+      - jevPermissionScope (near line 599) is 'all' | 'dag', default 'dag', parsed near line 3757 as `options.jev_permission_scope === 'all' ? 'all' : 'dag'`. plugin.json (near line 104) lists options ["all", "dag"] with default "dag".
+      - Decisions are recorded with `persistDecisions($, [decisionRecord({...})])` as the Jev path in the same hook does; read it for the fields.
+
+      REQUIRED:
+      1. External nodes: after the PERSON_TOOLS check and before any Jev request, when `worker` exists and its node definition has `external: true`, record one permission decision (subject the tool, proposed 'ask', selected 'ask', source 'rule', a note naming the run and node and saying the person decides) and return `{ decision: 'ask', decider: 'person', reason: <short reason naming the node and that its external effects need the person's approval> }`, still calling the same waiting/headless-note bookkeeping that `asked` does. Do not ask Jev for these calls.
+      2. Scope off: jevPermissionScope becomes 'off' | 'dag' | 'all' with default 'dag'; the parse keeps 'all' and 'off' only for those exact strings and uses 'dag' otherwise. Under 'off', every ask that reaches the Jev step stays with the host (asked with a reason saying jev_permission_scope is off), and no Jev request is made.
+      3. plugin.json: options ["off", "dag", "all"], default "dag"; extend the description with what off does.
+      4. Tests (claude-code/testing, tests/control-harness.ts, mock clock), red first: an ask from an external node's worker returns decision ask with decider person, makes no Jev request and records the rule decision; the same call from a non-external node still goes to Jev as before; under jev_permission_scope 'off' a node worker's ask makes no Jev request and stays ask; an invalid scope value keeps dag. If the testing kit cannot show the decider field, assert on the hook's returned verdict through whatever the harness exposes and say how in Output.
+
+      SCOPE: edit only hooks/register.ts (the tool.check hook, the scope variable and its parse), .claude-plugin/plugin.json and files under tests/. A docs node edits docs/reference.md at the same time.
+
+      VERIFY: `command claude plugin test .` passes in full, `bunx -p typescript@5 tsc -p . --noEmit` prints nothing, and `command claude plugin validate .` passes (the runtime reruns all three).
+
+      STOP WHEN: the tests pass and the three checks pass.
+
+      In ## Output give: the exact verdict and decision record for an external node's ask, where it sits in the hook (line), the scope parse line, the plugin.json option text, the new test names, and the last line of the test run.
+
+  - id: docs
+    label: Document external asks and scope off
+    category: writing
+    writes:
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "decider"
+      - kind: file
+        path: docs/reference.md
+        matches: "jev_permission_scope[^\\n]*`off`"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md]
+    prompt: |
+      TASK: Document two permission changes in docs/reference.md (Korean; keep it Korean).
+
+      CONTRACT (another node implements exactly this at the same time; describe exactly this):
+      1. When a tool call's host decision is ask and the call comes from a DAG node whose definition has `external: true` (push, deploy, database, storage, settings change, sent message), the plugin does not ask Jev. It answers ask with `decider: "person"` (Claude Code 2.1.304+), so only the permission dialog or a host callback can approve it and no automatic classifier can; in a session where nobody can be asked (`claude -p`) the call is refused with a reason naming the node. The decision log records it as a permission decision with source rule. Starting or approving a run does not approve these calls.
+      2. `jev_permission_scope` accepts `off`, `dag` (default) and `all`. `off` turns Jev permission decisions off entirely (every ask keeps the host's flow) while Jev routing and recovery keep working; jev_enabled still turns all Jev decisions off.
+
+      REQUIRED:
+      1. The permission scope bullet (search '**승인 범위:**') and the settings table row (search '| `jev_permission_scope`'): add `off` and what it does.
+      2. Near the permission description (the section with the 승인 범위 bullet) add a short paragraph for item 1. If docs/reference.md describes `external` elsewhere (search 'external'), add one sentence there pointing to the person-only approval.
+      3. Change nothing else.
+
+      SCOPE: edit only docs/reference.md. Another node edits hooks/register.ts, .claude-plugin/plugin.json and tests at the same time.
+
+      VERIFY: `git diff --check -- docs/reference.md` prints nothing; `grep -n 'decider\|jev_permission_scope' docs/reference.md` shows the new text.
+
+      STOP WHEN: both items are documented and the check passes.
+
+      In ## Output give each changed or added line with its line number.

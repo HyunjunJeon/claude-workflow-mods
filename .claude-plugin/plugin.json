@@ -104,8 +104,8 @@
     "jev_permission_scope": {
       "type": "string",
       "title": "Jev permission scope",
-      "description": "dag (default): limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged; all: Jev resolves every uncertain tool permission, including the main conversation's, and sends the tool input to Jev",
-      "options": ["all", "dag"],
+      "description": "dag (default): limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged; all: Jev resolves every uncertain tool permission, including the main conversation's, and sends the tool input to Jev; off: Jev decides no permission, every ask stays with the host's dialog and no tool input is sent to Jev. In every scope an ask from a node marked external: true goes to the person and never to Jev",
+      "options": ["off", "dag", "all"],
       "default": "dag"
     },
     "enforcement": {
