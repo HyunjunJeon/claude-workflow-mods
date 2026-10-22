@@ -46,22 +46,8 @@ export function extractOutput(answer: string | undefined, limit = UPSTREAM_OUTPU
   return truncate(section.trim(), limit)
 }
 
-// The line run.ts keepEnds puts where it cut the middle out of a long answer.
-export function omittedLine(count: number): string {
-  return `… (${count} characters omitted)`
-}
-const OMITTED_LINE = /\n… \(\d+ characters omitted\)\n/
-
-// A report's whole ## Output, for fields the prompt asks for at its end. A node's stored output is cut to what an upstream
-// prompt carries (UPSTREAM_OUTPUT_CHARS), so this reads the stored answer, which keeps both ends of a long report (run.ts
-// keepEnds). If that cut took the Output heading, everything after the cut lies inside Output; the text before it is the
-// reasoning, where a template line such as "Ruling: <decision>" is no ruling, so it is left out.
-export function fullOutput(node: { answer?: string; output?: string }): string {
-  const answer = node.answer
-  if (answer === undefined) return node.output ?? ''
-  if (OUTPUT_HEADING.test(answer)) return extractOutput(answer, Number.POSITIVE_INFINITY)
-  const cut = OMITTED_LINE.exec(answer)
-  return extractOutput(cut ? answer.slice(cut.index + cut[0].length) : answer, Number.POSITIVE_INFINITY)
+export function hasOutputHeading(answer: string): boolean {
+  return OUTPUT_HEADING.test(answer)
 }
 
 // Worker text placed inside a tagged data block: a closing tag in it would end the block early and leave the rest as prompt text.

@@ -1,5 +1,5 @@
 import { definitionHash, nodeFingerprint } from './definition.ts'
-import { extractOutput, omittedLine } from './node-prompt.ts'
+import { extractOutput, hasOutputHeading } from './node-prompt.ts'
 import { VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
 import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type ReviewFinding, type Run, type RunStatus } from './types.ts'
@@ -12,7 +12,20 @@ const ENDED_BADLY: ReadonlySet<NodeState> = new Set(['failed', 'cancelled', 'ski
 function keepEnds(text: string, limit: number): string {
   if (text.length <= limit) return text
   const head = Math.floor(limit * 0.4)
-  return `${text.slice(0, head)}\n${omittedLine(text.length - limit)}\n${text.slice(text.length - (limit - head))}`
+  return `${text.slice(0, head)}\n… (${text.length - limit} characters omitted)\n${text.slice(text.length - (limit - head))}`
+}
+
+// A report's whole ## Output, for the fields the prompt asks for at its end (Ruling, Next, Tried and failed). The stored output
+// is cut to what an upstream prompt carries (4,000 characters), so this reads the stored answer: from its Output heading when
+// it has one, and all of it when it has none and was never cut, as extractOutput reads a report without a heading. An answer
+// cut by keepEnds and without the heading keeps the stored output, since the text before the cut may be reasoning, where a
+// template line such as "Ruling: <decision>" is no ruling. Workers write Output last, so its heading falls into the cut only
+// when Output alone is longer than the 12,000 characters kept at the end; fields at the end of such a report are not found.
+export function fullOutput(node: { answer?: string; output?: string }): string {
+  const answer = node.answer
+  if (answer === undefined) return node.output ?? ''
+  if (hasOutputHeading(answer) || answer.length <= MAX_ANSWER_CHARS) return extractOutput(answer, Number.POSITIVE_INFINITY)
+  return node.output ?? ''
 }
 
 function clone(run: Run): Run {

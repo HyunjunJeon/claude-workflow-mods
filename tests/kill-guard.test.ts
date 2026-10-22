@@ -46,19 +46,26 @@ const HITS: [string, string][] = [
   ['su -c "cd x; pkill node"', 'pkill'],
   ['eval "pkill node"', 'pkill'],
   ["watch 'killall node'", 'killall'],
-  // Review of 10a88af: control flow, a leading backslash, PowerShell aliases and abbreviations, and ps piped to kill.
+  // Review of 10a88af: control flow, a leading backslash, and .Kill() or % Kill on Get-Process results.
   ['if true; then pkill node; fi', 'pkill'],
   ['while true; do pkill node; done', 'pkill'],
   ['{ pkill node; }', 'pkill'],
   ['! pkill node', 'pkill'],
   ['\\pkill node', 'pkill'],
-  ['pwsh -c "kill -Name node"', 'Stop-Process -Name'],
-  ['powershell -c "Stop-Process -ProcessName node"', 'Stop-Process -Name'],
-  ['powershell -c "spps -N node"', 'Stop-Process -Name'],
   ['powershell -c "(Get-Process node).Kill()"', 'Get-Process piped to Stop-Process'],
   ['powershell -c "Get-Process node | % Kill"', 'Get-Process piped to Stop-Process'],
-  ["ps aux | grep vite | awk '{print $2}' | xargs kill", 'looked-up PIDs piped to kill'],
-  ["kill $(ps aux | grep vite | awk '{print $2}')", 'kill of looked-up PIDs'],
+]
+
+// Known gaps, kept on purpose (kill-guard.ts says why): each pattern tried for them also refused ordinary commands such as
+// find tests/kill -name, rg 'Stop-Process' -n and a cleanup by process group through ps. Asserted so a change is a decision.
+const GAPS = [
+  'pwsh -c "kill -Name node"',
+  'powershell -c "Stop-Process -ProcessName node"',
+  'powershell -c "spps -N node"',
+  "ps aux | grep vite | awk '{print $2}' | xargs kill",
+  "kill $(ps aux | grep vite | awk '{print $2}')",
+  'for p in $(pgrep -f vite); do kill $p; done',
+  'powershell -c "Get-Process node | % { Stop-Process -Id $_.Id }"',
 ]
 
 // Refused on purpose: the command is read as text, so a kill word at a command start inside a quote or a heredoc counts.
@@ -91,6 +98,14 @@ const MISSES = [
   'ps aux | grep node',
   'powershell -c "Get-Process -Id 42 | % Kill"',
   'powershell -c "Get-Process node | Select-Object Id"',
+  // Review of 3e0ffa7: refused by patterns that were then taken out.
+  "find tests/kill -name '*.test.ts'",
+  "find . -path '*kill*' -name '*.ts'",
+  'echo "use kill -name later"',
+  "rg 'Stop-Process' hooks -n",
+  'grep spps tests/kill-guard.test.ts -n',
+  "kill -- -$(ps -o pgid= $PID | tr -d ' ')",
+  'ps -p 1234 -o pid= | xargs kill',
 ]
 
 test('each by-name or by-pattern kill form is found, and its name is returned', () => {
@@ -99,6 +114,10 @@ test('each by-name or by-pattern kill form is found, and its name is returned', 
 
 test('a kill by PID, a search for the word and a plain pgrep are not refused', () => {
   for (const command of MISSES) expect({ command, form: killByName(command) }).toEqual({ command, form: undefined })
+})
+
+test('the known gaps stay unrefused until someone decides to close them', () => {
+  for (const command of GAPS) expect({ command, form: killByName(command) }).toEqual({ command, form: undefined })
 })
 
 test('a kill word at a command start inside quoted text or a heredoc is refused on purpose', () => {

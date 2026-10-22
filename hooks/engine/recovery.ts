@@ -1,8 +1,8 @@
 import { downstream } from './graph.ts'
 import { isVerificationNode } from './lint.ts'
 import { isVerdictFailure } from './stages.ts'
-import { advance } from './run.ts'
-import { escapeClosingTags, fullOutput, parseOutcome, spawnTarget, truncate } from './node-prompt.ts'
+import { advance, fullOutput } from './run.ts'
+import { escapeClosingTags, parseOutcome, spawnTarget, truncate } from './node-prompt.ts'
 import { evidenceOutcome } from './check-eval.ts'
 import { fail, type RecoveryKind, type Result, type Run } from './types.ts'
 
@@ -15,9 +15,10 @@ export const MAX_AUTO_RECOVERIES = 2
 export const ATTEMPT_NOTE_CHARS = 1_500
 const NEXT_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Next(?:\*\*)?\s*:/i
 const TRIED_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Tried and failed(?:\*\*)?\s*:/i
-// Next is a short plan written right before Tried. A "Next:" further up is a plan bullet with the log after it, not the
-// hypothesis the worker hands on, so it counts only within this many lines above Tried, and keeps at most this much.
-const NEXT_REACH_LINES = 8
+// Next is a short plan written right before Tried, or last when there is no Tried. A "Next:" further up is a plan bullet with
+// the log after it, not the hypothesis the worker hands on, so its first line counts only within this many lines of where the
+// Next field must end (the Tried line, or the end of Output). 20 leaves room for a hypothesis and a list of files to read.
+const NEXT_REACH_LINES = 20
 const NEXT_CHARS = 500
 
 // The two fields that end a failed report's ## Output: the last "Tried and failed:" line to the end, so a pasted error line or a
@@ -27,7 +28,7 @@ export function attemptNote(output: string): string | undefined {
   const tried = lines.findLastIndex(line => TRIED_FIELD.test(line))
   const end = tried < 0 ? lines.length : tried
   const found = lines.slice(0, end).findLastIndex(line => NEXT_FIELD.test(line))
-  const next = tried >= 0 && tried - found > NEXT_REACH_LINES ? -1 : found
+  const next = end - found > NEXT_REACH_LINES ? -1 : found
   if (tried < 0 && next < 0) return undefined
   const parts = [
     ...(next < 0 ? [] : [truncate(lines.slice(next, end).join('\n').trim(), NEXT_CHARS)]),
@@ -78,7 +79,8 @@ export function recoverNode(input: Run, nodeId: string, decision: { kind: Recove
     // "Next:" step that is follow-up work, not a hypothesis.
     const reportedFailed = answer !== undefined && parseOutcome({ isAborted: false, answer }).state === 'failed'
     const found = reportedFailed ? attemptNote(fullOutput({ answer, output })) : undefined
-    const note = found === undefined ? undefined : escapeClosingTags(found, ['previous_attempt'])
+    // The note and the evidence sit inside this prompt, which buildNodePrompt wraps in <task>.
+    const note = found === undefined ? undefined : escapeClosingTags(found, ['previous_attempt', 'task'])
     return {
       ...rest,
       state: 'pending' as const,
@@ -95,7 +97,7 @@ export function recoverNode(input: Run, nodeId: string, decision: { kind: Recove
             checks: verification.evidence.map((item, index) => ({
               index: index + 1, outcome: evidenceOutcome(item), exitCode: item.exitCode, detail: item.detail.slice(0, 240),
             })),
-          }), ['verification_evidence']),
+          }), ['verification_evidence', 'task']),
           '</verification_evidence>',
         ] : []),
         ...(note ? [

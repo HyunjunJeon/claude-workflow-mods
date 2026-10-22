@@ -1,8 +1,8 @@
-import { fullOutput, truncate } from './node-prompt.ts'
+import { truncate } from './node-prompt.ts'
 import { evidenceOutcome, VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { BOARD_TOOL } from './policy.ts'
 import type { Preview, WriteConflict } from './preview.ts'
-import { snapshotOf } from './run.ts'
+import { fullOutput, snapshotOf } from './run.ts'
 import type { EngineError, Run } from './types.ts'
 
 export type ToolReply = { result: string; isError?: true }

@@ -7,6 +7,11 @@
 // bash -c) was tried on 2026-10-22 and a review found six ways past it in one pass: a heredoc fed to bash, nested quotes
 // in $(...), an apostrophe in a comment, su -c, eval, an unquoted PowerShell script. Missing a kill stops another node's
 // server; refusing a command that only mentions pkill costs one reworded command, and the refusal says how.
+//
+// Known gaps, left on purpose after four review rounds: each new pattern for them refused ordinary commands too. Not caught:
+// ps ... | grep ... | xargs kill, a PID loop over pgrep (for p in $(pgrep x); do kill $p; done), PowerShell's kill alias,
+// -N or -ProcessName for -Name, Stop-Process -InputObject, % { Stop-Process -Id $_.Id }, and padding past the bounded scans.
+// The guard is a seatbelt against a worker's habit, not a security boundary; tests/kill-guard.test.ts lists these as GAPS.
 
 // Where a command word can start: the line start, a separator, a pipe, a subshell, a group or negation ({ !), a command
 // substitution, a quote (eval "...", su -c "...", bash -c '...') or a control-flow keyword. A leading backslash (\pkill) only
@@ -15,8 +20,9 @@ const START = String.raw`(?:^|[;&|(\n\`'"{!]|\$\(|\b(?:then|do|else|elif)\s)\s*\
 // What can stand before the command word: variable assignments, words that run the next word as a command (with their
 // options, and timeout's duration), then a directory such as /usr/bin/.
 const PREFIX = String.raw`(?:(?:[A-Za-z_]\w*=\S*|(?:sudo|doas|exec|nohup|command|xargs|time|env|nice|ionice|stdbuf)(?:\s+-{1,2}[\w-]+(?:[ =][\w.:-]+)?)*|timeout(?:\s+-\S+)*\s+\d+(?:\.\d+)?[smhd]?)\s+)*(?:[^\s;&|()\`'"]*/)?`
-// Commands that print process ids by name, pattern or port; ps feeds grep and awk on the way to kill.
-const LOOKUP = '(?:pgrep|pidof|lsof|ps)'
+// Commands that print process ids by name, pattern or port. ps is left out: it looks up by PID as often as by name
+// (kill -- -$(ps -o pgid= $PID)), which is the cleanup the refusal asks for.
+const LOOKUP = '(?:pgrep|pidof|lsof)'
 
 const FORMS: readonly { form?: string; pattern: RegExp }[] = [
   { pattern: new RegExp(`${START}${PREFIX}(pkill|killall)(?=$|[\\s;&|)\`'"])`, 'i') },
@@ -26,12 +32,10 @@ const FORMS: readonly { form?: string; pattern: RegExp }[] = [
   { form: 'taskkill /IM or /FI', pattern: new RegExp(`${START}${PREFIX}taskkill(?:\\.exe)?\\b[^;&|\\n]*\\s(?://?|-)(?:im|fi)\\b`, 'i') },
   // Process id -1 means every process the user may signal.
   { form: 'kill -1', pattern: new RegExp(`${START}${PREFIX}kill\\s+(?:(?:-s\\s+\\S+|-\\S+)\\s+)+-1(?=\\s*(?:$|[;&|)\\n'"]))`, 'i') },
-  // PowerShell, wherever it appears in the command; spps and kill are Stop-Process's aliases, gps is Get-Process's. PowerShell
-  // takes any unique start of a parameter name (-N, -Na) and -ProcessName for -Name. Bash's own kill takes -n for a signal
-  // number, so through the kill alias only the whole parameter name counts. The scans after the command name are bounded:
-  // unbounded, 10,000 repeated "kill " words took 192 ms, each one scanning to the end of the line.
-  { form: 'Stop-Process -Name', pattern: /(?:stop-process|spps)\b[^;|\n]{0,200}\s-(?:n(?:a(?:me?)?)?|processname)\b/i },
-  { form: 'Stop-Process -Name', pattern: /\bkill\b[^;|\n]{0,200}\s-(?:name|processname)\b/i },
+  // PowerShell, wherever it appears in the command; spps is Stop-Process's alias, gps is Get-Process's. Only the whole -Name
+  // counts: the kill alias, -N and -ProcessName also matched find, grep -n and rg -n calls that only name those words. The
+  // scans after a command name are bounded: unbounded, 10,000 repeated command words took 192 ms, each scanning to the end.
+  { form: 'Stop-Process -Name', pattern: /(?:stop-process|spps)\b[^;|\n]{0,200}\s-name\b/i },
   // Get-Process by name (no -Id) whose results are stopped: piped to Stop-Process, .Kill() on them, or % Kill.
   { form: 'Get-Process piped to Stop-Process', pattern: /(?:get-process|gps)\b(?![^|;\n)]{0,200}\s-id\b)[^;\n]{0,300}(?:\|\s*(?:stop-process|spps|kill)\b(?![^|;\n"]{0,200}\s-id\b)|\)\.kill\(|\|\s*(?:%|foreach-object)\s+(?:\{[^}]*\.)?kill\b)/i },
 ]
