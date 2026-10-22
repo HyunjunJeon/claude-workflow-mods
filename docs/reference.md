@@ -352,7 +352,7 @@ verify:
 {"kind": "command", "argv": ["node", "tools/lint.js", "fixtures/bad.json"], "expect": {"exit": 1, "stderr": {"contains": "unknown field"}}}
 ```
 
-- 노드 에이전트가 완료를 보고하면 런타임이 검사를 모두 실행하고, 시도마다 `.claude/dag/runs/<run_id>/<node>.verification.<시도>.json`에 증거(검사, 통과 여부, 종료 코드, 출력 4,000자까지)를 남긴 다음에야 `completed`로 바꿉니다.
+- 노드 에이전트가 완료를 보고하면 런타임이 검사를 모두 실행하고, 시도마다 `.claude/dag/runs/<run_id>/<node>.verification.<시도>.json`에 증거(검사, 통과 여부, 종료 코드, 출력. 출력이 4,000자보다 길면 4,000자 안에서 앞부분(첫 줄은 한도의 절반 가까이까지 통째로), 생략한 양을 알리는 표시 줄, 생략한 중간의 실패 줄(`(fail)`, `FAIL`(`FAILED` 포함), `not ok`로 시작하는 줄과 `AssertionError`, `Error:`가 든 줄), 끝부분을 남겨 실패한 테스트 이름과 총계가 기록에 남습니다)를 남긴 다음에야 `completed`로 바꿉니다.
 - 검사가 하나라도 실패하거나 증거가 없으면 노드는 `failed`가 되고 하위 노드는 시작하지 않습니다.
 - 새 검사 증거에는 `outcome`을 기록합니다. `passed`는 기대 충족, `failed`는 확인한 결과의 기대 불충족(산출물 경로 없음 포함), `not_run`은 명령 시작 실패·시간 초과로 완료 결과를 얻지 못함, `unknown`은 읽기 권한 오류·검사 범위 제한·기대 출력 잘림 등으로 판정 불가입니다. 종료 코드가 이미 기대와 다르면 출력이 잘려도 `failed`입니다. `not_run`과 `unknown`도 완료를 막으며, 완료 요약과 세션 복원에 검사별 결과가 전달됩니다.
 - 기존 `passed` 필드는 유지합니다. `outcome`이 없는 예전 기록은 `passed: true`만 통과로 읽고, `false`는 실패와 검사 불가를 구별할 근거가 없어 `unknown`으로 표시합니다. 기존 실행의 완료 상태를 바꾸거나 자동으로 재실행하지 않습니다.
@@ -402,7 +402,7 @@ verify:
 
 `skills/anti-slop/`은 지워도 동작이 그대로인 코드와, 코드가 이미 아는 타입 정보를 버리는 코드를 막는 규율입니다. 모든 언어에 적용하고 예시는 TS·JS·Python·Go·Java·Rust·Ruby로 듭니다. 세 겹으로 동작합니다.
 
-1. 스캔: Edit이나 Write가 끝나면 플러그인이 그 호출이 추가한 줄만 정규식으로 검사하고, 걸린 패턴을 도구 결과 뒤에 모델이 읽는 컨텍스트로 붙입니다. 메인 대화와 DAG 노드 모두에 적용되고 모델 호출이 없습니다. 모양만 보므로 예외에 해당하면 모델이 그 예외를 밝히고 코드를 남깁니다. `anti_slop_scan`으로 끄고 `anti_slop_skip`으로 패턴을 뺍니다. 저장소 하나에서만 빼려면 루트의 `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` 중 하나에 `anti-slop allow: <패턴 id>, ...` 줄을 쓰고 이유를 함께 적습니다. 프로젝트 `.claude/settings.json`의 `pluginConfigs`는 플러그인에 전달되지 않습니다(2026-10-12 측정, `--settings` 파일은 전달됨).
+1. 스캔: Edit이나 Write가 끝나면 플러그인이 그 호출이 추가한 줄만 정규식으로 검사하고, 걸린 패턴을 도구 결과 뒤에 모델이 읽는 컨텍스트로 붙입니다. 메인 대화와 DAG 노드 모두에 적용되고 모델 호출이 없습니다. 모양만 보므로 예외에 해당하면 모델이 그 예외를 밝히고 코드를 남깁니다. `anti_slop_scan`으로 끄고 `anti_slop_skip`으로 패턴을 뺍니다. 저장소 하나에서만 빼려면 루트의 `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` 중 하나에 `anti-slop allow: <패턴 id>, ...` 줄을 쓰고 이유를 함께 적습니다. 스캔은 이 파일들을 수정한 파일이 속한 폴더(세션 폴더, 또는 그 파일이 있는 git worktree)의 루트와 세션을 시작한 폴더의 루트에서 읽으므로, 저장소가 추적하지 않는 규칙 파일도 worktree에서 적용됩니다. 프로젝트 `.claude/settings.json`의 `pluginConfigs`는 플러그인에 전달되지 않습니다(2026-10-12 측정, `--settings` 파일은 전달됨).
 2. 작성: 계획 스킬은 코드를 쓰거나 고치는 노드의 `load_skills`에 `dag-workflow:anti-slop`을 넣습니다. 노드는 보고하기 전에 자기 diff를 목록 전체와 대조해 고치고, 남긴 예외는 `## Output`에 한 줄씩 적습니다.
 3. 검토: `review`로 생성되는 `review-standards` 노드는 이 스킬을 항상 불러옵니다. diff가 증명하는 하드 패턴은 `## Rule breaches`에 `anti-slop: <패턴> - <file:line> - <증명>; <고칠 방법>`으로 적히고 `Standards verdict: FAIL`이 됩니다. `auto_recovery`가 켜져 있으면 [리뷰 수정 라운드](#자동-복구)가 지적된 생산 노드를 실행당 한 번 다시 실행합니다.
 

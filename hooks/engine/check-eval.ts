@@ -59,6 +59,75 @@ export function exitProblem(code: number | undefined, expect?: CommandExpect): s
   return accepted.includes(code) ? undefined : `exit code ${code} is not accepted (expected ${accepted.join(' or ')})`
 }
 
+// A command check's detail is cut to this many characters, so one long output cannot flood the verification report or the
+// settle message that quotes it.
+const DETAIL_LIMIT = 4_000
+// A test runner prints each failing test in the middle of its output and the totals last. Cutting at the first 4,000
+// characters kept only passing lines, and twice on 2026-10-22 a node failed this check with no failing test to name. So the
+// head keeps the command line and the first output, the failure lines keep what failed, and the tail takes the rest of the
+// budget, which is where the totals are.
+const HEAD_SHARE = 0.25
+const FAILURE_SHARE = 0.25
+// The first line is the check's problem or the command with its exit code, and a long argv makes it longer than the head
+// share. The head holds that line whole, up to this share, so the command is not cut; a longer one is cut there, so it
+// cannot take the room of the failure lines and the totals.
+const FIRST_LINE_SHARE = 0.5
+// One failure line is clipped to this many characters, so a long stack line cannot spend the failure share alone.
+const FAILURE_LINE_CHARS = 300
+// bun, vitest, jest and TAP mark a failed test at the start of a line, and pytest prints FAILED; node and most libraries
+// print an error name. FAIL has no space after it, so FAILED and FAILURES match too.
+const FAILURE_LINE = /^\s*(?:\(fail\)|FAIL|not ok)|AssertionError|Error:/
+
+function omitted(count: number): string {
+  return `[... ${count} characters left out ...]`
+}
+
+// The whole lines inside text[from, to) that look like failures, clipped, while each one plus its newline fits the budget.
+// `end` is where the last of them ends in text (0 when there is none), so the tail can start after it.
+function failureLines(text: string, from: number, to: number, budget: number): { readonly lines: string[]; readonly end: number } {
+  const lines: string[] = []
+  let used = 0
+  let end = 0
+  // The head may have cut a line in two: reading starts at the next line start (0 means the text has none).
+  let start = text.indexOf('\n', from - 1) + 1
+  while (start > 0 && start < to) {
+    const stop = text.indexOf('\n', start)
+    // A line that is not finished before `to` belongs to the tail.
+    if (stop < 0 || stop >= to) break
+    const line = text.slice(start, stop).trimEnd().slice(0, FAILURE_LINE_CHARS)
+    if (FAILURE_LINE.test(line)) {
+      if (used + line.length + 1 > budget) break
+      lines.push(line)
+      used += line.length + 1
+      end = stop + 1
+    }
+    start = stop + 1
+  }
+  return { lines, end }
+}
+
+// Text within the limit comes back as it is. A longer text keeps, within `limit` characters in all and in this order: its
+// head (a quarter, or the whole first line if that is longer and fits), one marker line counting the characters left out,
+// the lines of the left-out middle that look like failures, and its tail. The tail gets whatever the head and the failure
+// lines do not use, but never reaches back over a kept line.
+export function commandDetail(text: string, limit = DETAIL_LIMIT): string {
+  if (text.length <= limit) return text
+  // Room for the marker is reserved at the width of the largest count it could show, plus the two newlines around it.
+  const room = Math.max(0, limit - omitted(text.length).length - 2)
+  // A text with no newline is one long line, which the plain share cuts like any other.
+  const firstLine = Math.max(text.indexOf('\n'), 0)
+  const headSize = Math.max(Math.floor(room * HEAD_SHARE), Math.min(firstLine, Math.floor(room * FIRST_LINE_SHARE)))
+  const failureBudget = Math.floor(room * FAILURE_SHARE)
+  const smallestTail = room - headSize - failureBudget
+  const failures = failureLines(text, headSize, text.length - smallestTail, failureBudget)
+  const failureChars = failures.lines.reduce((sum, line) => sum + line.length, 0)
+  // Each failure line also costs the newline that separates it from the next part.
+  const used = failureChars + failures.lines.length
+  const tailStart = Math.max(text.length - (room - headSize - used), failures.end)
+  const left = tailStart - headSize - failureChars
+  return [text.slice(0, headSize), omitted(left), ...failures.lines, text.slice(tailStart)].join('\n')
+}
+
 // A failure that starts with this word is a defect of the check, not of the node's work: a retry, even on Opus, runs the
 // same check and fails again. On 2026-10-10 two eval runs spent 94 s and 117 s on such Opus retries before an amend fixed
 // the check. Recovery leaves these nodes failed, and the settle message asks the main conversation to amend the check.

@@ -11,7 +11,7 @@ import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, de
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES, verdictFailure } from './engine/recovery.ts'
-import { CHECK_DEFECT, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
+import { CHECK_DEFECT, commandDetail, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
 import { DEFAULT_COMMAND_TIMEOUT_MS, projectPath, readOnlyAbsolutePath, timeoutAdvice, verificationProblem } from './engine/verification.ts'
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
@@ -1646,7 +1646,7 @@ async function commandCheckResult($: EngineInterface, check: CommandCheck, root:
     : exitProblem(exitCode, expectation) ? 'failed'
     : truncated('stdout') || truncated('stderr') ? 'unknown'
     : problem ? 'failed' : 'passed'
-  return { outcome, detail: (problem ? `${problem}\n${excerpt}` : excerpt).slice(0, 4_000), exitCode }
+  return { outcome, detail: commandDetail(problem ? `${problem}\n${excerpt}` : excerpt), exitCode }
 }
 
 async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<NonNullable<NodeRun['verification']>> {
