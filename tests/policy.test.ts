@@ -35,7 +35,7 @@ test('read-only shell commands pass and anything that can write is refused', asy
     ['ls && touch x', 'touch is not on the read-only command list'],
     ['sort -o out.txt in.txt', 'sort -o writes a file'],
     ['git ls-files | xargs rm', 'xargs is not on the read-only command list'],
-    ['FOO=1 sed -i s/a/b/ f', 'sed -i is not allowed in the main conversation'],
+    ['LC_ALL=C sed -i s/a/b/ f', 'sed -i is not allowed in the main conversation'],
   ]
   for (const [command, problem] of writing) expect(readOnlyBashProblem(command)).toBe(problem)
 })
@@ -93,6 +93,163 @@ test('a leading command builtin is skipped and the command after it is still che
     ['ls && command touch x', 'touch is not on the read-only command list'],
   ]
   for (const [command, problem] of writing) expect(readOnlyBashProblem(command)).toBe(problem)
+})
+
+// The message carries the command, so a failure names the command that leaked or was blocked.
+function expectAllowed(commands: string[]): void {
+  for (const command of commands) expect(`${command} => ${readOnlyBashProblem(command) ?? 'ok'}`).toBe(`${command} => ok`)
+}
+
+function expectRefused(cases: [string, string][]): void {
+  for (const [command, problem] of cases) expect(`${command} => ${readOnlyBashProblem(command) ?? 'ok'}`).toBe(`${command} => ${problem}`)
+}
+
+const envReason = (name: string): string => `${name}= is an environment prefix that can change what runs (LD_PRELOAD, PATH, GIT_*)`
+
+test('a NAME=value prefix is skipped only for locale and display variables', async () => {
+  expectAllowed([
+    'LC_ALL=C sort a',
+    'TZ=UTC date',
+    'LANG=en_US.UTF-8 ls',
+    'LANGUAGE=en ls',
+    'NO_COLOR=1 rg foo hooks',
+    'FORCE_COLOR=0 cat a',
+    'CLICOLOR=0 ls',
+    'COLUMNS=80 ls',
+    'TERM=dumb ls',
+    'LC_ALL=C TZ=UTC date',
+    'if LC_ALL=C sort a; then echo ok; fi',
+  ])
+  expectRefused([
+    ['LD_PRELOAD=/tmp/e.so ls', envReason('LD_PRELOAD')],
+    ['PATH=./bin ls', envReason('PATH')],
+    ['GIT_PAGER=sh git log', envReason('GIT_PAGER')],
+    ['FOO=1 ls', envReason('FOO')],
+    ['LC_ALL=C PATH=./bin ls', envReason('PATH')],
+    ['PATH=./bin; ls', envReason('PATH')],
+    ['if PATH=./bin ls; then echo x; fi', envReason('PATH')],
+    ['LCX_ALL=C ls', envReason('LCX_ALL')],
+    ['command GIT_DIR=x git log', envReason('GIT_DIR')],
+    ['PATH+=:/tmp/x/ls; ls', envReason('PATH')],
+    ['path[1]=/tmp/x/ls; ls', envReason('path')],
+  ])
+})
+
+test('git global options are limited to choosing the repository and the pager', async () => {
+  expectAllowed([
+    'git -C hooks status',
+    'git -C a -C b log -1',
+    'git --no-pager diff --stat',
+    'git -P log -1',
+    'git --git-dir .git status',
+    'git --git-dir=.git --work-tree=. status',
+    'git --work-tree . ls-files',
+    'git --no-optional-locks status',
+    'git --literal-pathspecs ls-files',
+    'git --glob-pathspecs ls-files',
+    'git --noglob-pathspecs ls-files',
+    'git --icase-pathspecs ls-files',
+  ])
+  expectRefused([
+    ['git -c core.pager=sh log', 'git global option -c is not on the read-only list'],
+    ['git --config-env=core.pager=PAGER log', 'git global option --config-env is not on the read-only list'],
+    ['git --exec-path=/tmp log', 'git global option --exec-path is not on the read-only list'],
+    ['git --paginate log', 'git global option --paginate is not on the read-only list'],
+    ['git --no-pager -c core.editor=sh log', 'git global option -c is not on the read-only list'],
+    ['git -C hooks -c alias.x=y status', 'git global option -c is not on the read-only list'],
+  ])
+})
+
+test('git refuses --output and --ext-diff after any subcommand and -O for grep', async () => {
+  expectAllowed([
+    'git log --oneline -3',
+    'git diff --stat',
+    'git diff --no-ext-diff',
+    'git diff --output-indicator-new=+',
+    'git diff -O orderfile',
+    'git grep -n foo -- hooks',
+    'git grep -e foo -e bar',
+    'git show HEAD:README.md',
+  ])
+  expectRefused([
+    ['git log --output=x', 'git --output writes a file'],
+    ['git diff --output x', 'git --output writes a file'],
+    ['git show --output=x HEAD', 'git --output writes a file'],
+    ['git diff --ext-diff', 'git --ext-diff can run a program'],
+    ['git log -p --ext-diff', 'git --ext-diff can run a program'],
+    ['git grep -O foo', 'git grep -O can run a program'],
+    ['git grep -nOsh foo', 'git grep -O can run a program'],
+    ['git grep --open-files-in-pager=sh foo', 'git grep -O can run a program'],
+    ['git grep --open-files-in-pager sh foo', 'git grep -O can run a program'],
+  ])
+})
+
+test('fd, rg and tree refuse the flags that run a program or write a file', async () => {
+  expectAllowed([
+    'fd -e ts hooks',
+    'fd -E node_modules',
+    'fd -H',
+    'fd -t f -e md docs',
+    'rg -n foo hooks',
+    'rg --no-pre foo hooks',
+    'rg --pre-glob "*.md" foo',
+    'tree -L 2',
+    'tree -a -I node_modules',
+    'tree -H .',
+  ])
+  expectRefused([
+    ['fd -x rm {}', 'fd with -x/-X/--exec can run programs'],
+    ['fd . --exec touch x', 'fd with -x/-X/--exec can run programs'],
+    ['fd -HX rm', 'fd with -x/-X/--exec can run programs'],
+    ['fd --exec-batch rm', 'fd with -x/-X/--exec can run programs'],
+    ['fd --exec=rm', 'fd with -x/-X/--exec can run programs'],
+    ['rg --pre ./x.sh foo', 'rg --pre/--hostname-bin can run a program'],
+    ['rg --pre=./x.sh foo', 'rg --pre/--hostname-bin can run a program'],
+    ['rg --hostname-bin=./h.sh foo', 'rg --pre/--hostname-bin can run a program'],
+    ['tree -o out.txt', 'tree -o/-R writes files'],
+    ['tree -aoout.txt', 'tree -o/-R writes files'],
+    ['tree -R -H . x', 'tree -o/-R writes files'],
+  ])
+})
+
+test('sort refuses every spelling of its output file and compress program, uniq its second operand', async () => {
+  expectAllowed([
+    'sort -u a',
+    'sort -rn a',
+    'sort -t o -k 2 a',
+    'sort a | uniq -c | sort -rn',
+    'uniq a',
+    'uniq -c a',
+    'uniq -f 1 a',
+    'uniq -cs 2 a',
+    'uniq < in.txt',
+  ])
+  expectRefused([
+    ['sort -o out.txt in.txt', 'sort -o writes a file'],
+    ['sort -oout.txt in.txt', 'sort -o writes a file'],
+    ['sort -uo out.txt in.txt', 'sort -o writes a file'],
+    ['sort --out=out.txt in.txt', 'sort -o writes a file'],
+    ['sort --output out.txt in.txt', 'sort -o writes a file'],
+    ['sort --compress-program=sh a', 'sort --compress-program can run a program'],
+    ['sort --compress-program sh a', 'sort --compress-program can run a program'],
+    ['sort --compress-prog=sh a', 'sort --compress-program can run a program'],
+    ['uniq a b', 'uniq with an output file writes it'],
+    ['uniq -c a b', 'uniq with an output file writes it'],
+    ['uniq -f 1 a b', 'uniq with an output file writes it'],
+    ['uniq -cs 2 a b', 'uniq with an output file writes it'],
+    ['uniq -- a b', 'uniq with an output file writes it'],
+    ['uniq - b', 'uniq with an output file writes it'],
+  ])
+})
+
+test('file refuses -C, which compiles a magic file next to the source', async () => {
+  expectAllowed(['file a.txt', 'file -b a.txt', 'file --mime-type a.txt', 'file -m magic a.txt'])
+  expectRefused([
+    ['file -C -m magic', 'file -C writes a magic.mgc file'],
+    ['file -bC -m magic', 'file -C writes a magic.mgc file'],
+    ['file --compile -m magic', 'file -C writes a magic.mgc file'],
+    ['file --comp -m magic', 'file -C writes a magic.mgc file'],
+  ])
 })
 
 test('the main conversation keeps read and orchestration tools only', async () => {
