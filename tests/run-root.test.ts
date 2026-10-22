@@ -65,18 +65,17 @@ test('the same definition started again in a worktree is a new run there, not th
 })
 
 test('a worktree worker\'s permission question names the worktree as the project root', async ($, on) => {
-  // Registered before the shared harness: the bottom acts as the host's permission gate, as in headless-ask.test.ts.
+  // Registered before the shared harness so this stand-in, not its catch-all tool.call, answers Write.
+  // The engine checks the call itself and reaches the stand-in only once the permission step lets the call through.
   on('tool.check', () => ({ decision: 'ask' }))
-  on('tool.call', { tool: 'Write' }, async (_engine, e) => {
-    const verdict = await $.tool.check({ tool: e.tool, input: { file_path: e.file_path, content: e.content }, tool_use_id: e.tool_use_id })
-    return { deny: verdict.reason ?? verdict.decision }
-  })
+  on('tool.call', { tool: 'Write' }, (_engine, e) => ({ result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }))
   const h = harness(on)
   h.control.root = WORKTREE
   folder(h, WORKTREE, WORKTREE_FILES)
   await boot($)
   await start($, RUN)
-  await $.tool.call({ tool: 'Write', file_path: `${WORKTREE}/out.md`, content: 'done', agentId: 'agent-1', tool_use_id: 'write-1' } as never)
+  const call = await $.tool.call({ tool: 'Write', file_path: `${WORKTREE}/out.md`, content: 'done', agentId: 'agent-1', tool_use_id: 'write-1' } as never)
+  expect(call).toMatchObject({ isError: true, text: expect.stringMatching(/^Permission to use Write has been denied/) })
   const asked = h.requests.filter(request => 'permission' in request.questions).at(-1)
   expect(asked?.state).toMatchObject({ projectRoot: WORKTREE })
 })
