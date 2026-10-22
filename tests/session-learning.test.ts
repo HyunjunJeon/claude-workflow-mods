@@ -1,12 +1,16 @@
 import { expect, test, type Engine, type Plugin } from 'claude-code/testing'
 import { hash } from '../hooks/engine/hash.ts'
-import { applyLearningProposals, emptyLibrary, parseLearningLibrary, parseLearningSession, renderLearnedSkill, type LearningLibrary, type LearningSession } from '../hooks/engine/learning.ts'
+import { parseLearningLibrary, parseLearningSession, renderLearnedSkill, type LearnedSkill, type LearningLibrary, type LearningSession } from '../hooks/engine/learning.ts'
 import { boot, checkpoint, command, harness, start } from './control-harness.ts'
 
 const HOME = '/home/learner'
 const ROOT = `${HOME}/.claude/dag-workflow/learning`
 const SKILL = 'dag-learned-event-tests'
 const PATH = `${HOME}/.claude/skills/${SKILL}/SKILL.md`
+// The harness project is /work; a skill learned now lives in its .claude/dag store.
+const DAG = '/work/.claude/dag'
+const LOCAL = `${DAG}/skills/${SKILL}/SKILL.md`
+const LOCAL_ARCHIVE = `${DAG}/learning-archive/${SKILL}/SKILL.md`
 type Harness = ReturnType<typeof harness>
 
 function session(h: Harness): LearningSession {
@@ -39,17 +43,24 @@ function proposal(h: Harness, overrides: Record<string, unknown> = {}) {
   }
 }
 
+function seededSkill(scope: 'project' | 'global', projectRoot: string): LearnedSkill {
+  return {
+    id: SKILL, description: 'Writing asynchronous tests', body: 'Subscribe first.', scope, projectRoot,
+    revision: 'seeded', createdAt: 1, updatedAt: 1, opportunities: 0, uses: 0, archived: false,
+    history: [{ sessionId: 'seed', at: 1, reason: 'Prior user correction', evidence: ['seed'] }],
+  }
+}
+
+// A legacy entry, learned before project-local storage: no location, and its file in the home skills folder.
 function seed(h: Harness, scope: 'project' | 'global' = 'project', projectRoot = '/work') {
-  const events = [{ id: 'seed', sessionId: 'seed', projectRoot, kind: 'user' as const, text: 'Await completion signals.', at: 1 }]
-  const seeded = applyLearningProposals(emptyLibrary(), [{
-    id: SKILL, description: 'Writing asynchronous tests', body: 'Subscribe first.', scope,
-    reason: 'Prior user correction', evidence: ['seed'], replaces: [],
-  }], { events, sessionId: 'seed', projectRoot, now: 1 })
-  if (!seeded.ok) throw new Error(seeded.error.message)
-  h.files.set(`${ROOT}/library.json`, JSON.stringify(seeded.value))
-  const skill = seeded.value.skills[0]
-  if (!skill) throw new Error('Missing seeded skill')
+  const skill = seededSkill(scope, projectRoot)
+  h.files.set(`${ROOT}/library.json`, JSON.stringify({ schemaVersion: 1, skills: [skill] }))
   h.files.set(PATH, renderLearnedSkill(skill))
+}
+
+function homeSkillEntries(h: Harness): string[] {
+  const prefix = `${HOME}/.claude/skills/`
+  return [...h.files.keys(), ...h.locks].filter(path => path.startsWith(prefix))
 }
 
 function signal() {
@@ -86,7 +97,7 @@ test('a non-DAG main turn learns and persists a reusable skill without recursive
   expect(library(h).skills[0]?.history[0]?.sessionId).toBe('source')
   const saved = library(h).skills[0]
   if (!saved) throw new Error('Missing learned skill')
-  expect(h.files.get(PATH)).toBe(renderLearnedSkill(saved))
+  expect(h.files.get(LOCAL)).toBe(renderLearnedSkill(saved))
   expect(session(h).batch).toBeUndefined()
   expect(h.spawns.length).toBe(1)
 })
@@ -126,7 +137,7 @@ test('invalid evidence cannot create a skill and remains available for relearnin
   const agentId = session(h).batch?.agentId
   if (!agentId) throw new Error('Missing learner')
   await complete($, JSON.stringify({ skills: [proposal(h, { evidence: ['fabricated'] })] }), agentId)
-  expect(h.files.has(PATH)).toBe(false)
+  expect(h.files.has(LOCAL)).toBe(false)
   expect(session(h).learnedThrough).toBe(0)
   await command($, 'learn')
   expect(h.spawns.length).toBe(2)
@@ -451,7 +462,7 @@ test('a restart completes a pending publication before exposing the skill', asyn
   expect(h.files.has(`${ROOT}/pending.json`)).toBe(false)
   await ask($)
   const block = h.submits.at(-1)?.context.find(text => text.includes('"kind":"learned-skills"'))
-  expect(block ? JSON.parse(block).skills[0].path : undefined).toBe(PATH)
+  expect(block ? JSON.parse(block).skills[0].path : undefined).toBe(LOCAL)
 })
 
 test('publication recovery preserves a manual edit and still finishes so later learning is not blocked', async ($, on) => {
@@ -464,9 +475,9 @@ test('publication recovery preserves a manual edit and still finishes so later l
   h.writeErrors.set(`${ROOT}/library.json`, 'Interrupted index write')
   await complete($, JSON.stringify({ skills: [proposal(h)] }), batch.agentId)
   h.writeErrors.clear()
-  h.files.set(PATH, 'Manual edit after interrupted publication')
+  h.files.set(LOCAL, 'Manual edit after interrupted publication')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  expect(h.files.get(PATH)).toBe('Manual edit after interrupted publication')
+  expect(h.files.get(LOCAL)).toBe('Manual edit after interrupted publication')
   expect(h.files.has(`${ROOT}/pending.json`)).toBe(false)
   expect(library(h).skills[0]?.id).toBe(SKILL)
   await ask($)
@@ -501,7 +512,7 @@ test('a proposal that masking pushes past its length limit keeps its evidence in
   const description = `${'Use signals. '.repeat(37)}token=abc`
   expect(description.length).toBeLessThanOrEqual(500)
   await complete($, JSON.stringify({ skills: [proposal(h, { description })] }), batch.agentId)
-  expect(h.files.has(PATH)).toBe(false)
+  expect(h.files.has(LOCAL)).toBe(false)
   expect(session(h).learnedThrough).toBe(0)
   expect(h.logs.some(line => line.includes('saved 1 skill proposal'))).toBe(false)
 })
@@ -584,7 +595,8 @@ test('a prompt that arrives while this session holds the library lock waits inst
 
 test('archiving and retention leave no empty skill folders behind', { options: { learning_min_opportunities: 1 } }, async ($, on) => {
   const h = harness(on, { home: HOME, now: 31 * 86_400_000 })
-  const folder = PATH.slice(0, -'/SKILL.md'.length)
+  const folder = LOCAL.slice(0, -'/SKILL.md'.length)
+  const archive = LOCAL_ARCHIVE.slice(0, -'/SKILL.md'.length)
   await boot($, 'off')
   await ask($)
   await complete($, 'Use signals.')
@@ -596,11 +608,77 @@ test('archiving and retention leave no empty skill folders behind', { options: {
   await ask($)
   expect(library(h).skills[0]?.archived).toBe(true)
   expect(h.locks.has(folder)).toBe(false)
-  expect(h.locks.has(`${ROOT}/archive/${SKILL}`)).toBe(true)
+  expect(h.locks.has(archive)).toBe(true)
   const archived = library(h)
   for (const skill of archived.skills) Object.assign(skill, { createdAt: 1, updatedAt: 1 })
   h.files.set(`${ROOT}/library.json`, JSON.stringify(archived))
   await command($, 'learning prune')
   expect(library(h).skills.length).toBe(0)
-  expect(h.locks.has(`${ROOT}/archive/${SKILL}`)).toBe(false)
+  expect(h.locks.has(archive)).toBe(false)
+})
+
+test('a newly learned skill goes to the project store with its ignore file and nothing to the home skills folder', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'The test now subscribes before triggering the operation.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learning batch')
+  expect(h.files.has(`${DAG}/.gitignore`)).toBe(false)
+  await complete($, JSON.stringify({ skills: [proposal(h, { scope: 'global' })] }), batch.agentId)
+  const saved = library(h).skills[0]
+  if (!saved) throw new Error('Missing learned skill')
+  expect([saved.scope, saved.location, saved.projectRoot]).toEqual(['project', 'project', '/work'])
+  expect(h.files.get(LOCAL)).toBe(renderLearnedSkill(saved))
+  expect(h.files.get(`${DAG}/.gitignore`)).toBe('# dag-workflow run checkpoints and node reports\n*\n')
+  expect(homeSkillEntries(h)).toEqual([])
+})
+
+test('an archived project skill moves to the project learning archive', { options: { learning_min_opportunities: 1 } }, async ($, on) => {
+  const h = harness(on, { home: HOME })
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  await complete($, JSON.stringify({ skills: [proposal(h)] }), batch.agentId)
+  const learned = library(h).skills[0]
+  if (!learned) throw new Error('Missing learned skill')
+  await ask($)
+  await ask($)
+  expect(library(h).skills[0]?.archived).toBe(true)
+  expect(h.files.has(LOCAL)).toBe(false)
+  expect(h.files.get(LOCAL_ARCHIVE)).toBe(renderLearnedSkill(learned))
+  expect(h.files.has(`${ROOT}/archive/${SKILL}/SKILL.md`)).toBe(false)
+})
+
+test('a legacy skill without location is still updated in the home skills folder', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  seed(h)
+  await boot($, 'off')
+  await ask($)
+  await complete($, 'Use signals.')
+  const batch = session(h).batch
+  if (!batch) throw new Error('Missing learner')
+  await complete($, JSON.stringify({ skills: [proposal(h, { body: 'Updated legacy instructions.' })] }), batch.agentId)
+  const updated = library(h).skills[0]
+  if (!updated) throw new Error('Missing updated skill')
+  expect(updated.body).toBe('Updated legacy instructions.')
+  expect(Object.hasOwn(updated, 'location')).toBe(false)
+  expect(h.files.get(PATH)).toBe(renderLearnedSkill(updated))
+  expect(h.files.has(LOCAL)).toBe(false)
+})
+
+test('a later session receives a project skill path and a Read of it records use', async ($, on) => {
+  const h = harness(on, { home: HOME })
+  const skill: LearnedSkill = { ...seededSkill('project', '/work'), location: 'project' }
+  h.files.set(`${ROOT}/library.json`, JSON.stringify({ schemaVersion: 1, skills: [skill] }))
+  h.files.set(LOCAL, renderLearnedSkill(skill))
+  h.control.sessionId = 'later'
+  await boot($, 'off')
+  await ask($)
+  const block = h.submits.at(-1)?.context.find(text => text.includes('"kind":"learned-skills"'))
+  expect(block ? JSON.parse(block).skills[0].path : undefined).toBe(LOCAL)
+  await $.tool.call({ tool: 'Read', file_path: LOCAL })
+  expect(library(h).skills[0]?.uses).toBe(1)
 })

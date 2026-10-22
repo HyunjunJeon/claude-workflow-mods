@@ -49,7 +49,7 @@ import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandi
 import { addUsage, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
-import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
+import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, archivedSkillPath, eligibleSkills, emptyLearningSession, emptyLibrary, learnedSkillPath, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearnedSkill, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
 import { boundInput, capText } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
 import { applyEdits, boardForModel, diffKey, diffsNeeded, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded, type DiffRequest, type PeekRequest, type TraceRequest } from './engine/board.ts'
@@ -212,6 +212,8 @@ let learningMaxInputChars = 60_000
 let learningDailyLimit = 20
 let learningRetentionDays = 30
 let learningRoot = ''
+// The home skills folder. Only legacy learned skills (no location) live there; learnedSkillPath sends new ones to their
+// project's .claude/dag/skills.
 let learnedSkillsDir = ''
 let learningSession = emptyLearningSession()
 let learningLibrary = emptyLibrary()
@@ -232,6 +234,20 @@ async function learningDirectory($: EngineInterface, path: string): Promise<void
   if (made.exitCode !== 0) throw new Error(`cannot create learning directory: ${made.stderr.trim()}`)
   const stat = await $.fs.stat(path)
   if (stat.kind !== 'dir' || stat.isLink) throw new Error(`learning directory is not a plain directory: ${path}`)
+}
+
+function parentOf(path: string): string {
+  return path.slice(0, path.lastIndexOf('/'))
+}
+
+// Creates the folder of a learned skill's file and the skills or archive folder above it, each a plain directory, so a
+// symlink cannot send the file elsewhere. A project skill's file can be the first one in its project's .claude/dag, so
+// that store's .gitignore is ensured before it.
+async function prepareSkillFolder($: EngineInterface, skill: LearnedSkill, path: string): Promise<void> {
+  const folder = parentOf(path)
+  await learningDirectory($, parentOf(folder))
+  await learningDirectory($, folder)
+  if (skill.location === 'project') await ensureGitignore($, skill.projectRoot)
 }
 
 // $.fs.write is not atomic and the host has no rename, so a process exit during a direct write leaves a truncated file.
@@ -329,8 +345,8 @@ async function publishLearningTransaction($: EngineInterface, transaction: Learn
   const preserved = new Set<string>()
   for (const skill of changed) {
     const previous = transaction.before.skills.find(item => item.id === skill.id)
-    const active = `${learnedSkillsDir}/${skill.id}/SKILL.md`
-    const archived = `${learningRoot}/archive/${skill.id}/SKILL.md`
+    const active = learnedSkillPath(skill, learnedSkillsDir)
+    const archived = archivedSkillPath(skill, learningRoot)
     for (const path of skill.archived ? [active, archived] : [active]) {
       if (!await $.fs.exists(path)) continue
       const stat = await $.fs.stat(path)
@@ -348,18 +364,18 @@ async function publishLearningTransaction($: EngineInterface, transaction: Learn
   if (!recovering) await learningWrite($, pending, JSON.stringify(transaction) + '\n')
   for (const skill of changed) {
     if (preserved.has(skill.id)) continue
-    const path = `${learnedSkillsDir}/${skill.id}/SKILL.md`
+    const path = learnedSkillPath(skill, learnedSkillsDir)
     if (skill.archived) {
       if (await $.fs.exists(path)) {
-        const folder = `${learningRoot}/archive/${skill.id}`
-        await learningDirectory($, folder)
-        const moved = await $.process.run(['mv', '-f', path, `${folder}/SKILL.md`])
+        const archived = archivedSkillPath(skill, learningRoot)
+        await prepareSkillFolder($, skill, archived)
+        const moved = await $.process.run(['mv', '-f', path, archived])
         if (moved.exitCode !== 0) throw new Error(`could not archive ${skill.id}`)
         // rmdir removes only an empty folder, so files a person added beside SKILL.md keep it in place.
-        await $.process.run(['rmdir', `${learnedSkillsDir}/${skill.id}`])
+        await $.process.run(['rmdir', parentOf(path)])
       }
     } else {
-      await learningDirectory($, `${learnedSkillsDir}/${skill.id}`)
+      await prepareSkillFolder($, skill, path)
       const wanted = renderLearnedSkill(skill)
       if (!await $.fs.exists(path) || await $.fs.read(path) !== wanted) await learningWrite($, path, wanted)
     }
@@ -380,7 +396,7 @@ async function pruneLearningData($: EngineInterface): Promise<void> {
         skills.push(skill)
         continue
       }
-      const path = `${learningRoot}/archive/${skill.id}/SKILL.md`
+      const path = archivedSkillPath(skill, learningRoot)
       if (await $.fs.exists(path)) {
         const stat = await $.fs.stat(path)
         if (stat.isLink || stat.kind !== 'file' || await $.fs.read(path) !== renderLearnedSkill(skill)) {
@@ -394,10 +410,10 @@ async function pruneLearningData($: EngineInterface): Promise<void> {
           $.ui.log(`Could not remove expired archived skill: ${path}`)
           continue
         }
-        await $.process.run(['rmdir', `${learningRoot}/archive/${skill.id}`])
+        await $.process.run(['rmdir', parentOf(path)])
       }
       // An active file created at this name since archival is not ours to remove.
-      if (await $.fs.exists(`${learnedSkillsDir}/${skill.id}/SKILL.md`)) skills.push(skill)
+      if (await $.fs.exists(learnedSkillPath(skill, learnedSkillsDir))) skills.push(skill)
     }
     return { ...library, skills }
   })
@@ -545,7 +561,7 @@ async function observeLearnedSkill($: EngineInterface, tool: string, input: Read
   if (!learningEnabled || !learningRoot) return
   const id = tool === 'Skill' && typeof input.skill === 'string' ? input.skill.split(':').at(-1)
     : tool === 'Read' && typeof input.file_path === 'string'
-      ? eligibleSkills(learningLibrary, projectRoot).find(skill => input.file_path === `${learnedSkillsDir}/${skill.id}/SKILL.md`)?.id
+      ? eligibleSkills(learningLibrary, projectRoot).find(skill => input.file_path === learnedSkillPath(skill, learnedSkillsDir))?.id
       : undefined
   if (!id || !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) return
   const now = await $.clock.now()
@@ -842,9 +858,14 @@ async function ensureDir($: EngineInterface, dir: string): Promise<void> {
   if (made.exitCode !== 0) throw new Error(`cannot create ${dir}: ${made.stderr.trim()}`)
   dirsMade.add(dir)
   if (gitignoreChecked) return
-  const path = `${projectRoot}/${DAG_SUBDIR}/.gitignore`
-  if (!(await $.fs.exists(path))) await $.fs.write(path, GITIGNORE)
+  await ensureGitignore($, projectRoot)
   gitignoreChecked = true
+}
+
+// Writes the `*` .gitignore of root's .claude/dag store if it is missing; the store folder must already exist.
+async function ensureGitignore($: EngineInterface, root: string): Promise<void> {
+  const path = `${root}/${DAG_SUBDIR}/.gitignore`
+  if (!(await $.fs.exists(path))) await $.fs.write(path, GITIGNORE)
 }
 
 async function persistDecisions($: EngineInterface, records: DecisionRecord[]): Promise<void> {

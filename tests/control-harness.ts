@@ -72,7 +72,9 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     let stderr = ''
     const path = e.argv.at(-1)
     if (e.argv[0] === 'sleep') return { deny: 'No wall-clock waits in tests' }
-    if (options.home && e.argv[0] === 'mkdir' && e.argv.includes('-p') && path?.startsWith(options.home + '/')) locks.add(path)
+    // Learning folders: the home ones, and a project's learned skills in its .claude/dag store.
+    if (options.home && e.argv[0] === 'mkdir' && e.argv.includes('-p')
+      && (path?.startsWith(options.home + '/') || path?.startsWith(ROOT + '/'))) locks.add(path)
     if (e.argv[0] === 'mv') {
       const source = e.argv.at(-2)
       const destination = e.argv.at(-1)

@@ -1,0 +1,137 @@
+# Project-local learned skills: new learned skills live in <project>/.claude/dag/skills, never in ~/.claude/skills.
+# Why: register.ts writes every learned skill to ~/.claude/skills, which Claude Code loads into every session of every
+# project. On 2026-10-22 this session's skill list carried all 54 dag-learned-* skills, from agent-dag, agent-forge, oiui,
+# vercel and wikidocs projects; the plugin's project filter (eligibleSkills) shapes only its own catalog. The catalog
+# already loads skills with Read by path, so a skill does not need to sit in a folder the host scans.
+# Decisions (user, 2026-10-22): store new skills in <project>/.claude/dag/skills (the plugin's own store, already ignored by
+# its `*` .gitignore, exposed only through the catalog); every new skill is project scope, even when the learner proposes
+# global; the 54 existing skills stay where they are in ~/.claude/skills and stay managed as today (updates, archiving,
+# pruning), so nothing is moved or deleted by this change.
+#
+# PREREQUISITE: `git status --short -- hooks tests docs README.md` prints nothing, and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p14-project-learned-skills.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. The session loaded the plugin before timeoutMs (59007fb), so the suite
+# gate is a node-written result file, as in p12 and p13. No commit node: the user commits after reading the reviews.
+#
+# Run plan (components -> waves):
+#   wave 1: skill-store, docs-learning
+#   then:   review-spec, review-standards (generated)
+# No edge: docs-learning gets the storage contract pasted into its prompt; tests do not read README.md or docs/.
+# Categories: hard for skill-store (one vertical slice through the library schema, the learner prompt, the catalog, the
+# transactional publication with its recovery, archiving and pruning in the host, and both learning test suites; its
+# "owns several files" warning is expected); writing for docs-learning.
+# First run: dag_mviydczu_kiseiu (2026-10-22), completed: both nodes passed their checks, Spec and Standards verdicts PASS
+# at HEAD dc1f30e (another session committed 51d48df..dc1f30e on this checkout while the run was being planned), 1402 tests
+# pass (15.5 s). Sessions still running the earlier plugin code keep writing to ~/.claude/skills until they reload.
+
+key: improve-p14-project-learned-skills-1
+name: Project-local learned skills
+goal: >
+  A newly learned skill is stored as project scope at <projectRoot>/.claude/dag/skills/<id>/SKILL.md (archived copies under
+  the project's .claude/dag as well), the catalog and use tracking point at that path, skills already in ~/.claude/skills
+  keep their place and their management, nothing new is written to ~/.claude/skills, and README.md and docs/reference.md
+  say so; tests, tsc and claude plugin validate pass.
+review:
+  request: |
+    학습 스킬 경로 이동은 일단 이 프로젝트에서만 진행하도록 하고 전역 폴더로는 이동하지 않습니다.
+    커밋도 바로 진행.
+    Answers (2026-10-22): storage location = .claude/dag/skills (the plugin's gitignored store, exposed only through the plugin catalog and Read); a skill the learner judges global = project scope only, nothing is written to a global folder; the 54 existing skills in ~/.claude/skills = leave them where they are and keep managing them as today.
+    Contract: a skill created from now on gets scope project and an optional library field location: 'project', and its file is <projectRoot>/.claude/dag/skills/<id>/SKILL.md; after a project skill is archived its file exists at <projectRoot>/.claude/dag/learning-archive/<id>/SKILL.md and no longer under .claude/dag/skills; for a library entry without location the catalog path is ~/.claude/skills/<id>/SKILL.md, after an update that file holds the new text, and after archiving the file exists at ~/.claude/dag-workflow/learning/archive/<id>/SKILL.md, exactly as before; applying a proposal for an existing id returns a skill with the same scope, projectRoot and location as before (absent stays absent); the learner prompt asks for project scope only; library.json, sessions/ and pending.json stay under ~/.claude/dag-workflow/learning; <projectRoot>/.claude/dag/.gitignore (content `*`) exists before the first project skill file is written; the retention sweep deletes nothing under .claude/dag/skills.
+    Out of scope: this change moves, copies and deletes no file in ~/.claude/skills, keeps one library file for all projects, and adds no option; the "commit" in the request refers to committing this change after the reviews, not a node of this run.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - tests/AGENTS.md
+nodes:
+  - id: skill-store
+    label: Store new learned skills under the project's .claude/dag
+    category: hard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/learning.ts
+      - hooks/register.ts
+      - tests
+    verify:
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - "import { learningCatalog, applyLearningProposals } from './hooks/engine/learning.ts'; const base = { description: 'Use when testing the probe', body: 'Body text.', revision: 'r', createdAt: 1, updatedAt: 1, opportunities: 0, uses: 0, archived: false, history: [] }; const lib = { schemaVersion: 1, skills: [{ ...base, id: 'dag-learned-old', scope: 'global', projectRoot: '/x' }, { ...base, id: 'dag-learned-new', scope: 'project', projectRoot: '/p', location: 'project' }, { ...base, id: 'dag-learned-legacy', scope: 'project', projectRoot: '/p' }] }; const paths = Object.fromEntries(JSON.parse(learningCatalog(lib, '/p', '/h/.claude/skills')).skills.map(s => [s.id, s.path])); const pathsOk = paths['dag-learned-old'] === '/h/.claude/skills/dag-learned-old/SKILL.md' && paths['dag-learned-legacy'] === '/h/.claude/skills/dag-learned-legacy/SKILL.md' && paths['dag-learned-new'] === '/p/.claude/dag/skills/dag-learned-new/SKILL.md'; const events = [{ id: 'e1', sessionId: 's', projectRoot: '/p', kind: 'user', text: 'x', at: 1 }]; const applied = applyLearningProposals(lib, [{ id: 'dag-learned-fresh', description: 'Use when testing the probe', body: 'Do the thing.', scope: 'global', reason: 'probe', evidence: ['e1'], replaces: [] }, { id: 'dag-learned-legacy', description: 'Use when testing the probe again', body: 'Updated body.', scope: 'project', reason: 'probe', evidence: ['e1'], replaces: [] }], { events, sessionId: 's', projectRoot: '/p', now: 5 }); const skills = applied.ok ? applied.value.skills : []; const fresh = skills.find(s => s.id === 'dag-learned-fresh'); const legacy = skills.find(s => s.id === 'dag-learned-legacy'); const freshOk = fresh?.scope === 'project' && fresh?.location === 'project'; const legacyOk = legacy?.body === 'Updated body.' && !('location' in legacy); console.log(JSON.stringify({ paths, applied: applied.ok, fresh: fresh && { scope: fresh.scope, location: fresh.location }, legacyLocation: legacy && legacy.location })); process.exit(pathsOk && freshOk && legacyOk ? 0 : 1)"
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: hooks/engine/learning.ts
+        absent: "Use project scope unless the technique applies across projects."
+      - kind: file
+        path: /tmp/dag-p14/skill-store-suite.txt
+        matches: "^ 0 fail$"
+      - kind: file
+        path: /tmp/dag-p14/skill-store-suite.txt
+        matches: "^Ran 1[3-9]\\d\\d tests across"
+    prompt: |
+      TASK: Store every newly learned skill as a project-scope skill under <projectRoot>/.claude/dag/skills/<id>/SKILL.md, while skills already in ~/.claude/skills keep their place and their management.
+
+      DECISIONS (the user's, 2026-10-22): new skills go to the project's .claude/dag/skills (the plugin's own store, ignored by its `*` .gitignore, exposed only through the plugin's catalog, which already tells the model to load skills with Read by path); a skill the learner proposes as global is stored as project scope; existing skills in ~/.claude/skills stay where they are and keep being updated, archived and pruned there; nothing new is written to ~/.claude/skills.
+
+      CONTEXT:
+      - hooks/engine/learning.ts: `LearnedSkill` (near line 15) has scope 'project' | 'global' and projectRoot; parseLearningLibrary checks the allowed keys with `fields(...)` (near line 89, required list plus optional keys); `eligible` (near line 223) admits global skills everywhere and project skills only in their projectRoot; parseLearningProposals (near line 231) accepts scope global and refuses a proposal whose scope differs from the existing skill's; applyLearningProposals (near line 275) builds each LearnedSkill and its revision hash; learningCatalog(library, projectRoot, skillsDir) (near line 307) emits `path: <skillsDir>/<id>/SKILL.md` for every eligible skill; buildLearningPrompt (near line 389) tells the learner 'Use project scope unless the technique applies across projects.' (line 395).
+      - hooks/register.ts: learnedSkillsDir = `${HOME}/.claude/skills` and learningRoot = `${HOME}/.claude/dag-workflow/learning` (near line 425, both created there with learningDirectory); the transactional publication (near lines 318-370) validates and writes `${learnedSkillsDir}/<id>/SKILL.md`, archives with `mv -f` into `${learningRoot}/archive/<id>/SKILL.md` and `rmdir`s the empty skill folder, records pending.json for recovery; pruneLearningData (near line 372) removes expired archived files from `${learningRoot}/archive` and checks `${learnedSkillsDir}/<id>/SKILL.md`; skill loading checks (near line 399) and the Read-based use tracking (near line 547, comparing input.file_path with `${learnedSkillsDir}/<id>/SKILL.md`) and the catalog calls (near lines 3905 and 3943) use learnedSkillsDir. ensureDir (near line 838) writes `${projectRoot}/.claude/dag/.gitignore` (content `*`) the first time it creates a folder; the retention sweep prunes only runs/, context/ and decisions/ under .claude/dag.
+      - Tests: tests/learning.test.ts (engine) and tests/session-learning.test.ts (hook level, with `options.home`); tests/AGENTS.md conventions (claude-code/testing, tests/control-harness.ts, no wall-clock waits).
+
+      REQUIRED:
+      1. Library: add an optional `location: 'project'` to LearnedSkill (accepted by parseLearningLibrary and parseLearningTransaction; absent means a legacy skill in ~/.claude/skills). One pure helper in learning.ts returns a skill's active SKILL.md path and one its archive path, given the home skills folder and the home learning root: project skills use <projectRoot>/.claude/dag/skills/<id>/SKILL.md and <projectRoot>/.claude/dag/learning-archive/<id>/SKILL.md; legacy skills keep the current paths. Every path in learning.ts and register.ts goes through these helpers.
+      2. applyLearningProposals: a proposal for an id that is not in the library becomes scope 'project' with location 'project' and projectRoot = the context's projectRoot, whatever scope it proposed; an update keeps the existing skill's scope, projectRoot and location (absent stays absent).
+      3. buildLearningPrompt: replace 'Use project scope unless the technique applies across projects.' with an instruction that new skills are always project scope and an existing skill keeps its scope; keep the rest of the prompt.
+      4. learningCatalog: each skill's path comes from the helper. Keep the function's signature.
+      5. register.ts: the publication, recovery, archiving (mv into the archive path, rmdir of the empty active folder), pruneLearningData, the skill-file existence checks and the Read use tracking use the helpers. Before writing the first file under a project's .claude/dag, make sure `<projectRoot>/.claude/dag/.gitignore` exists exactly as ensureDir writes it (reuse ensureDir or its GITIGNORE constant; do not add a second ignore rule). Keep the safety checks (no symlinked folders, refusing manually changed files, recovery from pending.json) for project paths too.
+      6. Tests: red first. Engine tests for items 1-4 (helper paths, legacy entries without location, a global proposal for a new id stored as project with location, an update keeping legacy location, the prompt wording). Hook-level tests in tests/session-learning.test.ts: a newly learned skill is written to /work/.claude/dag/skills/<id>/SKILL.md (the harness project root is /work) together with /work/.claude/dag/.gitignore, and nothing is written under the home skills folder; archiving a project skill moves it to /work/.claude/dag/learning-archive/<id>/SKILL.md; a legacy library entry (no location) is still updated and archived under the home folders exactly as before. Update existing assertions only where they expected a NEW skill under the home skills folder; never weaken an assertion about legacy skills.
+
+      SCOPE: edit only hooks/engine/learning.ts, hooks/register.ts (the learning code paths named above) and files under tests/. Another node of this run edits README.md and docs/reference.md at the same time; do not touch them or flows/. NEVER move, copy or delete anything in the real ~/.claude/skills or ~/.claude/dag-workflow; tests use the harness's in-memory files only.
+
+      VERIFY: run `mkdir -p /tmp/dag-p14 && command claude plugin test . > /tmp/dag-p14/skill-store-suite.txt 2>&1` in the foreground (about 20 s) and confirm ` 0 fail` and `Ran <n> tests across <m> files.` in it; this session's verify runner still has the old 30 s limit, so the runtime reads that file. Run `bunx -p typescript@5 tsc -p . --noEmit` (no output) and `command claude plugin validate .`. The runtime also runs a `bun -e` probe: learningCatalog must give /h/.claude/skills paths for entries without location and /p/.claude/dag/skills/<id>/SKILL.md for location 'project'; applyLearningProposals must store a new global proposal as scope project with location project and keep an updated legacy skill without location.
+
+      STOP WHEN: the probe passes and the suite file shows 0 fail with tsc and validate passing.
+
+      In ## Output give: the helper names and signatures, the field added to the library schema, where the .gitignore is ensured, the changed learner prompt sentence, the new and changed test names (say which assertions changed and why), and the last two lines of /tmp/dag-p14/skill-store-suite.txt.
+
+  - id: docs-learning
+    label: Document project-local learned skills
+    category: writing
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: ".claude/dag/skills/dag-learned-"
+      - kind: file
+        path: README.md
+        absent: "학습 스킬은 사용자 공용 저장소에 보관하되"
+      - kind: command
+        argv: [git, diff, --check, --, README.md, docs/reference.md]
+    prompt: |
+      TASK: Update README.md and docs/reference.md (both Korean; keep them Korean) for where learned skills are stored now.
+
+      CONTRACT (another node implements exactly this at the same time; describe exactly this):
+      - A skill learned from now on is always project scope and is stored at `<프로젝트>/.claude/dag/skills/dag-learned-<이름>/SKILL.md`, inside the plugin's own store under .claude/dag, which the plugin's `*` .gitignore keeps out of git. Claude Code does not list these as skills in other projects or sessions; the plugin's catalog (the learned-skills block added to the next user prompt and to subagent start prompts) lists the skills that apply to the current project with their path, and the model loads the relevant one with Read.
+      - Even when the learner judges a technique useful across projects, the new skill is stored for the current project only; nothing new is written to `~/.claude/skills`.
+      - An archived project skill moves to `<프로젝트>/.claude/dag/learning-archive/dag-learned-<이름>/SKILL.md`.
+      - Skills learned before this change stay where they are, in `~/.claude/skills/dag-learned-<이름>/SKILL.md` (archive `~/.claude/dag-workflow/learning/archive/`), and the plugin keeps updating, archiving and pruning them as before. Claude Code still lists those in every session; removing them is the user's choice.
+      - The library (`~/.claude/dag-workflow/learning/library.json`), session evidence (`sessions/`) and the recovery record (`pending.json`) stay under `~/.claude/dag-workflow/learning`.
+
+      REQUIRED:
+      1. README.md line 119 ('학습 스킬은 사용자 공용 저장소에 보관하되, 프로젝트 전용 지식은 같은 프로젝트에서만 안내합니다.'): replace it with the contract in one or two sentences (new skills live in the project's .claude/dag/skills and are offered only in that project; earlier skills stay in ~/.claude/skills).
+      2. docs/reference.md, the storage list near lines 71-77 ('저장 위치는 `HOME` 기준입니다.' and its bullets): make it say which files are per project and which stay under HOME, add the two project paths, and mark the `~/.claude/skills` and `archive/` bullets as the place of skills learned before this change.
+      3. docs/reference.md, the paragraph after the list (near line 79, '다음 사용자 프롬프트와 서브에이전트의 시작 프롬프트에는 ...'): keep the Read-based loading, say that new project skills are not in the host's Skill list, and replace the sentence about general techniques going to `global` with the project-only rule. Search the rest of docs/reference.md and README.md for other statements that learned skills go to ~/.claude/skills or that skills can be global, and update only those.
+
+      SCOPE: edit only README.md and docs/reference.md. Another node edits hooks/ and tests/ at the same time.
+
+      VERIFY: `git diff --check -- README.md docs/reference.md` prints nothing; `grep -n 'dag/skills' README.md docs/reference.md` shows the new text.
+
+      STOP WHEN: both files describe the contract and the check passes.
+
+      In ## Output give: each changed line with its file and line number, and any other mention you found and changed or left as it was.
