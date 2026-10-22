@@ -11,14 +11,14 @@ import { debug, message, readOrEmpty } from './io.ts'
 // functions that take it. validate refuses $ passed to a method or a callback, so each operation that calls the host is a
 // top-level function taking ($, scan, ...), and the host gives only what needs no $.
 export type ScanHost = {
-  // The session's folder, whose rule files (RULE_FILES) slopSkips reads.
+  // The session's folder, whose rule files (RULE_FILES) slopSkips reads for every file, a worktree's included.
   projectRoot(): string
   // The folder a run works in (register.ts rootOf), where a security lens reads the run's change.
   rootOf(run: Run): string
 }
 
-// register.ts parses the options into the two switches and the skip list, sets repositoryAllows back to undefined when an
-// Edit or Write changes a rule file, and calls resetScan when a session starts.
+// register.ts parses the options into the two switches and the skip list, drops a folder's repositoryAllows entry when an
+// Edit or Write changes one of its rule files, and calls resetScan when a session starts.
 export type Scan = {
   readonly host: ScanHost
   // anti_slop_scan, anti_slop_skip and secure_scan.
@@ -30,17 +30,18 @@ export type Scan = {
   guideRowsRead: Promise<GuideRows> | undefined
   // The Semgrep hits of a run's change, keyed by the run and the change, so the lenses of one review share one scan.
   readonly changeScans: Map<string, Promise<Result<SemgrepHit[]>>>
-  // The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
-  repositoryAllows: ReadonlySet<string> | undefined
+  // The patterns the rule files of each folder allow, read once per folder per session. A folder's entry goes when one of its
+  // rule files is edited. A session in a worktree has two folders in play: the worktree's and the one it started in.
+  readonly repositoryAllows: Map<string, ReadonlySet<string>>
 }
 
 export function createScan(host: ScanHost): Scan {
-  return { host, antiSlopScan: true, antiSlopSkip: new Set(), secureScan: true, semgrepFound: undefined, guideRowsRead: undefined, changeScans: new Map(), repositoryAllows: undefined }
+  return { host, antiSlopScan: true, antiSlopSkip: new Set(), secureScan: true, semgrepFound: undefined, guideRowsRead: undefined, changeScans: new Map(), repositoryAllows: new Map() }
 }
 
 // A new session asks for semgrep again and reads the rule files and the guide references again.
 export function resetScan(scan: Scan): void {
-  scan.repositoryAllows = undefined
+  scan.repositoryAllows.clear()
   scan.semgrepFound = undefined
   scan.guideRowsRead = undefined
   scan.changeScans.clear()
@@ -79,9 +80,10 @@ export function guideRows($: EngineInterface, scan: Scan): Promise<GuideRows> {
 
 // The hits an Edit or Write would add, scanned before it lands. The new text goes to a copy at the same root-relative path
 // in a scratch folder, so the rules' path filters (tests/, *Test.java) match as they would in the project. root is the folder
-// the edit lands in (editRoot): measured from the session's own folder, every file of a worktree under .claude/ was skipped.
+// the file belongs to (register.ts fileRoot) and holds path: measured from the session's own folder, every file of a worktree
+// under .claude/ was skipped.
 export async function scanEdit($: EngineInterface, scan: Scan, path: string, before: string, after: string, root: string): Promise<SemgrepHit[]> {
-  if (!root || !path.startsWith(`${root}/`) || path.startsWith(`${root}/.claude/`) || !(await semgrepReady($, scan))) return []
+  if (!(await semgrepReady($, scan))) return []
   const rel = path.slice(root.length + 1)
   const made = await $.process.run(['mktemp', '-d'], { timeoutMs: 10_000 })
   const scratch = made.stdout.trim()
@@ -123,9 +125,22 @@ async function changeHits($: EngineInterface, scan: Scan, run: Run): Promise<Res
   return shared
 }
 
-export async function slopSkips($: EngineInterface, scan: Scan): Promise<ReadonlySet<string>> {
-  scan.repositoryAllows ??= new Set((await Promise.all(RULE_FILES.map(name => readOrEmpty($, `${scan.host.projectRoot()}/${name}`)))).flatMap(allowedPatterns))
-  return new Set([...scan.antiSlopSkip, ...scan.repositoryAllows])
+async function folderAllows($: EngineInterface, scan: Scan, folder: string): Promise<ReadonlySet<string>> {
+  const known = scan.repositoryAllows.get(folder)
+  if (known) return known
+  const read = new Set((await Promise.all(RULE_FILES.map(name => readOrEmpty($, `${folder}/${name}`)))).flatMap(allowedPatterns))
+  scan.repositoryAllows.set(folder, read)
+  return read
+}
+
+// What a file's scan skips: the configured patterns, plus those the rule files of its folder and of the session's own folder
+// allow. The session folder's rules count in a worktree too, because a rule file the repository does not track (this
+// repository's AGENTS.md) has no copy there.
+export async function slopSkips($: EngineInterface, scan: Scan, root: string | undefined): Promise<ReadonlySet<string>> {
+  const projectRoot = scan.host.projectRoot()
+  const folders = new Set([root ?? projectRoot, projectRoot])
+  const allowed = await Promise.all([...folders].map(folder => folderAllows($, scan, folder)))
+  return new Set([...scan.antiSlopSkip, ...allowed.flatMap(patterns => [...patterns])])
 }
 
 // A security lens that passed its checks: read its candidates and build one verifier node per candidate, after creating the

@@ -896,6 +896,13 @@ async function editRoot($: EngineInterface, agentId: string | undefined): Promis
   return owner ? rootOf(owner.run) : workingRoot($)
 }
 
+// The folder an edited file belongs to: the one the edit works in (a worktree), else the session's own, so a file of either is
+// found. A file under a folder's .claude/ (the plugin's store, the worktrees) is project content of neither, so it has no
+// folder: undefined.
+async function fileRoot($: EngineInterface, agentId: string | undefined, path: string): Promise<string | undefined> {
+  return [await editRoot($, agentId), projectRoot].find(root => root !== '' && path.startsWith(`${root}/`) && !path.startsWith(`${root}/.claude/`))
+}
+
 async function pruneArtifacts($: EngineInterface): Promise<void> {
   if (!(retentionDays > 0)) return
   const contextDir = `${projectRoot}/${DAG_SUBDIR}/context`
@@ -3525,7 +3532,9 @@ export function register(on: On, options: PluginOptions) {
   // the time the scan does, so a scan that throws returns the tool's answer untouched.
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
     if (e.tool !== 'Edit' && e.tool !== 'Write') return next(e)
-    if (RULE_FILES.some(name => e.file_path === `${projectRoot}/${name}`)) scan.repositoryAllows = undefined
+    // An edit of a rule file drops its folder's cached allow list, whichever folder that is (the session's or a worktree's).
+    const slash = e.file_path.lastIndexOf('/')
+    if (RULE_FILES.includes(e.file_path.slice(slash + 1))) scan.repositoryAllows.delete(e.file_path.slice(0, slash))
     if (!scan.antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
     const request = userRequest
     const before = await readOrEmpty($, e.file_path)
@@ -3533,9 +3542,10 @@ export function register(on: On, options: PluginOptions) {
     if (reply.deny !== undefined || reply.isError) return reply
     try {
       const after = e.tool === 'Write' ? e.content : await readOrEmpty($, e.file_path)
-      const hits = scanSlop(e.file_path, before, after, await slopSkips($, scan), request)
+      const root = await fileRoot($, e.agentId, e.file_path)
+      const hits = scanSlop(e.file_path, before, after, await slopSkips($, scan, root), request)
       if (hits.length === 0) return reply
-      const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
+      const shown = root === undefined ? e.file_path : e.file_path.slice(root.length + 1)
       return { ...reply, context: [...(reply.context ?? []), slopNote(shown, hits)] }
     } catch (error) {
       debug($, `anti-slop scan skipped ${e.file_path}: ${message(error)}`)
@@ -3560,19 +3570,19 @@ export function register(on: On, options: PluginOptions) {
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
     if ((e.tool !== 'Edit' && e.tool !== 'Write') || !scan.secureScan || !semgrepTarget(e.file_path)) return next(e)
     let hits: SemgrepHit[] = []
-    let root = projectRoot
+    let root: string | undefined
     try {
-      // The folder the edit is in: the one it works in (a worktree), else the session's own, so a file of either is scanned.
-      const working = await editRoot($, e.agentId)
-      root = [working, projectRoot].find(candidate => candidate && e.file_path.startsWith(`${candidate}/`) && !e.file_path.startsWith(`${candidate}/.claude/`)) ?? ''
-      const before = await readOrEmpty($, e.file_path)
-      const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
-      if (after !== undefined) hits = await scanEdit($, scan, e.file_path, before, after, root)
+      root = await fileRoot($, e.agentId, e.file_path)
+      if (root !== undefined) {
+        const before = await readOrEmpty($, e.file_path)
+        const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
+        if (after !== undefined) hits = await scanEdit($, scan, e.file_path, before, after, root)
+      }
     } catch (error) {
       debug($, `secure-coding scan skipped ${e.file_path}: ${message(error)}`)
     }
     if (hits.length === 0) return next(e)
-    const shown = root && e.file_path.startsWith(`${root}/`) ? e.file_path.slice(root.length + 1) : e.file_path
+    const shown = root === undefined ? e.file_path : e.file_path.slice(root.length + 1)
     const { kisa } = await guideRows($, scan)
     const blocking = hits.filter(hit => hit.tier === 'block')
     if (blocking.length > 0) return { deny: semgrepRefusal(shown, blocking, kisa) }
