@@ -3378,6 +3378,9 @@ function headlessAskNote(tool: string, why: string): string {
   return `${tool} needs approval that this non-interactive session cannot ask for (${why}); allow it up front with --allowedTools ${tool} or a --permission-mode that covers it`
 }
 
+// Fallback for a node agent with no stream activity. On 2.1.306 it never reads a transcript: in 3 headless trials all
+// 12 node agents, including those started after the first wave, streamed through turn.step from their first turn
+// (eval/baselines/stream-events-2.1.306.md). Kept for hosts from the 2.1.287 minimum that were not measured.
 async function pollTranscripts($: EngineInterface): Promise<void> {
   for (const run of runs.values()) {
     if (run.sessionId !== sessionId) continue
