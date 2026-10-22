@@ -37,6 +37,25 @@ const HITS: [string, string][] = [
   ['kill -9 -1', 'kill -1'],
   ['kill -s KILL -1', 'kill -1'],
   ['kill -- -1', 'kill -1'],
+  // Forms a shell-aware reading let through (review of 845899a).
+  ["bash <<'EOF'\npkill -f vite\nEOF", 'pkill'],
+  ['kill "$(pgrep -f "vite dev")"', 'kill of looked-up PIDs'],
+  ["ls # it's here\npkill node", 'pkill'],
+  ['powershell Stop-Process -Name node', 'Stop-Process -Name'],
+  ['powershell.exe "Stop-Process -Name node"', 'Stop-Process -Name'],
+  ['su -c "cd x; pkill node"', 'pkill'],
+  ['eval "pkill node"', 'pkill'],
+  ["watch 'killall node'", 'killall'],
+]
+
+// Refused on purpose: the command is read as text, so a kill word at a command start inside a quote or a heredoc counts.
+// Missing a real kill stops another node's server; one of these costs a reworded command, and the refusal says so.
+const ACCEPTED: [string, string][] = [
+  ['grep -nE "(pkill|killall)" hooks/', 'pkill'],
+  ['git commit -m "fix: refuse x; pkill is blocked"', 'pkill'],
+  ["echo 'a; pkill b'", 'pkill'],
+  ['git commit -m "Stop-Process -Name is refused"', 'Stop-Process -Name'],
+  ['cat > s.sh <<EOF\npkill -f vite\nEOF', 'pkill'],
 ]
 
 const MISSES = [
@@ -53,14 +72,9 @@ const MISSES = [
   'git commit -m "block pkill"',
   'pgrep -f vite',
   'bun test tests/kill-guard.test.ts',
-  'grep -nE "(pkill|killall)" hooks/',
-  'git commit -m "fix: refuse x; pkill is blocked"',
-  "echo 'a; pkill b'",
-  'git commit -m "Stop-Process -Name is refused"',
-  'cat > s.sh <<EOF\npkill -f vite\nEOF',
-  "cat > s.sh <<'END'\nkillall node\nEND\nchmod +x s.sh",
   'fuser -v 5173/tcp',
   'lsof -ti:5173',
+  "echo 'it is fine to pkill your own PID'",
 ]
 
 test('each by-name or by-pattern kill form is found, and its name is returned', () => {
@@ -71,10 +85,15 @@ test('a kill by PID, a search for the word and a plain pgrep are not refused', (
   for (const command of MISSES) expect({ command, form: killByName(command) }).toEqual({ command, form: undefined })
 })
 
-test('the refusal names the form and the allowed way', () => {
+test('a kill word at a command start inside quoted text or a heredoc is refused on purpose', () => {
+  for (const [command, form] of ACCEPTED) expect({ command, form: killByName(command) }).toEqual({ command, form })
+})
+
+test('the refusal names the form, the allowed way and what to do when the word is only text', () => {
   const text = killRefusal('pkill')
   expect(text).toContain('pkill')
   expect(text).toContain('kill <PID>')
+  expect(text).toContain('reword it, or write the file with the Write tool')
 })
 
 const CHECK: VerificationCheck[] = [{ kind: 'command', argv: ['check-control'] }]

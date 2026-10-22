@@ -157,3 +157,11 @@ test('the rulings block stops at its character budget', () => {
   expect(shown.every(line => line.length === 300)).toBe(true)
   expect(lines).toContain('(3 more rulings are in the node reports.)')
 })
+
+test('when the stored answer lost its Output heading to the length cut, no ruling comes from the reasoning before it', () => {
+  // About 29,600 characters: the stored answer keeps the first 8,000 and the last 12,000, and the heading sits near 9,550.
+  const answer = `Ruling: <decision> - <why> - <cost if wrong> is the template\n${'n'.repeat(9_500)}\n## Output\nwrote a\n${'o'.repeat(20_000)}\nDAG_NODE_STATUS: completed`
+  const run = ruled(answer)
+  expect(run.nodes[0]?.answer?.includes('## Output')).toBe(false)
+  expect(settleMessage(run, 'dag')).not.toContain('is the template')
+})

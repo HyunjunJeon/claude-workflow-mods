@@ -2,7 +2,7 @@ import { downstream } from './graph.ts'
 import { isVerificationNode } from './lint.ts'
 import { isVerdictFailure } from './stages.ts'
 import { advance } from './run.ts'
-import { fullOutput, spawnTarget, truncate } from './node-prompt.ts'
+import { escapeClosingTags, fullOutput, parseOutcome, spawnTarget, truncate } from './node-prompt.ts'
 import { evidenceOutcome } from './check-eval.ts'
 import { fail, type RecoveryKind, type Result, type Run } from './types.ts'
 
@@ -13,20 +13,25 @@ export const MAX_AUTO_RECOVERIES = 2
 // So a worker ends a failed report with these two fields (node-prompt.ts), and the next attempt gets them. The cap follows superlite's
 // fix note (skills/subagent-driven-development/fixing.md): at most 1,500 characters, enough for a few attempts and a plan.
 export const ATTEMPT_NOTE_CHARS = 1_500
-const NOTE_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?(?:Tried and failed|Next)(?:\*\*)?\s*:/i
+const NEXT_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Next(?:\*\*)?\s*:/i
 const TRIED_FIELD = /^\s*(?:[-*]\s+)?(?:\*\*)?Tried and failed(?:\*\*)?\s*:/i
-const CLOSING_TAG = /<\/previous_attempt/gi
+// Next is a short plan. When a worker skipped it, the last "Next:" before Tried can be a plan bullet near the top of Output with
+// the log after it, so the Next part keeps at most this much.
+const NEXT_CHARS = 500
 
-// The note fields that end a failed report's ## Output: from the first "Next:" or "Tried and failed:" line to the end, so a
-// pasted error line or a bullet inside a field stays with it. Next comes first, so a cut keeps it. A completed report may name
-// a "Next:" step too, but only a failed one lists what it tried, so without "Tried and failed:" there is no note.
+// The two fields that end a failed report's ## Output: the last "Tried and failed:" line to the end, so a pasted error line or a
+// bullet inside it stays with it, and before it the last "Next:" field. Next comes first in the note, so a cut keeps it.
 export function attemptNote(output: string): string | undefined {
   const lines = output.split('\n')
-  const start = lines.findIndex(line => NOTE_FIELD.test(line))
-  if (start < 0) return undefined
-  const kept = lines.slice(start)
-  if (!kept.some(line => TRIED_FIELD.test(line))) return undefined
-  return truncate(kept.join('\n').trim(), ATTEMPT_NOTE_CHARS)
+  const tried = lines.findLastIndex(line => TRIED_FIELD.test(line))
+  const end = tried < 0 ? lines.length : tried
+  const next = lines.slice(0, end).findLastIndex(line => NEXT_FIELD.test(line))
+  if (tried < 0 && next < 0) return undefined
+  const parts = [
+    ...(next < 0 ? [] : [truncate(lines.slice(next, end).join('\n').trim(), NEXT_CHARS)]),
+    ...(tried < 0 ? [] : [lines.slice(tried).join('\n').trim()]),
+  ]
+  return truncate(parts.join('\n'), ATTEMPT_NOTE_CHARS)
 }
 
 // A reviewer or audit that failed on its verdict judged the work and found it wrong. Retrying it reviews the same unchanged
@@ -67,8 +72,11 @@ export function recoverNode(input: Run, nodeId: string, decision: { kind: Recove
     if (current.id !== nodeId && !(affected.has(current.id) && current.state === 'skipped')) return current
     const { agentId, startedAt, finishedAt, error, answer, output, reportPath, verification, ...rest } = current
     if (current.id !== nodeId) return { ...rest, state: 'pending' as const }
-    // A worker's own text inside the data block: a closing tag in it would end the block early.
-    const note = attemptNote(fullOutput({ answer, output }))?.replace(CLOSING_TAG, '<\\/previous_attempt')
+    // Only a worker that reported failed was asked for the note; a completed report that then failed its checks may name a
+    // "Next:" step that is follow-up work, not a hypothesis.
+    const reportedFailed = answer !== undefined && parseOutcome({ isAborted: false, answer }).state === 'failed'
+    const found = reportedFailed ? attemptNote(fullOutput({ answer, output })) : undefined
+    const note = found === undefined ? undefined : escapeClosingTags(found, ['previous_attempt'])
     return {
       ...rest,
       state: 'pending' as const,
