@@ -112,7 +112,7 @@ export function nodeMessage(run: Run, nodeId: string, output = '', reportPath?: 
   return [
     `Node "${nodeId}" of DAG run "${run.name}" (${run.runId}) finished${state}; ${finished}/${run.nodes.length} nodes have finished.`,
     ...(output ? ['Output excerpt:', indent(cutOutput(output, NOTE_OUTPUT_CHARS))] : []),
-    `dag-workflow passes the node's whole output to the nodes that depend on it and keeps its full report${reportPath ? ` at ${reportPath}` : ''}. The run continues in the background and you will get one summary when it settles.`,
+    `dag-workflow passes the node's output, with the path of its full report, to the nodes that depend on it and keeps its full report${reportPath ? ` at ${reportPath}` : ''}. The run continues in the background and you will get one summary when it settles.`,
     'Do not verify or act on partial results now; use the dag tool\'s send action only if a running node needs steering.',
   ].join('\n')
 }

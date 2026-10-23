@@ -1024,27 +1024,6 @@ async function clearStaleNotes($: EngineInterface, run: Run, def: NodeDef): Prom
   return undefined
 }
 
-// The completed dependencies' whole ## Output, read from their reports: the checkpoint keeps 4,000 characters of each for the
-// pane and the settle excerpt, and a dependent needs all of it. A report that cannot be read gives the stored output, whose
-// cut marker says the report has the rest; buildNodePrompt names the report path either way.
-async function upstreamResults($: EngineInterface, run: Run, def: NodeDef): Promise<UpstreamResult[]> {
-  const results: UpstreamResult[] = []
-  for (const depId of def.dependsOn) {
-    const dep = run.nodes.find(n => n.id === depId)
-    if (!dep || dep.state !== 'completed') continue
-    let output = dep.output ?? ''
-    if (dep.reportPath) {
-      try {
-        output = extractOutput(await $.fs.read(dep.reportPath), Number.POSITIVE_INFINITY)
-      } catch (error) {
-        debug($, `could not read the report of ${run.runId}/${dep.id} for ${def.id}; its stored output goes instead: ${message(error)}`)
-      }
-    }
-    results.push({ id: dep.id, label: dep.label, output, ...(dep.reportPath ? { reportPath: dep.reportPath } : {}) })
-  }
-  return results
-}
-
 async function startNode($: EngineInterface, run: Run, id: string): Promise<Run> {
   const def = run.definition.nodes.find(n => n.id === id)
   const node = run.nodes.find(n => n.id === id)
@@ -1057,7 +1036,12 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   const stale = await clearStaleNotes($, run, def)
   if (stale) return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${stale}`, await $.clock.now()), id)
   const target = spawnTarget({ ...def, category: node.routing?.category ?? def.category })
-  const upstream = await upstreamResults($, run, def)
+  // Each dependency's stored output: its ## Output up to 4,000 characters, with the report path for the rest (buildNodePrompt).
+  const upstream: UpstreamResult[] = def.dependsOn.flatMap(depId => {
+    const dep = run.nodes.find(n => n.id === depId)
+    if (!dep || dep.state !== 'completed') return []
+    return [{ id: dep.id, label: dep.label, output: dep.output ?? '', ...(dep.reportPath ? { reportPath: dep.reportPath } : {}) }]
+  })
   // The ledger joins the task text, so the reporting contract stays the prompt's end.
   const ledger = await ledgerSection($, run, def)
   const prompt = buildNodePrompt(run, def, ledger === undefined ? node : { ...node, promptOverride: `${node.promptOverride ?? def.prompt}\n\n${ledger}` }, upstream)

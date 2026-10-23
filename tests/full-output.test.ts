@@ -1,14 +1,15 @@
 import { expect, test, type Engine } from 'claude-code/testing'
 import { settleMessage } from '../hooks/engine/format.ts'
-import { attemptReportPath, buildNodePrompt, cutOutput, UPSTREAM_OUTPUT_CHARS, UPSTREAM_TOTAL_CHARS } from '../hooks/engine/node-prompt.ts'
+import { attemptReportPath, buildNodePrompt, cutOutput, UPSTREAM_OUTPUT_CHARS } from '../hooks/engine/node-prompt.ts'
 import { recoverNode } from '../hooks/engine/recovery.ts'
 import { createRun, markFinished, markRunning, snapshotOf } from '../hooks/engine/run.ts'
 import type { VerificationCheck } from '../hooks/engine/types.ts'
 import { boot, checkpoint, harness, ROOT, start } from './control-harness.ts'
 
 // A node's output must not be lost to a cut. On 2026-10-23 nearly every stored output in this repository's checkpoints had
-// been cut at 4,000 characters, and dependents read only that part. The checkpoint still keeps short views, but every step
-// that acts on the output reads it whole, and every short view says how much it left out and where the rest is.
+// been cut at 4,000 characters without a word about the rest. The whole report stays in a file, the facts later steps need
+// are read from the whole answer, and every short view, the dependents' inline summary included, says how much it left out
+// and where the rest is.
 
 // Filler lines of the given total length, so a test can place a field past a cut.
 function filler(chars: number): string {
@@ -79,20 +80,19 @@ test('the snapshot gives the whole Output\'s length beside its cut output and th
   expect(node?.report_path).toBe('/work/.claude/dag/runs/dag_whole/a.md')
 })
 
-test('a dependent\'s prompt carries a long upstream output whole, and past the inline budget names where the rest is', () => {
+test('a dependent\'s prompt carries a long upstream Output as its first 4,000 characters, the cut marker and the report to read', () => {
   const run = createRun({ key: 'up', name: 'Up', nodes: [{ id: 'a', prompt: 'A', dependsOn: [] }, { id: 'b', prompt: 'B', dependsOn: ['a'] }] }, { runId: 'dag_up', sessionId: 's', now: 0 })
   const def = run.definition.nodes[1]
   const node = run.nodes[1]
   if (!def || !node) throw new Error('missing node b')
   const whole = `${filler(30_000)}\nlast line of a`
-  const fits = buildNodePrompt(run, def, node, [{ id: 'a', label: 'a', output: whole, reportPath: '/r/a.md' }])
-  expect(fits).toContain(whole)
-  expect(fits).not.toContain('this output continues')
-
-  const huge = `${filler(UPSTREAM_TOTAL_CHARS + 5_000)}\nlast line of a`
-  const cut = buildNodePrompt(run, def, node, [{ id: 'a', label: 'a', output: huge, reportPath: '/r/a.md' }])
-  expect(cut).not.toContain('last line of a')
-  expect(cut).toContain(`… (this output continues for ${huge.length - UPSTREAM_TOTAL_CHARS} more characters, past what this prompt carries: read the rest of the ## Output section in the report /r/a.md before relying on it)`)
+  const prompt = buildNodePrompt(run, def, node, [{ id: 'a', label: 'a', output: cutOutput(whole, UPSTREAM_OUTPUT_CHARS), reportPath: '/r/a.md' }])
+  expect(prompt).not.toContain('last line of a')
+  expect(prompt).toContain('<result node="a" report="/r/a.md">')
+  expect(prompt).toMatch(/… \(\d+ more characters: the node's full report has the whole Output\)\n<\/result>/)
+  expect(prompt).toContain('One that ends with "… (N more characters: …)" was cut there: its whole report is the file named in its report attribute, so read that file before you rely on anything the cut part may hold.')
+  // The producing worker is asked to keep its Output inside what reaches its dependents.
+  expect(prompt).toContain('Keep it under 4,000 characters: that much reaches your dependents inline.')
 })
 
 test('a short view of an output counts what it left out', () => {
@@ -112,26 +112,18 @@ async function answer($: Engine, h: ReturnType<typeof harness>, agentId: string,
   await h.clock.settle()
 }
 
-test('a dependent node is spawned with its dependency\'s whole Output, read from the report, and each attempt\'s report is kept', async ($, on) => {
+test('a dependent node gets its dependency\'s summary and report path while the report keeps the whole answer, once per attempt', async ($, on) => {
   const h = harness(on)
   await boot($)
   const runId = await start($, CHAIN)
-  const output = `${OUTPUT_START}\n${filler(9_000)}\nlast line of a`
-  await answer($, h, 'agent-1', `reasoning\n## Output\n${output}\nDAG_NODE_STATUS: completed`)
-  expect(checkpoint(h, runId).nodes[0]?.output?.length).toBeLessThan(UPSTREAM_OUTPUT_CHARS + 100)
+  const answerText = `reasoning\n## Output\n${OUTPUT_START}\n${filler(9_000)}\nlast line of a\nDAG_NODE_STATUS: completed`
+  await answer($, h, 'agent-1', answerText)
+  const stored = checkpoint(h, runId).nodes[0]?.output ?? ''
+  expect(stored.length).toBeLessThan(UPSTREAM_OUTPUT_CHARS + 100)
   const prompt = h.spawns[1]?.prompt ?? ''
-  expect(prompt).toContain(output)
+  expect(prompt).toContain(stored)
+  expect(prompt).not.toContain('last line of a')
   expect(prompt).toContain(`report="${ROOT}/runs/${runId}/a.md"`)
-  expect(h.files.get(`${ROOT}/runs/${runId}/a.attempt-1.md`)).toBe(h.files.get(`${ROOT}/runs/${runId}/a.md`))
-})
-
-test('when the report could not be written, the dependent gets the stored output with its cut marker', async ($, on) => {
-  const h = harness(on)
-  await boot($)
-  const runId = await start($, CHAIN)
-  h.writeErrors.set(`${ROOT}/runs/${runId}/a.md`, 'disk full')
-  await answer($, h, 'agent-1', `## Output\n${OUTPUT_START}\n${filler(9_000)}\nDAG_NODE_STATUS: completed`)
-  const prompt = h.spawns[1]?.prompt ?? ''
-  expect(prompt).toContain(OUTPUT_START)
-  expect(prompt).toContain('more characters: the node\'s full report has the whole Output)')
+  expect(h.files.get(`${ROOT}/runs/${runId}/a.md`)).toBe(answerText)
+  expect(h.files.get(`${ROOT}/runs/${runId}/a.attempt-1.md`)).toBe(answerText)
 })
