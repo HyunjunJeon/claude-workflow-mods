@@ -25,7 +25,7 @@ export type ReworkSkip = { skip: string }
 const EXTERNAL_PREFIXES = ['push', 'deploy', 'publish', 'releas', 'upload', 'migrat', 'delet', 'truncat', 'provision', 'rotat', 'revok', 'commit', 'rebase', 'revert', 'stash', 'notif', 'email']
 const EXTERNAL_WORDS = new Set(['prod', 'production', 'apply', 'drop', 'seed', 'send', 'reset', 'merge', 'tag', 'sms'])
 
-function externalWord(def: NodeDef): string | undefined {
+export function externalWord(def: NodeDef): string | undefined {
   const words = [def.id, def.label, def.task_summary].flatMap(text => (text ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/))
   return words.find(word => word !== '' && (EXTERNAL_WORDS.has(word) || EXTERNAL_PREFIXES.some(prefix => word.startsWith(prefix))))
 }

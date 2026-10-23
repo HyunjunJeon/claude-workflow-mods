@@ -24,6 +24,9 @@ claude plugin test .
 step 'flow definitions'
 bun eval/check-definition.ts --allow-warnings flows/improvement/*.yaml eval/fixtures/valid-definition.yaml
 
+step 'worktree check'
+bun scripts/worktree-check.ts
+
 step 'semgrep rule tests'
 if command -v semgrep >/dev/null 2>&1; then
   semgrep --test --metrics off --config skills/secure-coding/rules tests/semgrep
