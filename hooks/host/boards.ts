@@ -4,10 +4,11 @@ import { boardToMarkdown } from '../engine/board-export.ts'
 import { chipContext, chipLabel, citedChips } from '../engine/board-chips.ts'
 import type { Board, BoardEdit, BoardFile } from '../engine/board-types.ts'
 import { err, ok, type ToolReply } from '../engine/format.ts'
+import { extractOutput } from '../engine/node-prompt.ts'
 import { fail, type Result, type Run } from '../engine/types.ts'
 import type { Strings } from '../ui/i18n.ts'
 import { ACCENT } from '../ui/text.ts'
-import { ATTENTION_TOAST_MS, DAG_SUBDIR, GIT_READ_TIMEOUT_MS, message, SAFE_RUN_DIR, workingRoot, type ToolInput } from './io.ts'
+import { ATTENTION_TOAST_MS, DAG_SUBDIR, debug, GIT_READ_TIMEOUT_MS, message, SAFE_RUN_DIR, workingRoot, type ToolInput } from './io.ts'
 
 // Boards: the state createBoards returns and the functions that take it. validate refuses $ passed to a method or a
 // callback, so each operation that calls the host is a top-level function taking ($, boards, ...), and the host gives only
@@ -148,8 +149,9 @@ async function readPeek($: EngineInterface, boards: Boards, request: PeekRequest
   return { ok: true, value: lines.slice(request.start - 1, request.end) }
 }
 
-// One artifact of one node for a trace block: output, answer and error are NodeRun fields of the run checkpoint, and verification
-// is the evidence file verifyNode persisted. tracesNeeded merges a target several edits ask for, so a refusal names the trace, not
+// One artifact of one node for a trace block: output and answer from the node's report, which holds them whole (the checkpoint
+// keeps them cut), else from the checkpoint; error from the checkpoint; verification from the evidence file verifyNode
+// persisted. tracesNeeded merges a target several edits ask for, so a refusal names the trace, not
 // an edit index. The run id is model input, so it must match the checkpoint naming before it reaches a path.
 async function readTrace($: EngineInterface, boards: Boards, request: TraceRequest): Promise<Result<string[]>> {
   const at = `trace ${request.run} ${request.node} ${request.part}`
@@ -177,7 +179,16 @@ async function readTrace($: EngineInterface, boards: Boards, request: TraceReque
     }
     return { ok: true, value: text.split(/\r?\n/) }
   }
-  const text = request.part === 'output' ? node.output : request.part === 'answer' ? node.answer : node.error
+  let text = request.part === 'output' ? node.output : request.part === 'answer' ? node.answer : node.error
+  if (request.part !== 'error' && node.reportPath) {
+    try {
+      const report = await $.fs.read(node.reportPath)
+      text = request.part === 'output' ? extractOutput(report, Number.POSITIVE_INFINITY) : report
+    } catch (error) {
+      // The checkpoint's copy stands in; its cut marker says the report has the rest.
+      debug($, `${at}: could not read the report ${node.reportPath}, so the checkpoint's copy is quoted: ${message(error)}`)
+    }
+  }
   if (text === undefined) return fail('invalid_board_edit', `${at}: the node recorded no ${request.part}`)
   return { ok: true, value: text.split(/\r?\n/) }
 }

@@ -603,6 +603,21 @@ test('a trace insert quotes the run checkpoint and the saved board holds the lin
   expect(saved?.blocks[0]).toMatchObject({ type: 'trace', run: runId, node: 'a', part: 'answer', lines: ['DAG_NODE_STATUS: completed'] })
 })
 
+test('a trace of a node\'s output quotes its report, so the line count covers the whole Output and not the checkpoint\'s cut copy', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, RUN)
+  const lines = Array.from({ length: 400 }, (_, index) => `output line ${index + 1} of the report`)
+  await $.turn.complete({ turnId: 'turn-agent-1', agentId: 'agent-1', reason: 'answer', isAborted: false, answer: `## Output\n${lines.join('\n')}\nDAG_NODE_STATUS: completed`, durationMs: 1 })
+  await h.clock.settle()
+  const boardId = await create($, 'Evidence')
+
+  await board($, { action: 'edit', board_id: boardId, edits: [TRACE(runId, 'a', 'output')] })
+  const quoted = savedBoards(h).find(candidate => candidate.boardId === boardId)?.blocks[0]
+  // 39 lines and a marker that counts the other 361: the stored output keeps about 130 of the 400 lines, the report all of them.
+  expect(quoted).toMatchObject({ type: 'trace', part: 'output', lines: [...lines.slice(0, 39), '… +361 more lines'] })
+})
+
 test('a trace of a missing run, a missing node or another session\'s run fails with invalid_board_edit', async ($, on) => {
   const h = harness(on)
   await boot($)

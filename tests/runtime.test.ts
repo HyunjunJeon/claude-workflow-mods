@@ -415,6 +415,8 @@ test('a node hand-back reaches the main session as a short note and still decide
   expect(h.delivered[0]).toContain(`Node "a" of DAG run "chain" (${runId}) finished; 1/2 nodes have finished.`)
   expect(h.delivered[0]).toContain('input.csv was missing')
   expect(h.delivered[0]).not.toContain('a very long report body')
+  // The note says where the whole report is: the main session gets only this excerpt.
+  expect(h.delivered[0]).toContain(`keeps its full report at ${RUNS}/${runId}/a.md`)
 
   await finishAgent($, h, 'agent-1', '')
   const snap = (await callDag($, { action: 'snapshot', run_id: runId })).value

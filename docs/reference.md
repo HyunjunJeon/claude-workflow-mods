@@ -178,9 +178,9 @@ mod는 이 스킬을 강제로 연결합니다.
 ## 결과 전달
 
 - 노드는 최종 보고서를 `## Output` 섹션(만든 파일, 핵심 사실·값·결정)과 `DAG_NODE_STATUS` 줄로 끝내도록 지시받습니다.
-- 노드가 끝나면 전체 보고서는 `.claude/dag/runs/<run_id>/<node>.md`에 저장되고, 출력(`## Output` 섹션, 없으면 보고서 전체)은 상태에 기록됩니다.
-- 하위 노드의 프롬프트에는 `dependsOn`에 적힌 직접 의존 노드들의 출력(노드당 4,000자까지)과 전체 보고서 경로가 `<upstream_results>`로 자동으로 들어갑니다. 정의의 `goal`은 모든 노드에 전달됩니다.
-- 메인 대화는 노드마다 출력 발췌가 담긴 짧은 진행 알림을 받고, 정착하면 모든 노드의 출력과 보고서 경로가 담긴 요약을 받습니다.
+- 노드가 끝나면 전체 보고서는 `.claude/dag/runs/<run_id>/<node>.md`에 저장되고, 같은 내용이 시도별 사본 `<node>.attempt-<n>.md`로도 남아 다음 시도가 덮어쓰지 않습니다. 상태(체크포인트)에는 출력(`## Output` 섹션, 없으면 보고서 전체)의 앞 4,000자와 답변의 앞뒤 20,000자만 기록합니다. 호스트가 4 MiB가 넘는 파일을 다시 읽지 못하기 때문입니다. 대신 노드가 끝날 때 원문에서 `## Output` 전체 길이, `Ruling` 줄 전부, 실패 보고서의 `Next`·`Tried and failed` 필드를 읽어 함께 기록하므로, 잘린 부분에 있던 결정과 재시도 노트도 사라지지 않습니다.
+- 하위 노드의 프롬프트에는 `dependsOn`에 적힌 직접 의존 노드들의 `## Output` 전체(보고서에서 읽음)와 전체 보고서 경로가 `<upstream_results>`로 자동으로 들어갑니다. 의존 노드들의 출력이 합쳐서 200,000자를 넘으면 넘는 출력은 들어간 데까지와 함께 "나머지 몇 자는 어느 보고서에 있으니 읽고 쓰라"는 줄로 끝납니다. 보고서를 읽지 못하면 상태의 4,000자 출력이 대신 들어가며, 그 끝에 남은 글자 수와 전체 보고서 위치가 적힙니다. 정의의 `goal`은 모든 노드에 전달됩니다.
+- 메인 대화는 노드마다 출력 발췌와 보고서 경로가 담긴 짧은 진행 알림을 받고, 정착하면 모든 노드의 출력 발췌와 보고서 경로가 담긴 요약을 받습니다. 발췌는 "전체 몇 자 중 몇 자"를 적어 잘렸다는 것을 숨기지 않습니다. 재시도하는 노드는 실패한 시도의 보고서 사본 경로를 받습니다.
 - 사용자가 `report.md`처럼 `REPORT*`, `SUMMARY*`, `FINDINGS*`, `ANALYSIS*` 이름의 파일을 요구하면 노드는 호스트가 서브에이전트의 쓰기를 거부하므로 전체 텍스트를 `## Output`에 돌려주고(또는 `<node-id>-notes.md`에 쓰고), 메인 대화가 정착 뒤에 그 내용을 해당 파일로 그대로 씁니다([강제](#강제)). 노드 id가 `report-draft`처럼 이 이름들로 시작하면 `<node-id>-notes.md`도 거부되므로 `notes-<node-id>.md`를 씁니다. lint 경고와 거부 메시지도 이 이름을 제안하며, 경고는 같은 경로를 여러 번 적어도 노드마다 한 번만 나옵니다.
 
 **비대화형 세션에서 세션 유지**: 비대화형 세션(`claude -p` 등)에서는 메인 턴이 끝나도 이 세션의 실행이 `running`인 동안 플러그인이 그 턴의 `turn.complete`를 `sleep 1` 반복으로 붙잡아 세션을 열어 둡니다. 그런데 호스트는 붙잡힌 메인 턴을 끝난 뒤 60초까지만 기다립니다. 넘기면 `[WARN] headless session: turn events still running after 60000ms; the turn ends without them and their late notes are dropped`를 남기고, 그 뒤에는 살아 있는 노드 에이전트만 프로세스를 붙잡습니다. 그래서 메인 턴이 끝나고 60초가 지난 뒤에 노드가 끝나면 플러그인이 그 노드를 검증하거나 다음 노드를 띄우는 도중에 세션이 종료되어, 실행은 `running`, 노드는 `scheduled`나 `running`인 채 종료 코드 0으로 끝나곤 했습니다(백로그 B6). 이제 메인 턴이 붙잡힌 동안 노드 에이전트가 끝나면 플러그인이 검증보다 먼저 짧은 진행 프롬프트를 제출합니다. 노드가 끝났고 검증과 후속 실행은 백그라운드에서 이어진다고 알리며, 도구를 부르지 말고 한 줄로 답한 뒤 턴을 끝내라고 요청하는 내용입니다. 호스트가 이 프롬프트로 새 메인 턴을 시작하면 세션이 유지되고, 그 턴이 끝나면 플러그인은 실행이 정착할 때까지 다시 붙잡습니다. 비용은 노드가 끝날 때마다 메인 모델 턴이 짧게 한 번 더 도는 것입니다(그 프롬프트의 턴이 시작되기 전에 겹쳐 끝난 노드는 프롬프트 하나로 묶습니다). 이 턴의 한 줄 답변은 `claude -p`의 stdout에 그대로 나타납니다. 제출이 거부되거나 버려지면 `could not keep the session open for <run_id>/<node>`를 로그에 남깁니다. `claude -p "/dag run <파일>"`처럼 명령만 넘긴 세션에는 붙잡을 메인 턴이 아예 없어서, 첫 노드가 끝나는 순간 세션이 닫히고 후속 노드가 `no session is bound in this process`로 시작하지 못하곤 했습니다(2026-10-19 실측 14회 중 5회). 이제 비대화형 세션에서 메인 턴이 없을 때 `/dag run`·`retry`·`approve`가 실행을 시작하면, 플러그인이 "실행이 시작됐으니 한 줄로 답하고 턴을 끝내라"는 짧은 프롬프트를 제출해 메인 턴을 엽니다. 호스트가 명령 훅 안에서의 제출을 거부하므로 명령이 끝난 다음 틱에 제출하고, 그 턴이 끝나면 위와 같이 실행이 정착할 때까지 붙잡습니다. `turn.start`는 `agentId`가 있는 노드 에이전트의 턴에도 발생하므로, `agentId`가 없는 메인 루프의 `turn.start`만 메인 턴을 바쁨으로 표시합니다(2026-10-19 리허설에서 필요했던 수정입니다). 대화형 세션은 영향을 받지 않습니다.
@@ -531,7 +531,7 @@ review:
 
 ## 실행 기록 (trajectory)
 
-같은 정의를 여러 번 실행하면 리뷰어의 판정, 리뷰 수정 라운드 여부, 커밋 여부가 실행마다 다를 수 있습니다. 체크포인트는 노드마다 마지막 시도만 남기고, 보고서 `runs/<run_id>/<node>.md`는 다음 시도가 덮어쓰며, 리뷰어 노트는 리뷰어가 다시 시작하기 전에 지웁니다. 그래서 체크포인트만으로는 두 실행이 어디서 갈렸는지 알 수 없습니다. `trajectory_log: true`로 켜면 그 과정을 이벤트로 남깁니다. 기본값은 꺼짐입니다.
+같은 정의를 여러 번 실행하면 리뷰어의 판정, 리뷰 수정 라운드 여부, 커밋 여부가 실행마다 다를 수 있습니다. 체크포인트는 노드마다 마지막 시도만 남기고(시도별 보고서 사본 `runs/<run_id>/<node>.attempt-<n>.md`은 남습니다), 리뷰어 노트는 리뷰어가 다시 시작하기 전에 지웁니다. 그래서 체크포인트만으로는 두 실행이 어디서 갈렸는지 알 수 없습니다. `trajectory_log: true`로 켜면 그 과정을 이벤트로 남깁니다. 기본값은 꺼짐입니다.
 
 - **위치:** 실행의 이벤트는 `.claude/dag/trajectories/<run_id>/`에, 메인 대화의 턴은 `.claude/dag/trajectories/session-<session_id>/`에 이벤트 하나당 파일 하나(JSON 한 줄)로 씁니다. 파일 이름은 `<시각 ms>-<순번>-<종류>[-<노드>].jsonl`이라 이름순이 발생 순서입니다. 실행이 끝날(settle) 때마다 그 실행의 이벤트를 이름순으로 이어 붙인 `.claude/dag/trajectories/<run_id>.jsonl`을 다시 씁니다. 세션 폴더는 이어 붙이지 않으니 `cat .claude/dag/trajectories/session-<id>/*.jsonl`로 읽습니다.
 - **쓰기:** 기록은 별도 쓰기 큐로 보내고 실행은 기다리지 않습니다. 쓰기에 실패하면 디버그 로그에 남기고 실행은 계속합니다. 노드 종료 기록은 완료를 반영하기 전에 노트와 diff를 먼저 읽습니다. 반영 뒤에 시작되는 다음 시도가 노트를 지우기 때문입니다.
@@ -595,7 +595,7 @@ jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))
 | `start {definition}`                       | 시작. 같은 키와 같은 정의면 기존 실행 재사용, 다른 정의면 `definition_conflict`. 결과에 계약 점검 `warnings` 포함             |
 | `start {path}`                             | `definition` 대신 프로젝트 상대 `.yaml`/`.yml`/`.json` 정의 파일 경로를 받습니다. `/dag run`과 똑같이 읽고 파싱한 뒤 `start {definition}`과 똑같이 시작하므로 계획 스킬 게이트, 린트 `warnings`, 키 재사용이 같습니다. `definition`과 `path` 중 정확히 하나만 허용하며 둘 다 주거나 둘 다 없으면 `invalid_request`입니다. 경로는 `..` 없는 프로젝트 상대 경로이고 `.claude` 밖이며 위 확장자여야 하고, 어기면 `invalid_request`입니다. 읽기나 파싱에 실패하면 경로를 담은 `definition_unreadable`을 돌려줍니다. 모델이 YAML 흐름을 JSON으로 직접 옮겨 적지 않아도 되며, `/dag run`은 계속 사용자 명령이고 절대 경로도 받습니다 |
 | `start {dryRun: true}`                     | 정의를 검증만 하고 실행은 만들지 않은 채 `{dry_run: true, preview}`를 돌려줍니다. `definition` 또는 `path`와 함께 씁니다. `preview`에는 단계별 노드 id `waves`, `critical_path`, `node_count`, 노드별 `nodes`(`wave`, 실효 `category`, `model`, `agent`, `depends_on`, `checks`, `writes`, `load_skills`), 동시에 실행될 수 있는 노드끼리 `writes`가 겹치는 쌍 `write_conflicts`, `widest_wave`, `max_concurrent`, `start`가 돌려주는 것과 같은 린트 `warnings`가 들어 있고, 같은 키로 같은 정의가 이미 실행됐다면 `existing_run_id`도 붙고, 아니면 `preview_id`가 붙습니다. `start {preview_id}`는 미리 본 정의를 그대로 시작하므로 모델이 정의를 다시 쓰지 않아도 됩니다(eval에서 이 두 번째 출력에 11-31초가 들었습니다). 시작할 때 키 재사용·검증·PATH 검사를 처음처럼 다시 하며, `preview_id`는 이 세션의 최근 드라이런 8개까지만 기억합니다. 모르는 값은 `unknown_preview`로 거부합니다. `writes`를 선언하지 않은 노드는 `writes`가 null이고, 그런 노드 중 다른 노드와 동시에 실행될 수 있는 것은 `unchecked_writes`에 나열됩니다. 이 노드들은 충돌을 점검하지 못했다는 뜻이며, `writes: []`는 읽기 전용으로 선언한 범위입니다. 알 수 없는 category는 `warnings`에 경고가 추가됩니다. `routing_note`는 category와 모델이 정의가 내놓은 제안값이며 실제로 시작할 때 Jev가 노드를 다시 분류할 수 있다고 알려 주므로, 표시된 category는 최종 감사 규칙까지 적용한 제안값입니다. 계획 스킬 게이트는 드라이런에도 적용됩니다. `dryRun`이 불리언이 아니면 `invalid_request`로 거부하고, `amend`는 `dryRun`을 받지 않고 거부합니다. 사용자는 `/dag preview <file>`로 정의 파일에 같은 미리보기를 볼 수 있습니다. `/dag preview`는 계획 스킬 게이트를 받지 않는 사용자 명령이며, 아무것도 시작하지 않으므로 `/dag run`과 달리 모델 턴 중에도 즉시 실행됩니다 |
-| `snapshot {run_id}` / `list`               | 상태 조회(노드 답변 발췌 포함)                                                                            |
+| `snapshot {run_id}` / `list`               | 상태 조회(노드 답변 발췌, 출력 전체 길이 `output_chars`, 보고서 경로 포함)                                 |
 | `wait {run_id}`                            | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다                                   |
 | `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |
 | `retry {run_id, node_id|node_ids, prompt}` | 실패/취소 노드와 그 때문에 skip된 하위 노드를 다시 실행. 완료 노드는 재사용                                                |
@@ -731,7 +731,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 `trace`는 이 세션의 실행 한 번에서 노드 하나의 산출물을 인용하는 블록입니다.
 
 - 모델은 `run`(실행 id `dag_…`), `node`(그 실행의 노드 id), `part`만 보내고 `lines`는 보낼 수 없습니다. 호스트가 `.claude/dag/runs/<run>.json` 체크포인트를 읽어 줄을 채웁니다. 다른 세션의 실행이거나 없는 실행·노드이면 `invalid_board_edit`로 거부합니다.
-- `part`가 `output`·`answer`·`error`이면 노드의 그 필드를, `verification`이면 노드의 검증 보고서 파일을 읽습니다. 노드에 그 내용이 없으면 거부합니다.
+- `part`가 `output`·`answer`이면 노드의 보고서 원문에서(`output`은 그 `## Output` 섹션), `error`이면 상태의 그 필드에서, `verification`이면 노드의 검증 보고서 파일에서 읽습니다. 보고서를 읽지 못하면 상태에 기록된 잘린 사본을 인용합니다. 노드에 그 내용이 없으면 거부합니다.
 - `code_peek`처럼 줄은 블록을 그릴 때 읽어 저장하므로 실행 기록이 나중에 바뀌어도 보드에는 그때 본 내용이 남습니다. 40줄까지만 저장하고 넘으면 앞의 39줄과 `… +N more lines` 한 줄로 자르며, 줄 하나는 240자까지만 저장합니다. 새로 읽으려면 `update`로 `run`·`node`·`part` 중 하나를 바꾸거나 `replace`합니다. `note`와 `title`만 바꾸면 저장된 줄을 유지합니다.
 
 **diff**: git 변경을 인용하는 블록입니다. `code_peek`처럼 모델은 `lines`를 보낼 수 없고 호스트가 채웁니다.
@@ -816,7 +816,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `language`                     | `en`      | 패널 언어(`en`, `ko`)                                                                                                 |
 | `max_concurrent`               | `8`       | 실행 하나에서 동시에 도는 노드 수                                                                                               |
 | `retention_days`               | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
-| `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
+| `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(알림에 전체 보고서 경로를 적음), `full`은 그대로 둡니다 |
 | `settle_notify`                | `long`    | 이 세션의 실행이 `completed`·`failed`로 정착할 때 Claude Code 알림(`$.ui.notify`)을 한 번 보내는 조건(`off`, `long`, `always`). `long`은 만든 때부터 정착까지 120초 이상 걸린 실행만, `always`는 모두, `off`는 보내지 않음. 취소된 실행과 다른 세션의 실행은 알리지 않고, 알 수 없는 값은 `long`으로 처리 |
 | `usage_hold_percent`           | `90`      | 계정 한도 창(`five_hour`, `seven_day`, 게이트웨이의 `spend_limit`) 중 하나라도 이 퍼센트(0–100) 이상 찼으면 이 세션의 실행이 새 노드를 시작하지 않고 기다림. 실행 중인 노드는 계속 돌고, 새 수치가 기준 아래로 내려오거나 초기화 시각에서 5초가 지나면 풀림. `0`이면 끄고, 범위 밖이거나 숫자가 아닌 값은 `90`으로 처리. 비대화형 세션은 모든 노드가 멈추면 남은 노드를 `usage limit:` 사유로 취소([실행 규칙](#실행-규칙)) |
 | `start_approval`               | `off`     | `always`면 대화형 세션에서 모델이 시작한 실행을 만들되 시작하지 않고 사용자의 승인을 기다림([실행 규칙](#실행-규칙)). 사용자가 입력한 `/dag run`과 비대화형 세션은 기다리지 않음. `/dag approval`로 덮어쓴 값은 다음 `/reload-plugins`까지만 유지되고, `off`·`always`가 아닌 값은 `off`로 처리 |

@@ -30,7 +30,7 @@ const WITHOUT_HINT = [
   '    c broke',
   '',
   'TREAT EVERY NODE COMPLETION CLAIM AS FALSE UNTIL YOU PROVE IT: check the real files, test output or command results each node was responsible for before you report success.',
-  'Call dag with {"action":"snapshot","run_id":"dag_unit"} for every node\'s output; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.',
+  'Each node\'s full report above holds its whole output; the excerpts here are cut where they say so. Call dag with {"action":"snapshot","run_id":"dag_unit"} for the current states; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.',
 ].join('\n')
 
 test('a settle message without approval tools reads exactly as before, with an empty map or nodes missing from it', () => {

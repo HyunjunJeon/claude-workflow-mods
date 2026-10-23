@@ -592,7 +592,8 @@ test('scenario 9, missing path and checkpoint store: absent on a deleted file an
   expect(evidenceFiles(h, runId, 'changelog').map(file => file.status)).toEqual(['failed', 'passed'])
   expect(checkpoint(h, runId).nodes[1]?.verification?.evidence[0]?.detail).toBe('Folder verified: . (3 files)')
   expect(h.reads.slice(secondVerify)).toContain('/work/CHANGELOG.md')
-  expect(storeReadsSince(h, secondVerify)).toEqual([])
+  // The checks read no store file; the only ones read are the two dependencies' reports, whole, for verify-cleanup's prompt.
+  expect(storeReadsSince(h, secondVerify)).toEqual([`${ROOT}/runs/${runId}/drop-eval.md`, `${ROOT}/runs/${runId}/changelog.md`])
   expect(pluginNews(h).map(submit => submit.text.split('\n')[0])).toEqual([
     `DAG run "Cleanup" (${runId}) settled: failed.`,
     `DAG run "Cleanup" (${runId}) settled: completed.`,

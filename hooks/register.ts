@@ -1,7 +1,7 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, SessionRateLimit, Timer, ToolCallResult, ToolCheckDecision } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
-import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
+import { attemptReportPath, buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
 import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
@@ -84,7 +84,11 @@ type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
 const USER_ONLY = 'This action requires a user command or pane control.'
 const APPROVAL_NOTE = 'The user must approve this run in the /dag pane or with /dag approve <run_id> before any node starts. Do not poll; you will receive a message when it is approved or rejected.'
-const REPORT_LIMIT = 4_000_000
+// The host refuses to write a file over 4 MiB, in bytes. A UTF-16 unit takes at most 3 bytes in UTF-8, so this many keeps a
+// report writable in any script; at 4,000,000 a Korean report over about 1.4 million characters failed to write and left
+// no report at all. A worker's answer is one model reply, far below either (the largest of 37 reports on 2026-10-23 was
+// 10,413 characters), so no real report reaches it.
+const REPORT_LIMIT = Math.floor(4 * 1024 * 1024 / 3)
 // A headless host waits for a held main turn.complete for 60 000 ms only ("[WARN] headless session: turn events still
 // running after 60000ms; the turn ends without them", measured in a live `claude -p` run); it does not abort the hold.
 // Past that only live agents and queued prompts keep the session up, which is why a node completion while the turn
@@ -1020,6 +1024,27 @@ async function clearStaleNotes($: EngineInterface, run: Run, def: NodeDef): Prom
   return undefined
 }
 
+// The completed dependencies' whole ## Output, read from their reports: the checkpoint keeps 4,000 characters of each for the
+// pane and the settle excerpt, and a dependent needs all of it. A report that cannot be read gives the stored output, whose
+// cut marker says the report has the rest; buildNodePrompt names the report path either way.
+async function upstreamResults($: EngineInterface, run: Run, def: NodeDef): Promise<UpstreamResult[]> {
+  const results: UpstreamResult[] = []
+  for (const depId of def.dependsOn) {
+    const dep = run.nodes.find(n => n.id === depId)
+    if (!dep || dep.state !== 'completed') continue
+    let output = dep.output ?? ''
+    if (dep.reportPath) {
+      try {
+        output = extractOutput(await $.fs.read(dep.reportPath), Number.POSITIVE_INFINITY)
+      } catch (error) {
+        debug($, `could not read the report of ${run.runId}/${dep.id} for ${def.id}; its stored output goes instead: ${message(error)}`)
+      }
+    }
+    results.push({ id: dep.id, label: dep.label, output, ...(dep.reportPath ? { reportPath: dep.reportPath } : {}) })
+  }
+  return results
+}
+
 async function startNode($: EngineInterface, run: Run, id: string): Promise<Run> {
   const def = run.definition.nodes.find(n => n.id === id)
   const node = run.nodes.find(n => n.id === id)
@@ -1032,11 +1057,7 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   const stale = await clearStaleNotes($, run, def)
   if (stale) return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${stale}`, await $.clock.now()), id)
   const target = spawnTarget({ ...def, category: node.routing?.category ?? def.category })
-  const upstream: UpstreamResult[] = def.dependsOn.flatMap(depId => {
-    const dep = run.nodes.find(n => n.id === depId)
-    if (!dep || dep.state !== 'completed') return []
-    return [{ id: dep.id, label: dep.label, output: dep.output ?? '', ...(dep.reportPath ? { reportPath: dep.reportPath } : {}) }]
-  })
+  const upstream = await upstreamResults($, run, def)
   // The ledger joins the task text, so the reporting contract stays the prompt's end.
   const ledger = await ledgerSection($, run, def)
   const prompt = buildNodePrompt(run, def, ledger === undefined ? node : { ...node, promptOverride: `${node.promptOverride ?? def.prompt}\n\n${ledger}` }, upstream)
@@ -1377,7 +1398,7 @@ async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Ti
   // Its background work may still be running: stopped first, so a recovery attempt does not share the scope with it.
   const stopFailure = await stopAgent($, agentId)
   if (stopFailure) $.ui.log(`could not stop agent ${agentId} after its background wait: ${stopFailure}`)
-  const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, wait.answer) : undefined
+  const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, claim.node.attempt, wait.answer) : undefined
   const error = `The node agent ended its turn with background work pending and was not resumed within ${BACKGROUND_WAIT_MS / 60_000} minutes.`
   const result: CompletionResult = { outcome: { state: 'failed', error, ...(wait.answer ? { answer: wait.answer } : {}), ...(reportPath ? { reportPath } : {}) } }
   await recordNodeEnd($, trajectory, trajectoryCalls($), claim, result, { agentId, isAborted: false, ...(wait.answer ? { answer: wait.answer } : {}) })
@@ -1396,7 +1417,7 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   try {
     const answer = end.answer || report || (end.isAborted ? '' : await recoverReport($, end.agentId))
     const parsed = parseOutcome({ reason: end.reason, isAborted: end.isAborted, answer })
-    const reportPath = answer ? await writeReport($, run.runId, node.id, answer) : undefined
+    const reportPath = answer ? await writeReport($, run.runId, node.id, node.attempt, answer) : undefined
     let outcome = reportPath ? { ...parsed, reportPath } : parsed
     let verification: NodeRun['verification']
     let expansion: NodeDef[] | undefined
@@ -1464,7 +1485,16 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
 async function reviewerFindings($: EngineInterface, run: Run, nodeId: string): Promise<string> {
   const node = run.nodes.find(current => current.id === nodeId)
   const def = run.definition.nodes.find(current => current.id === nodeId)
-  const parts = [node?.error ?? '', node?.output ?? '']
+  // The whole Output from the report; the findings budget (rework.ts) may cut it, and the first line says where it all is.
+  let output = node?.output ?? ''
+  if (node?.reportPath) {
+    try {
+      output = extractOutput(await $.fs.read(node.reportPath), Number.POSITIVE_INFINITY)
+    } catch (error) {
+      debug($, `could not read the report of reviewer ${nodeId}; its stored output goes instead: ${message(error)}`)
+    }
+  }
+  const parts = [node?.reportPath ? `The reviewer's full report: ${node.reportPath}` : '', node?.error ?? '', output]
   for (const path of def ? generatedNotesFiles(run, def) : []) {
     try {
       parts.push(`From ${path}:\n${findingSections(await $.fs.read(path))}`)
@@ -1818,12 +1848,23 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
   }
 }
 
-async function writeReport($: EngineInterface, runId: string, nodeId: string, report: string): Promise<string | undefined> {
-  const dir = `${runsDir}/${runId}`
+function reportPathOf(runId: string, nodeId: string): string {
+  return `${runsDir}/${runId}/${nodeId}.md`
+}
+
+// The node's report, and a copy for its attempt (attemptReportPath) that the next attempt does not overwrite, so a retry can
+// read the attempt before it whole. The copy failing to write loses only that history: the report path still comes back.
+async function writeReport($: EngineInterface, runId: string, nodeId: string, attempt: number, report: string): Promise<string | undefined> {
   try {
-    await ensureDir($, dir)
-    const path = `${dir}/${nodeId}.md`
-    await $.fs.write(path, report.slice(0, REPORT_LIMIT))
+    await ensureDir($, `${runsDir}/${runId}`)
+    const path = reportPathOf(runId, nodeId)
+    const text = report.length <= REPORT_LIMIT ? report : `${report.slice(0, REPORT_LIMIT)}\n… (the answer went on for ${report.length - REPORT_LIMIT} more characters, past what one report file can hold)`
+    await $.fs.write(path, text)
+    try {
+      await $.fs.write(attemptReportPath(path, attempt), text)
+    } catch (error) {
+      debug($, `could not keep attempt ${attempt} of node ${nodeId}'s report: ${message(error)}`)
+    }
     return path
   } catch (error) {
     $.ui.log(`could not save the report of node ${nodeId}: ${message(error)}`)
@@ -3738,8 +3779,8 @@ export function register(on: On, options: PluginOptions) {
     handbacks.set(agentId, typeof sent === 'string' ? sent : '')
     const owner = nodeOfAgent(agentId)
     if (nodeMessages === 'full' || !owner) return next(e)
-    const excerpt = typeof sent === 'string' ? extractOutput(sent) : ''
-    return next({ ...e, message: nodeMessage(owner.run, owner.nodeId, excerpt) } as typeof e)
+    const excerpt = typeof sent === 'string' ? extractOutput(sent, Number.POSITIVE_INFINITY) : ''
+    return next({ ...e, message: nodeMessage(owner.run, owner.nodeId, excerpt, reportPathOf(owner.run.runId, owner.nodeId)) } as typeof e)
   })
 
   on('ui.message', async ($, e, next) => {

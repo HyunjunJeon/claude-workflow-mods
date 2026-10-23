@@ -113,6 +113,17 @@ export type NodeRun = {
   answer?: string
   output?: string
   reportPath?: string
+  // Read from the whole answer when the node finished. answer and output are cut to keep the checkpoint small (the host
+  // reads a file back only up to 4 MiB), so what later steps need from the part they lose is kept here; the report file at
+  // reportPath holds the whole text.
+  whole?: {
+    // Characters in the whole ## Output section; output holds at most UPSTREAM_OUTPUT_CHARS of them.
+    outputChars: number
+    // Every Ruling line of the Output, uncut.
+    rulings: string[]
+    // A failed report's Next and Tried and failed fields (attemptNote), for the next attempt's prompt.
+    attemptNote?: string
+  }
   routing?: {
     // rule: a final audit proposed or routed as trivial runs on standard.
     readonly source: 'jev' | 'definition' | 'rule'

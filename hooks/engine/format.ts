@@ -1,9 +1,9 @@
-import { truncate } from './node-prompt.ts'
+import { cutOutput, rulingLines } from './node-prompt.ts'
 import { evidenceOutcome, VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { BOARD_TOOL } from './policy.ts'
 import type { Preview, WriteConflict } from './preview.ts'
 import { fullOutput, snapshotOf } from './run.ts'
-import type { EngineError, Run } from './types.ts'
+import type { EngineError, NodeRun, Run } from './types.ts'
 
 export type ToolReply = { result: string; isError?: true }
 
@@ -94,15 +94,25 @@ function indent(text: string): string {
   return text.split('\n').map(line => `    ${line}`).join('\n')
 }
 
-export function nodeMessage(run: Run, nodeId: string, output = ''): string {
+// A view of a node's stored output cut to limit, counting against its whole Output (NodeRun.whole) so the cut is never silent.
+function outputExcerpt(node: NodeRun, limit: number): string {
+  const output = node.output ?? ''
+  const whole = node.whole?.outputChars ?? output.length
+  if (output.length <= limit && whole <= output.length) return output
+  const kept = output.slice(0, limit).trimEnd()
+  return `${kept}\n… (${kept.length} of ${whole} characters shown: the full report has the whole output)`
+}
+
+// reportPath: where the node's report is being written; the hand-back note arrives before the checkpoint has it.
+export function nodeMessage(run: Run, nodeId: string, output = '', reportPath?: string): string {
   const node = run.nodes.find(n => n.id === nodeId)
   const ended = new Set(['completed', 'failed', 'cancelled', 'skipped'])
   const finished = run.nodes.filter(n => n.id === nodeId || ended.has(n.state)).length
   const state = node && node.state !== 'running' ? ` as ${node.state}` : ''
   return [
     `Node "${nodeId}" of DAG run "${run.name}" (${run.runId}) finished${state}; ${finished}/${run.nodes.length} nodes have finished.`,
-    ...(output ? ['Output excerpt:', indent(truncate(output, NOTE_OUTPUT_CHARS))] : []),
-    'dag-workflow passes the node\'s output to the nodes that depend on it and keeps its full report. The run continues in the background and you will get one summary when it settles.',
+    ...(output ? ['Output excerpt:', indent(cutOutput(output, NOTE_OUTPUT_CHARS))] : []),
+    `dag-workflow passes the node's whole output to the nodes that depend on it and keeps its full report${reportPath ? ` at ${reportPath}` : ''}. The run continues in the background and you will get one summary when it settles.`,
     'Do not verify or act on partial results now; use the dag tool\'s send action only if a running node needs steering.',
   ].join('\n')
 }
@@ -153,23 +163,17 @@ function reviewFixLines(run: Run): string[] {
 
 // A node that settles a choice its task left open writes "Ruling: <decision> - <why> - <cost if wrong>" in its ## Output
 // (node-prompt.ts). The excerpt above keeps 1,200 characters of each Output, so a ruling low in a long Output never reached
-// the person. superlite's finish step lists a run's rulings in its closing message for the same reason. The block has its own
-// budget, a quarter of the excerpts' 12,000 characters, so a wide run of nodes that each record rulings stays readable.
-const RULING = /^\s*(?:[-*]\s+)?(?:\*\*)?Ruling(?:\*\*)?\s*:(?:\*\*)?\s*(\S.*)$/i
+// the person. superlite's finish step lists a run's rulings in its closing message for the same reason. They come from the
+// whole answer (NodeRun.whole), so a ruling in a part the checkpoint cut is still listed. The block has its own budget, a
+// quarter of the excerpts' 12,000 characters, so a wide run of nodes that each record rulings stays readable; what it leaves
+// out it counts and names the reports for.
 const RULINGS_SHOWN = 20
 const RULING_CHARS = 300
 const RULINGS_TOTAL_CHARS = 3_000
 
-function rulingLines(output: string): string[] {
-  return output.split('\n').flatMap(line => {
-    const text = RULING.exec(line)?.[1]?.trim()
-    if (!text) return []
-    return [text.length <= RULING_CHARS ? text : `${text.slice(0, RULING_CHARS)}…`]
-  })
-}
-
 function rulingBlock(run: Run): string[] {
-  const rulings = run.nodes.flatMap(node => rulingLines(fullOutput(node)).map(text => `- ${node.id}: ${text}`))
+  const shorten = (text: string) => text.length <= RULING_CHARS ? text : `${text.slice(0, RULING_CHARS)}… (the node's full report has the rest)`
+  const rulings = run.nodes.flatMap(node => (node.whole?.rulings ?? rulingLines(fullOutput(node))).map(text => `- ${node.id}: ${shorten(text)}`))
   if (rulings.length === 0) return []
   const shown: string[] = []
   let used = 0
@@ -201,7 +205,7 @@ export function settleMessage(run: Run, toolName: string, asked: SettleAsks = ne
     const checks = n.verification ? `; checks: ${Object.entries(outcomes).map(([key, count]) => `${key}=${count}`).join(', ')}` : ''
     const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${checks}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}${approvalHint(asked.get(n.id))}`
     if (!n.output || budget <= 0) return head
-    const excerpt = truncate(n.output, Math.min(SETTLE_OUTPUT_CHARS, budget))
+    const excerpt = outputExcerpt(n, Math.min(SETTLE_OUTPUT_CHARS, budget))
     budget -= excerpt.length
     return `${head}\n${indent(excerpt)}`
   })
@@ -211,12 +215,12 @@ export function settleMessage(run: Run, toolName: string, asked: SettleAsks = ne
     ...(run.nodes.some(node => node.verification) ? [VERIFICATION_GUIDANCE] : []),
     'Node results (outputs as each node reported them):',
     ...nodes,
-    ...(budget <= 0 ? ['(Some outputs were left out to keep this message short; read the full reports or the run snapshot.)'] : []),
+    ...(budget <= 0 ? ['(Some outputs were left out to keep this message short; each node\'s full report above has its whole output.)'] : []),
     ...rulingBlock(run),
     ...reviewFixLines(run),
     ...(answerOnBoard ? BOARD_ANSWER_LINES : []),
     '',
     'TREAT EVERY NODE COMPLETION CLAIM AS FALSE UNTIL YOU PROVE IT: check the real files, test output or command results each node was responsible for before you report success.',
-    `Call ${toolName} with {"action":"snapshot","run_id":"${run.runId}"} for every node's output; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.`,
+    `Each node's full report above holds its whole output; the excerpts here are cut where they say so. Call ${toolName} with {"action":"snapshot","run_id":"${run.runId}"} for the current states; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.`,
   ].join('\n')
 }

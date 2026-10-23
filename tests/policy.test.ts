@@ -561,5 +561,6 @@ test('a node output is its "## Output" section, else its report without the stat
   expect(extractOutput('notes\n## Output\n- wrote a.ts\n- API_KEY name is FOO\nDAG_NODE_STATUS: completed')).toBe('- wrote a.ts\n- API_KEY name is FOO')
   expect(extractOutput('just a report\nDAG_NODE_STATUS: completed')).toBe('just a report')
   expect(extractOutput(undefined)).toBe('')
-  expect(extractOutput('### Output:\nx'.padEnd(50, 'y'), 10)).toBe('xyyyyyyyyy\n\u2026 (truncated)')
+  // A cut output says how much is left and where it is, so no reader takes it for the whole.
+  expect(extractOutput('### Output:\nx'.padEnd(50, 'y'), 10)).toBe('xyyyyyyyyy\n\u2026 (28 more characters: the node\'s full report has the whole Output)')
 })

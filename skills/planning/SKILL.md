@@ -118,7 +118,8 @@ Optional extras are `agent`, `label`, `task_summary`, `description` and `load_sk
 
 `dependsOn` controls order and passes data.
 When a node starts, the plugin adds its direct dependencies' outputs to its prompt.
-Each output includes the `## Output` section, up to 4,000 characters, and the full report path.
+Each output is the whole `## Output` section, read from the dependency's report, with the full report path.
+Past 200,000 characters for all dependencies together, an output ends with where its rest is, and the node is told to read it.
 List as dependencies exactly the nodes whose results a node consumes - no more, no fewer.
 
 ```json
