@@ -71,15 +71,30 @@ const HITS: [string, string][] = [
   ['pgrep -f vite | while read p; do kill $p; done', 'kill in a loop over looked-up PIDs'],
   ['powershell -c "Get-Process node | % { Stop-Process -Id $_.Id }"', 'Get-Process piped to Stop-Process'],
   ['pwsh -c "gps node | ForEach-Object { spps -Id $_.Id -Force }"', 'Get-Process piped to Stop-Process'],
+  // Closed later on 2026-10-23: a variable that holds looked-up processes or PIDs, then stopped.
+  ['powershell -c "$p = Get-Process node; Stop-Process -InputObject $p"', 'Get-Process results stopped'],
+  ['pwsh -c "$p = gps node; $p | spps"', 'Get-Process results stopped'],
+  ['powershell -c "$procs = Get-Process node; $procs.Kill()"', 'Get-Process results stopped'],
+  ['powershell -c "$P = Get-Process node; Stop-Process -Id $p.Id"', 'Get-Process results stopped'],
+  ['powershell -c "$p = (Get-Process node)\n$p | % { $_.Kill() }"', 'Get-Process results stopped'],
+  ['PID=$(lsof -ti:5173); kill $PID', 'kill of looked-up PIDs'],
+  ['pids=$(pgrep -f vite)\nkill -9 $pids', 'kill of looked-up PIDs'],
+  ['PIDS="$(pgrep node)"; kill ${PIDS}', 'kill of looked-up PIDs'],
+  ["pid=$(ps aux | grep vite | awk '{print $2}'); kill $pid", 'kill of looked-up PIDs'],
+  // Long lines: the scans end at the next command word instead of after a fixed count, so length alone no longer hides
+  // the by-name part.
+  [`powershell -c "Stop-Process ${'-Force '.repeat(40)}-Name node"`, 'Stop-Process -Name'],
+  [`powershell -c "Get-Process node | Where-Object { ${"$_.Path -like '*node_modules*' -and ".repeat(12)}$true } | Stop-Process"`, 'Get-Process piped to Stop-Process'],
+  [`ps aux | grep vite | awk '{ ${'n = n + 1; '.repeat(40)}print $2 }' | xargs kill`, 'looked-up PIDs piped to kill'],
+  [`for p in $(pgrep -f vite); do ${'echo step; '.repeat(50)}kill $p; done`, 'kill in a loop over looked-up PIDs'],
 ]
 
-// Known gaps, kept on purpose (kill-guard.ts says why): catching them needs more than a reading of one command line.
-// Asserted so a change is a decision.
+// Known gaps, kept on purpose: reading the command text cannot catch them. Asserted so a change is a decision.
 const GAPS = [
-  // Stop-Process given processes a variable holds: the Get-Process by name is in an earlier statement.
-  'powershell -c "$p = Get-Process node; Stop-Process -InputObject $p"',
-  // The scans after a command word are bounded, so padding pushes the by-name option out of reach.
-  `powershell -c "Stop-Process ${'-Force '.repeat(40)}-Name node"`,
+  // A script whose file holds the kill: its text is not in the command.
+  'bash ./scripts/stop-dev.sh',
+  // A command name a variable holds.
+  'cmd=pkill; $cmd -f vite',
 ]
 
 // Refused on purpose: the command is read as text, so a kill word at a command start inside a quote or a heredoc counts.
@@ -131,6 +146,15 @@ const MISSES = [
   'pwsh -c "rg kill -n hooks"',
   'powershell -c "Get-Process -Id 42 | % { Stop-Process -Id $_.Id }"',
   'powershell -c "Get-Process node | % { $_.Id }"',
+  // Near the variable forms, without a by-name lookup stopped through the same variable.
+  'powershell -c "$p = Get-Process -Id 42; Stop-Process -InputObject $p"',
+  'powershell -c "$procs = Get-Process node; $procs | Select-Object Id"',
+  'powershell -c "$p = Get-Process node; Stop-Process -Id $other"',
+  'pid=$(pgrep -f vite); echo $pid',
+  'pid=$(lsof -ti:5173); kill -0 $pid',
+  'pid=$(pgrep -f vite); kill $OTHER',
+  'npm run dev & PID=$!; sleep 1; kill $PID',
+  'pid=$(cat server.pid); kill $pid',
 ]
 
 test('each by-name or by-pattern kill form is found, and its name is returned', () => {
