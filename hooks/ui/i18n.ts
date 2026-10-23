@@ -72,6 +72,10 @@ export type Strings = {
   toastChipFailed: (reason: string) => string
   approvalWaiting: string
   awaitingApproval: string
+  // The one toast a usage hold raises when it first keeps a node from starting; `minutes` until its window resets, when known.
+  toastUsageHold: (kind: string, percent: number, minutes?: number) => string
+  // The run header's state while the usage hold keeps the run's scheduled nodes from starting.
+  usagePaused: (kind: string, percent: number) => string
   previewSummary: (nodes: number, waves: number, widest: number, maxConcurrent: number) => string
   previewWave: (index: number, entries: string) => string
   previewConflicts: (entries: string) => string
@@ -171,6 +175,8 @@ const EN: Strings = {
   toastChipFailed: reason => `Could not put the block into the prompt (${reason})`,
   approvalWaiting: 'Waiting for your approval: no node starts until you approve this run.',
   awaitingApproval: EN_AWAITING,
+  toastUsageHold: (kind, percent, minutes) => `DAG paused new nodes: ${kind} at ${percent}%${minutes === undefined ? '' : `, resets in ${minutes} min`}`,
+  usagePaused: (kind, percent) => `paused at usage limit: ${kind} ${percent}%`,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `${nodes} node${nodes === 1 ? '' : 's'}, ${waves} wave${waves === 1 ? '' : 's'}, widest wave ${widest} (max concurrent ${maxConcurrent})`,
   previewWave: (index, entries) => `wave ${index}: ${entries}`,
   previewConflicts: entries => `write conflicts: ${entries}`,
@@ -267,6 +273,8 @@ const KO: Strings = {
   toastChipFailed: reason => `블록을 프롬프트에 넣지 못했습니다 (${reason})`,
   approvalWaiting: '승인 대기 중: 이 실행을 승인하기 전에는 어떤 노드도 시작하지 않습니다.',
   awaitingApproval: KO_AWAITING,
+  toastUsageHold: (kind, percent, minutes) => `DAG 새 노드 시작 대기: ${kind} ${percent}% 사용${minutes === undefined ? '' : `, ${minutes}분 뒤 초기화`}`,
+  usagePaused: (kind, percent) => `한도 대기: ${kind} ${percent}%`,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `노드 ${nodes}개, 웨이브 ${waves}개, 가장 넓은 웨이브 ${widest} (동시 실행 한도 ${maxConcurrent})`,
   previewWave: (index, entries) => `웨이브 ${index}: ${entries}`,
   previewConflicts: entries => `쓰기 충돌: ${entries}`,

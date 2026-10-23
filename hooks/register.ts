@@ -1,4 +1,4 @@
-import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult, ToolCheckDecision } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, SessionRateLimit, Timer, ToolCallResult, ToolCheckDecision } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
@@ -50,6 +50,7 @@ import { applyEdit, semgrepNote, semgrepRefusal, semgrepTarget, type SemgrepHit 
 import { addUsage, cut, settleRecord } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
+import { DEFAULT_HOLD_PERCENT, parseHoldPercent, resetMinutes, usageHold, usageHoldField, usageLimitReason, type UsageHold, type UsageHoldField } from './engine/usage.ts'
 import { archiveUnusedSkills, eligibleSkills, emptyLearningSession, learningCatalog, recordSkillOpportunity } from './engine/learning.ts'
 import { boundInput } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
@@ -96,6 +97,9 @@ const HOLD_LIMIT_MS = 3_600_000
 // On 2026-10-10 a node that ended its turn waiting on a background `bun eval/run.ts` was verified at once and failed; it
 // resumed by itself later and passed.
 const BACKGROUND_WAIT_MS = 30 * 60_000
+// The usage hold's reset timer fires this long after its window's resetsAt. usageHold already ignores a window once its reset
+// time has come; the margin covers a local clock a few seconds behind the API's (a chosen margin, not a measured one).
+const USAGE_RESET_GRACE_MS = 5_000
 const PANE_ID = 'dag'
 const PREFS_KEY = 'collapse-prefs'
 const VIEW_KEY = 'pane-view'
@@ -183,6 +187,19 @@ let startApproval: StartApproval = 'off'
 let approvalOverride: StartApproval | undefined
 // settle_notify from settings: which settled runs of this session raise a native notification.
 let settleNotify: SettleNotify = 'long'
+// usage_hold_percent from settings: while an account rate-limit window is at or above it, no run of this session starts a
+// node (engine/usage.ts). 0 turns the hold off.
+let usageHoldPercent = DEFAULT_HOLD_PERCENT
+// The account's rate-limit windows as the host last reported them: seeded at session.start from $.session.usage(), then
+// replaced by every session.measure. tick reads them for each scheduling decision.
+let rateLimits: readonly SessionRateLimit[] = []
+// A hold applied at the last re-evaluation of new readings or of the reset timer (syncUsageHold). A hold begins only with a
+// reading, so this is how a later re-evaluation tells that one lifted.
+let usageHeld = false
+// The timer that re-evaluates the hold just after its window resets, and the resetsAt it was set for.
+let usageTimer: { timer: Timer; resetsAt: string } | undefined
+// The hold's toast has been raised; it stays quiet until the hold lifts and comes back.
+let usageToasted = false
 let planningLoaded = false
 // Skill tool calls for the planning skill that a node worker has in flight; see the tool.call hook.
 let nodePlanningCalls = 0
@@ -1069,8 +1086,12 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
     let run = advance(current, await $.clock.now())
     if (run.handoff) run = offerHandoff(run, await $.clock.now())
     await persist($, run)
-    if (!run.handoff) {
-      for (const id of nextToStart(run, maxConcurrent)) {
+    const starts = run.handoff ? [] : nextToStart(run, maxConcurrent)
+    // While an account rate-limit window is at or above usage_hold_percent no node starts; running ones go on.
+    const held = starts.length > 0 ? usageHold(rateLimits, usageHoldPercent, await $.clock.now()) : undefined
+    if (held) run = await holdForUsage($, run, held)
+    else {
+      for (const id of starts) {
         run = await startNode($, run, id)
         await persist($, run)
       }
@@ -1086,8 +1107,8 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
         if (rework.reworked) continue
       }
     }
-    // A run held for approval keeps its roots scheduled with nothing running: looping again would never end.
-    if (!run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
+    // A run held for approval or by the usage hold keeps its nodes scheduled with nothing running: looping again would never end.
+    if (!held && !run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
     if (!isSettled(run)) {
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
@@ -1109,6 +1130,78 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
     announce($, run)
     return run
   }
+}
+
+// tick's branch while the usage hold keeps a scheduled node from starting. The first such block raises the hold's one toast. A
+// non-interactive session has nobody to wait for the window with, so it cancels the run once nothing in it runs; tick's settle
+// branch then announces that cancel as it announces any other.
+async function holdForUsage($: EngineInterface, run: Run, hold: UsageHold): Promise<Run> {
+  const now = await $.clock.now()
+  if (!usageToasted) {
+    usageToasted = true
+    $.ui.toast(t.toastUsageHold(hold.kind, hold.percentUsed, resetMinutes(hold, now)), { timeoutMs: ATTENTION_TOAST_MS })
+  }
+  if (interactive || run.nodes.some(node => node.state === 'running')) return run
+  const { run: cancelled } = cancelRun(run, usageLimitReason(hold), now)
+  await persist($, cancelled)
+  return cancelled
+}
+
+// The usage_hold field of a dag tool result: present for a run of this session whose scheduled nodes the hold keeps from starting.
+function usageHoldOf(run: Run, now: number): { usage_hold?: UsageHoldField } {
+  const hold = run.sessionId === sessionId && run.nodes.some(node => node.state === 'scheduled') ? usageHold(rateLimits, usageHoldPercent, now) : undefined
+  return hold ? { usage_hold: usageHoldField(hold) } : {}
+}
+
+// The session's first readings: the plain $.session.usage() call costs nothing. A failed or malformed answer leaves no
+// readings, so nothing is held until the first session.measure, and only the debug log hears of it.
+async function seedRateLimits($: EngineInterface): Promise<void> {
+  usageTimer?.timer.cancel()
+  usageTimer = undefined
+  usageHeld = false
+  usageToasted = false
+  rateLimits = []
+  try {
+    const { rateLimits: windows } = await $.session.usage()
+    if (!Array.isArray(windows)) throw new Error('the answer carries no rateLimits list')
+    rateLimits = windows
+  } catch (error) {
+    debug($, `could not read the account's rate-limit windows: ${message(error)}`)
+  }
+  await syncUsageHold($)
+}
+
+// Re-evaluates the hold after new readings or at its reset timer. A hold with a reset time keeps one timer for just past it,
+// replaced when the reset time moves; a hold that lifts cancels it and lets the next hold toast again. Returns true when a
+// hold lifted, so the caller resumes the runs it held.
+async function syncUsageHold($: EngineInterface): Promise<boolean> {
+  const now = await $.clock.now()
+  const hold = usageHold(rateLimits, usageHoldPercent, now)
+  const lifted = usageHeld && !hold
+  usageHeld = hold !== undefined
+  if (!hold) usageToasted = false
+  if (usageTimer && usageTimer.resetsAt !== hold?.resetsAt) {
+    usageTimer.timer.cancel()
+    usageTimer = undefined
+  }
+  const resetsAt = hold?.resetsAt
+  if (resetsAt !== undefined && !usageTimer) {
+    usageTimer = { resetsAt, timer: $.clock.after(Date.parse(resetsAt) - now + USAGE_RESET_GRACE_MS, () => recheckUsageHold($)) }
+  }
+  return lifted
+}
+
+// Re-evaluates the hold in the queue and, when it lifted, ticks every run of this session that has a scheduled node. The
+// session.measure hook and the reset timer do not wait for it: the queue may be spawning agents or asking Jev.
+function recheckUsageHold($: EngineInterface): void {
+  serialized(async () => {
+    if (!(await syncUsageHold($))) return
+    for (const run of [...runs.values()]) {
+      if (run.sessionId === sessionId && run.nodes.some(node => node.state === 'scheduled')) await tick($, run.runId)
+    }
+  }).catch(error => {
+    $.ui.log(`could not resume DAG runs after the usage hold: ${message(error)}`)
+  })
 }
 
 // One native notification for a run of this session that has just settled, under settle_notify (settle-notice.ts decides). The
@@ -1810,9 +1903,10 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   if (existing?.rejected && by === 'model') return err(rejectedByUser(existing))
   if (existing && by === 'user' && approveHeld && existing.sessionId === sessionId && awaitingApproval(existing)) {
     await decideApproval($, 'approve', existing.runId)
-    return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
+    const approved = runs.get(existing.runId) ?? existing
+    return ok({ reused: true, approved: true, run_id: existing.runId, ...usageHoldOf(approved, await $.clock.now()), snapshot: snapshotOf(approved, 0) })
   }
-  if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
+  if (existing) return ok({ reused: true, run_id: existing.runId, ...usageHoldOf(existing, await $.clock.now()), snapshot: snapshotOf(existing) })
   const missing = await missingProgramProblem($, definition, root)
   if (missing) return err(missing)
   const now = await $.clock.now()
@@ -1839,6 +1933,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
     reused: false,
     run_id: runId,
     ...(held ? { awaiting_approval: true } : {}),
+    ...usageHoldOf(started, await $.clock.now()),
     snapshot: snapshotOf(started, 0),
     warnings,
     note: held
@@ -1947,6 +2042,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   }
   if (input.action === 'start') return startRequest($, input)
   if (input.action === 'list') {
+    const listedAt = await $.clock.now()
     return ok({
       runs: [...runs.values()]
         .sort((a, b) => b.createdAt - a.createdAt)
@@ -1954,6 +2050,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
           run_id: r.runId, run_key: r.key, name: r.name, status: r.status, session_id: r.sessionId, owned: r.sessionId === sessionId,
           // status stays running for a held run, so this is what tells the model it has not started.
           ...(awaitingApproval(r) ? { awaiting_approval: true } : {}),
+          ...usageHoldOf(r, listedAt),
         })),
     })
   }
@@ -1961,14 +2058,17 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   if (!run) return err({ code: 'unknown_run', message: `No run "${String(input.run_id)}" in this project; use the list action to see runs.` })
   const now = await $.clock.now()
 
-  if (input.action === 'snapshot') return ok(snapshotOf(run))
+  if (input.action === 'snapshot') return ok({ ...snapshotOf(run), ...usageHoldOf(run, now) })
   if (input.action === 'wait') {
+    const usage = usageHoldOf(run, now)
     const note = isSettled(run)
       ? 'The run has settled.'
       : awaitingApproval(run)
         ? APPROVAL_NOTE
-        : 'wait cannot block inside Claude Code; the run is still active and you will receive a message when it settles.'
-    return ok({ ...snapshotOf(run), note })
+        : usage.usage_hold
+          ? `New nodes are paused until the ${usage.usage_hold.kind} rate-limit window (now ${usage.usage_hold.percent_used}%) drops below usage_hold_percent (${usageHoldPercent}%) or resets; running nodes continue. Do not poll; you will receive a message when the run settles.`
+          : 'wait cannot block inside Claude Code; the run is still active and you will receive a message when it settles.'
+    return ok({ ...snapshotOf(run), ...usage, note })
   }
   if (input.action === 'attach') {
     if (run.sessionId === sessionId) return ok(snapshotOf(run))
@@ -2749,7 +2849,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     })
   }
 
-  const model = buildPane(shown, view, now, { activity, waiting: waitingTools(), t, taskCount: countTasks(agents, dagAgents) })
+  const model = buildPane(shown, view, now, { activity, waiting: waitingTools(), t, taskCount: countTasks(agents, dagAgents), usageHold: usageHold(rateLimits, usageHoldPercent, now), sessionId })
   if (model.empty || !model.graph) {
     return Box({ flexDirection: 'column', children: [sectionTabs, gap(), ...model.header.map(line), gap(), Text({ dimColor: true, children: [model.empty ?? ''] }), ...footer] })
   }
@@ -2843,6 +2943,7 @@ export function register(on: On, options: PluginOptions) {
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
   if (START_APPROVALS.includes(options.start_approval as StartApproval)) startApproval = options.start_approval as StartApproval
   if (SETTLE_NOTIFIES.includes(options.settle_notify as SettleNotify)) settleNotify = options.settle_notify as SettleNotify
+  usageHoldPercent = parseHoldPercent(options.usage_hold_percent)
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
   scan.antiSlopScan = options.anti_slop_scan !== false
   if (Array.isArray(options.anti_slop_skip)) scan.antiSlopSkip = new Set(options.anti_slop_skip)
@@ -2898,6 +2999,8 @@ export function register(on: On, options: PluginOptions) {
         : 'Jev inactive: TYPESAFE_API_KEY is not set; keeping existing decisions')
     }
     sessionId = await $.session.id()
+    // Before loadRuns and recoverRuns, so the first tick of a resumed run already sees the account's usage.
+    await seedRateLimits($)
     await $.tool.register({ name: 'dag', description: TOOL_DESCRIPTION, inputSchema: INPUT_SCHEMA })
     await $.tool.register({ name: 'board', description: BOARD_TOOL_DESCRIPTION, inputSchema: BOARD_INPUT_SCHEMA })
     try {
@@ -3026,6 +3129,13 @@ export function register(on: On, options: PluginOptions) {
     }
     sessionClosed = false
     await refreshSessions($)
+    return next(e)
+  })
+
+  // Every reading replaces the last; a hold that no longer applies resumes the runs it held.
+  on('session.measure', async ($, e, next) => {
+    rateLimits = e.rateLimits
+    recheckUsageHold($)
     return next(e)
   })
 

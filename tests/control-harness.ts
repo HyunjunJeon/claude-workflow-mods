@@ -1,5 +1,5 @@
 import { mock, type Engine, type Plugin } from 'claude-code/testing'
-import type { AgentInfo, EventOf, On } from 'claude-code'
+import type { AgentInfo, EventOf, On, SessionRateLimit } from 'claude-code'
 import type { Run } from '../hooks/engine/types.ts'
 import type { JevRequest } from '../hooks/engine/jev.ts'
 import type { Enforcement } from '../hooks/engine/policy.ts'
@@ -47,8 +47,11 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   // deny or a failed write does.
   // root: what $.session.root() answers, the folder the session works in now (a worktree after EnterWorktree); session.cwd
   // and session.start stay at /work, the folder the session started in.
-  const control = { sessionId: 'source', root: '/work', notify: 'sent' as 'sent' | 'unsent' | 'rejected', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
+  // rateLimits: the account's rate-limit windows $.session.usage() answers; empty, as off a subscription, unless a test sets them.
+  const control = { sessionId: 'source', root: '/work', notify: 'sent' as 'sent' | 'unsent' | 'rejected', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>(), rateLimits: [] as SessionRateLimit[] }
   on('session.start', () => ({ cwd: '/work' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: control.rateLimits } }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
   on('session.root', () => ({ value: control.root }))

@@ -2,6 +2,7 @@ import { edgesOf, layers } from '../engine/graph.ts'
 import { STATUS_PREFIX } from '../engine/node-prompt.ts'
 import { awaitingApproval } from '../engine/run.ts'
 import type { NodeRun, NodeState, Run, RunStatus } from '../engine/types.ts'
+import type { UsageHold } from '../engine/usage.ts'
 import { isStalled, type Activity } from './activity.ts'
 import type { GraphModel, GraphNode, ViewKind } from './graph-model.ts'
 import { ACCENT, formatDuration, type Line, type Segment } from './text.ts'
@@ -34,8 +35,12 @@ export type ViewState = {
   graphView?: ViewKind
   unfold?: boolean
 }
-/** `waiting` maps a worker's agent id to the tool whose permission answer it waits for. */
-export type ViewContext = { activity?: ReadonlyMap<string, Activity>; waiting?: ReadonlyMap<string, string>; t?: Strings; taskCount?: number }
+/**
+ * `waiting` maps a worker's agent id to the tool whose permission answer it waits for. `usageHold` is the account's
+ * rate-limit window that keeps scheduled nodes from starting, when one does; it holds only the runs of `sessionId`, the
+ * session drawing the pane, so another session's run shown here keeps its own state.
+ */
+export type ViewContext = { activity?: ReadonlyMap<string, Activity>; waiting?: ReadonlyMap<string, string>; t?: Strings; taskCount?: number; usageHold?: UsageHold; sessionId?: string }
 
 export type AgentSummary = { id: string; description: string; type: string; status: string }
 
@@ -274,11 +279,14 @@ export function buildPane(runs: Run[], view: ViewState, now: number, context: Vi
   const run = runs[index] as Run
   const done = run.nodes.filter(n => n.state === 'completed').length
   const failed = run.nodes.filter(n => n.state === 'failed').length
+  const hold = run.sessionId === context.sessionId && run.nodes.some(n => n.state === 'scheduled') ? context.usageHold : undefined
   const header: Line[] = [
     top,
     [{ text: run.name, bold: true }, { text: `  ${t.runOf(index + 1, runs.length, run.runId)}`, dim: true }],
     [
-      awaitingApproval(run) ? { text: t.awaitingApproval, color: WAITING_COLOR } : styled(t.state[run.status], run.status),
+      awaitingApproval(run)
+        ? { text: t.awaitingApproval, color: WAITING_COLOR }
+        : hold ? { text: t.usagePaused(hold.kind, hold.percentUsed), color: WAITING_COLOR } : styled(t.state[run.status], run.status),
       { text: ` · ${t.done(done, run.nodes.length)}` },
       ...(failed ? [{ text: ` · ${t.failedCount(failed)}`, color: 'red' }] : []),
     ],

@@ -198,6 +198,14 @@
       "min": 1,
       "max": 32
     },
+    "usage_hold_percent": {
+      "type": "number",
+      "title": "Hold new nodes at usage (%)",
+      "description": "New nodes wait while any account rate-limit window (five_hour, seven_day, spend_limit) is at or above this percent; running nodes continue, and the hold lifts when the window drops below it or resets. A non-interactive session cancels a held run once nothing in it runs. 0 turns the hold off",
+      "default": 90,
+      "min": 0,
+      "max": 100
+    },
     "node_messages": {
       "type": "string",
       "title": "Node hand-back messages",
