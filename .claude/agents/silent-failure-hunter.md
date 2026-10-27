@@ -22,6 +22,15 @@ Review the range or files the caller names. Otherwise review the current change 
 6. **Lost diagnostics.** A rethrow that drops the cause or the stack. A log line with no identifying context. An error logged only to a debug channel the user never sees, when the user needed to act on it.
 7. **Retries and loops.** A retry that ends with the last error discarded. A loop that skips failed items and reports a full success count.
 
+## How to search
+
+Keyword searches (`catch`, `.catch`, `.then`, `Promise.all`) find only targets 1, 4 and part of 5. Partial result checks and success-looking fallbacks contain no such keyword, so run both passes:
+
+1. **Keyword pass.** Search for the error-handling constructs above and read each site.
+2. **Result-type pass.** List the result types the code consumes: what host or framework calls resolve to (including a middleware's `next(...)`), what library calls return, and the code's own result unions. Read each type's declaration and write down every failure shape it can take (fields such as `error`, `deny`, `isError`, `ok: false`, a status code, `null`, a thrown error). Then search for each failure field separately and compare the sites that consume the same type. A site that tests one failure field while a sibling site tests two is the strongest lead. So is a site that tests none and then records, schedules or reports the result as a success.
+
+Report which result types you traced, so the caller can see what the result-type pass covered.
+
 ## Not a finding
 
 - A failure policy that is deliberate and documented at the site (a comment or a named constant), such as fail-open for a non-essential feature or fail-closed for a security gate. Do report it if the comment's claim does not match what the code does.
@@ -61,6 +70,7 @@ Fix: <smallest change that makes the failure visible or handled>
 
 ## Summary
 Reviewed: <range or files>
+Result types traced: <type - failure fields - consuming sites checked>
 HIGH <n> | MEDIUM <n> | LOW <n> | suspected <n>
 ```
 
