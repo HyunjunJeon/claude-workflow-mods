@@ -82,18 +82,17 @@ test('session start prunes expired artifacts and keeps current and active peer f
   expect(h.store.has(`${PREFIX}peer`)).toBe(true)
 })
 
-// Registered before the shared harness so this gate, not its catch-all tool.call, answers Write.
-function writeGate(on: On, $: Engine) {
+// Registered before the shared harness so this bottom, not its catch-all tool.call, answers Write. The engine raises
+// the host permission gate beneath the plugin's tool.call, so only an allowed call reaches it.
+function writeGate(on: On) {
   on('tool.check', () => ({ decision: 'ask' }))
-  on('tool.call', { tool: 'Write' }, async (_engine, e) => {
-    const verdict = await $.tool.check({ tool: e.tool, input: { file_path: e.file_path, content: e.content }, tool_use_id: e.tool_use_id })
-    if (verdict.decision !== 'allow') return { deny: verdict.reason ?? verdict.decision }
+  on('tool.call', { tool: 'Write' }, (_engine, e) => {
     return { result: { type: 'create', filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
   })
 }
 
 test('dag permission scope skips Jev for main-loop asks but still evaluates node asks', { options: { jev_permission_scope: 'dag' } }, async ($, on) => {
-  writeGate(on, $)
+  writeGate(on)
   const h = footprint(on)
   await boot($)
   await start($, DEFINITION)
@@ -103,13 +102,13 @@ test('dag permission scope skips Jev for main-loop asks but still evaluates node
   expect(h.requests).toHaveLength(before)
   expect(h.files.get(`${ROOT}/decisions/source.json`)).toBe(decisionsBefore)
   const call = { tool: 'Write', file_path: '/work/a', content: 'x', agentId: 'agent-1', tool_use_id: 'node-call' } as const
-  expect(await $.tool.call(call)).toHaveProperty('deny')
+  expect(await $.tool.call(call)).toMatchObject({ isError: true })
   expect(h.requests).toHaveLength(before + 1)
   expect(h.requests.at(-1)?.state).toMatchObject({ task: 'Produce artifact' })
 })
 
 test('default permission scope still evaluates a main-loop ask', async ($, on) => {
-  writeGate(on, $)
+  writeGate(on)
   const h = footprint(on)
   await boot($)
   const before = h.requests.length

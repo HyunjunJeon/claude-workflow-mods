@@ -103,6 +103,32 @@ test('a node with background work whose answer ends with a status line finishes 
   expect(h.spawns).toHaveLength(2)
 })
 
+// The host's permission gate runs beneath the plugin's tool.call, so a refused call reaches the plugin as an errored
+// result rather than a deny; it started nothing, and neither did one the tool itself failed.
+test('a background call the host permission gate refuses is no background work, so the node finishes at once', async ($, on) => {
+  on('tool.check', { tool: 'Bash' }, () => ({ decision: 'deny', reason: 'background commands are not allowed' }))
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, CHAIN)
+  await workerCall($, { tool: 'Bash', command: 'bun eval/run.ts', run_in_background: true })
+  await endTurn($, h, 'The eval could not start.')
+
+  expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'completed', verification: { status: 'passed' } })
+  expect(h.logs).not.toContain(WAITING_LOG)
+})
+
+test('an Agent call that fails to start is no background work, so the node finishes at once', async ($, on) => {
+  on('tool.call', { tool: 'Agent' }, () => ({ result: 'Error: agent limit reached', isError: true }))
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, CHAIN)
+  await workerCall($, { tool: 'Agent', description: 'Run the eval', prompt: 'Run the eval' })
+  await endTurn($, h, 'The eval could not start.')
+
+  expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'completed', verification: { status: 'passed' } })
+  expect(h.logs).not.toContain(WAITING_LOG)
+})
+
 // A status line is the last line of the answer, which is where parseOutcome reads it. A sentence that only names the line
 // is not one: a worker that said it would end with the status and then ended its turn has not finished.
 const MENTION = 'I will end with DAG_NODE_STATUS: completed once it finishes.'

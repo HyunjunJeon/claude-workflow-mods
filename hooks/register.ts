@@ -4071,8 +4071,9 @@ export function register(on: On, options: PluginOptions) {
       endBackgroundWait(agentId)
       try {
         const reply = await call()
-        // Recorded once the call is answered: a refused call started nothing.
-        if (owner && reply.deny === undefined && startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) backgroundAgents.add(agentId)
+        // Recorded once the call is answered: a refused call started nothing, and neither did one that errored, which is
+        // also how a refusal by the host permission gate (beneath this hook) arrives.
+        if (owner && reply.deny === undefined && reply.isError !== true && startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) backgroundAgents.add(agentId)
         return reply
       } finally {
         if (nodeSkillLoad) nodePlanningCalls -= 1
