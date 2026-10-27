@@ -176,6 +176,6 @@ Typesafe 의 Jev(System One Model)는 실행 방식, 노드의 모델 등급, �
 ## 상세 문서
 
 - [사용법과 설정 레퍼런스](docs/reference.md): 전체 명령, DAG 정의, 검증, 검토·보안 검토, 복구, 세션 인계, 패널 조작, 보드.
-- [개발 안내](docs/development.md): 개발 규칙, 검사 명령, DAG 형태 평가.
+- [개발 안내](docs/development.md): 개발 규칙, 검사 명령, DAG 형태 평가, 표시 방식 판단 평가.
 - [상태줄 HUD](docs/statusline.md): 플러그인과 별도로 설치하는 상태줄과 Orca 연동.
 - [시큐어코딩 시연 키트](examples/secure-coding/README.md): 편집 시점 훅, 보안 검토 DAG, 리뷰 수정 라운드를 세 막으로 보여 주는 데모 저장소와 대본.
