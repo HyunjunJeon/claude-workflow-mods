@@ -42,6 +42,8 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   const requests: { url: string; init?: HttpInit }[] = []
   const spawns: { prompt: string; model?: string; description: string }[] = []
   const order: string[] = []
+  const logs: string[] = []
+  const prompts: string[] = []
   const control = {
     sessionId: 'jev-session',
     reply: response({ a: choice('architect'), b: choice('trivial'), c: choice('writing') }),
@@ -81,13 +83,13 @@ function harness(on: On, key: string | null = 'fake-test-key') {
   on('tool.register', () => ({ value: { tool: DAG } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.log', () => ({ value: undefined }))
-  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
+  on('prompt.submit', ($, e) => { prompts.push(e.text); return { text: e.text } })
   on('skill.prompt', ($, e) => ({ text: e.text }))
   on('turn.complete', () => ({ text: '' }))
   on('classic.SessionStart', () => ({}))
   return {
-    clock, files, requests, spawns, order, control, models,
+    clock, files, requests, spawns, order, control, models, logs, prompts,
     transport(value: () => Promise<HttpResponse>) { transport = value },
   }
 }
@@ -227,7 +229,7 @@ test('the session model routes each node in its own request and records each out
 
 test('invalid, missing and low-confidence routes fall back independently', async ($, on) => {
   const h = harness(on)
-  h.control.reply = response({ a: choice('architect', 0.899), b: choice('invalid', 1) })
+  h.control.reply = response({ a: choice('architect', 0.799), b: choice('invalid', 1) })
   await boot($)
   const started = await dag($, { action: 'start', definition: DEFINITION })
   expect(checkpoint(h, started.run_id).nodes.map(node => node.routing)).toEqual([
@@ -413,6 +415,128 @@ test('configured confidence overrides the default threshold', { options: { jev_c
   on('tool.check', () => ({ decision: 'ask', reason: 'baseline', rule: 'rule' }))
   await boot($)
   expect(await $.tool.check({ tool: PROBE, input: {} })).toEqual({ decision: 'ask', reason: 'baseline', rule: 'rule' })
+})
+
+const ROUTED_BELOW = response({ a: choice('architect', 0.85), b: choice('writing', 0.85), c: choice('writing', 0.85), permission: choice('allow', 0.85) })
+
+test('HTTP routing applies from jev_routing_confidence while permissions keep jev_confidence', async ($, on) => {
+  const h = harness(on)
+  h.control.reply = ROUTED_BELOW
+  on('tool.check', () => ({ decision: 'ask', reason: 'baseline', rule: 'rule' }))
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  expect(checkpoint(h, started.run_id).nodes.map(node => node.routing)).toEqual([
+    { source: 'jev', category: 'architect', confidence: 0.85 },
+    { source: 'jev', category: 'writing', confidence: 0.85 },
+    { source: 'jev', category: 'writing', confidence: 0.85 },
+  ])
+  expect(await $.tool.check({ tool: PROBE, input: {} })).toEqual({ decision: 'ask', reason: 'baseline', rule: 'rule' })
+  const decisions: { kind: string; outcome: string; threshold: number }[] = (await dag($, { action: 'decisions' })).decisions
+  expect(decisions.map(record => [record.kind, record.outcome, record.threshold])).toEqual([
+    ['routing', 'applied', 0.8],
+    ['routing', 'applied', 0.8],
+    ['routing', 'applied', 0.8],
+    ['permission', 'low-confidence', 0.9],
+  ])
+  expect(h.logs.filter(line => line.startsWith('Jev routing'))).toEqual([])
+})
+
+test('a raised jev_routing_confidence keeps the proposals and names each overruled choice once', { options: { jev_routing_confidence: 0.9 } }, async ($, on) => {
+  const h = harness(on)
+  h.control.reply = ROUTED_BELOW
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  expect(checkpoint(h, started.run_id).nodes.map(node => node.routing?.source)).toEqual(['definition', 'definition', 'definition'])
+  const decisions: { outcome: string; threshold: number }[] = (await dag($, { action: 'decisions' })).decisions
+  expect(decisions.map(record => [record.outcome, record.threshold])).toEqual([
+    ['low-confidence', 0.9], ['low-confidence', 0.9], ['low-confidence', 0.9],
+  ])
+  // b's choice equals its proposal, so only a and c are named.
+  expect(h.logs.filter(line => line.startsWith('Jev routing'))).toEqual([
+    `Jev routing ${started.run_id}: kept the proposed category below jev_routing_confidence 0.9: a trivial (Jev architect at 0.85), c trivial (Jev writing at 0.85)`,
+  ])
+})
+
+test('session-model routing below its bar names jev_model_routing_confidence', async ($, on) => {
+  const h = harness(on, null)
+  h.control.modelFor = answerEvery({ a: 'architect', b: 'writing', c: 'trivial' }, 0.7)
+  await boot($)
+  const started = await dag($, { action: 'start', definition: DEFINITION })
+  expect(h.logs.filter(line => line.startsWith('Jev routing'))).toEqual([
+    `Jev routing ${started.run_id}: kept the proposed category below jev_model_routing_confidence 0.8: a trivial (Jev architect at 0.7)`,
+  ])
+})
+
+const SINGLE = { key: 'jev-recovery', goal: 'Ship A', nodes: [{ id: 'a', prompt: 'Implement A', category: 'trivial', verify: VERIFY }] }
+
+function recoveryReply(kind: string) {
+  return response({ a: choice('trivial'), recovery: choice(kind, 0.85) })
+}
+
+async function failOnce($: Engine, h: ReturnType<typeof harness>, kind: string) {
+  h.control.reply = recoveryReply(kind)
+  await boot($)
+  const started = await dag($, { action: 'start', definition: SINGLE })
+  await finish($, h, 'agent-1', true)
+  return started.run_id as string
+}
+
+function settleLine(h: ReturnType<typeof harness>, runId: string): string | undefined {
+  const settled = h.prompts.findLast(text => text.startsWith(`DAG run "jev-recovery" (${runId}) settled`))
+  return settled?.split('\n').find(line => line.startsWith('- a: '))
+}
+
+const HELD = 'Jev judged transient at 0.85, below jev_recovery_confidence 0.9'
+
+test('a transient recovery below jev_recovery_confidence is not retried and says why in the log and the settle message', async ($, on) => {
+  const h = harness(on)
+  const runId = await failOnce($, h, 'transient')
+  const saved = checkpoint(h, runId)
+  expect(saved.nodes[0]).toMatchObject({ state: 'failed', attempt: 1 })
+  expect(saved.nodes[0]?.recovery).toBeUndefined()
+  expect(h.spawns).toHaveLength(1)
+  expect(h.logs.filter(line => line.startsWith('Jev recovery'))).toEqual([`Jev recovery ${runId}/a: no automatic retry; ${HELD}`])
+  expect(settleLine(h, runId)?.endsWith(`; ${HELD}, so it was not retried automatically`)).toBe(true)
+  const decisions: { kind: string; outcome: string; threshold: number }[] = (await dag($, { action: 'decisions' })).decisions
+  expect(decisions.filter(record => record.kind === 'recovery').map(record => [record.outcome, record.threshold])).toEqual([['low-confidence', 0.9]])
+})
+
+test('an implementation recovery below its bar is held the same way', async ($, on) => {
+  const h = harness(on)
+  const runId = await failOnce($, h, 'implementation')
+  expect(h.logs.filter(line => line.startsWith('Jev recovery'))).toEqual([
+    `Jev recovery ${runId}/a: no automatic retry; Jev judged implementation at 0.85, below jev_recovery_confidence 0.9`,
+  ])
+})
+
+test('a lowered jev_recovery_confidence retries a recovery at 0.85 automatically', { options: { jev_recovery_confidence: 0.8 } }, async ($, on) => {
+  const h = harness(on)
+  const runId = await failOnce($, h, 'transient')
+  expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'running', attempt: 2, recovery: { used: 1, kind: 'transient' } })
+  expect(h.spawns).toHaveLength(2)
+  expect(h.logs.some(line => line.startsWith('Jev recovery'))).toBe(false)
+  const decisions: { kind: string; outcome: string; threshold: number }[] = (await dag($, { action: 'decisions' })).decisions
+  expect(decisions.filter(record => record.kind === 'recovery').map(record => [record.outcome, record.threshold])).toEqual([['applied', 0.8]])
+})
+
+test('a clarification recovery below its bar leaves no recovery line or settle hint', async ($, on) => {
+  const h = harness(on)
+  const runId = await failOnce($, h, 'clarification')
+  expect(h.logs.some(line => line.startsWith('Jev recovery'))).toBe(false)
+  expect(settleLine(h, runId)).toBeDefined()
+  expect(settleLine(h, runId)?.includes('Jev judged')).toBe(false)
+})
+
+test('the settle hint is dropped once the held node is retried', async ($, on) => {
+  const h = harness(on)
+  const runId = await failOnce($, h, 'transient')
+  expect(settleLine(h, runId)?.includes(HELD)).toBe(true)
+  await dag($, { action: 'retry', run_id: runId, node_id: 'a' })
+  await h.clock.settle()
+  await finish($, h, 'agent-2')
+  const line = settleLine(h, runId)
+  expect(line?.startsWith('- a: completed')).toBe(true)
+  expect(line?.includes('Jev judged')).toBe(false)
 })
 
 test('a hung HTTP request keeps ask at exactly the virtual 5000ms deadline', async ($, on) => {

@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, recoveryHoldReason, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { absentOccurrenceWarnings, containsPrecisionWarnings, fileCheckPaths, isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
@@ -627,12 +627,20 @@ const backgroundWaits = new Map<string, { answer: string; timer: Timer }>()
 // Per run and node, the tools already explained in a non-interactive session for the node's current attempt, in
 // first-seen order: a retried call adds no second line, and the settle summary lists them. A new attempt starts over.
 const askedTools = new Map<string, Map<string, { attempt: number; tools: string[] }>>()
+// Per run and node, the transient or implementation recovery Jev judged below jev_recovery_confidence for the node's
+// current attempt; the settle summary says why that failed node was not retried. A new attempt drops it.
+const recoveryHolds = new Map<string, Map<string, RecoveryHold & { attempt: number }>>()
 let userRequest = ''
 let jevEnabled = true
 let jevMaxCalls = 100
 let jevCallsUsed = 0
 let jevLimitNoted = false
+// Tool permissions only; routing and recovery have their own bars below.
 let jevConfidence = 0.9
+// A replay of 145 routing and 7 recovery decisions (eval/baselines/jev-threshold-replay.md) chose 0.8 for HTTP routing
+// and kept 0.9 for recovery.
+let jevRoutingConfidence = 0.8
+let jevRecoveryConfidence = 0.9
 // Session-model routing answers measured 0.60-0.97 confident with every choice correct, so they apply from a lower bar.
 let jevModelRoutingConfidence = 0.8
 let jevModelFallback = true
@@ -904,7 +912,10 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
   const evaluation = await evaluateJev($, request, undefined, routingParts(run, ids, JEV_MODEL_CALLS))
   const records: DecisionRecord[] = []
   const at = await $.clock.now()
-  const threshold = evaluation.backend === 'model' ? jevModelRoutingConfidence : jevConfidence
+  const [threshold, setting] = evaluation.backend === 'model'
+    ? [jevModelRoutingConfidence, 'jev_model_routing_confidence']
+    : [jevRoutingConfidence, 'jev_routing_confidence']
+  const kept: string[] = []
   const nodes = run.nodes.map(node => {
     if (!ids.includes(node.id)) return node
     const choice = evaluation.choices.get(node.id)
@@ -920,6 +931,9 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
       latencyMs: evaluation.latencies?.get(node.id) ?? evaluation.latencyMs, stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
     }, evaluation, threshold))
+    if (outcome === 'low-confidence' && choice && choice.choice !== category && !ruled) {
+      kept.push(`${node.id} ${category} (Jev ${choice.choice} at ${choice.confidence})`)
+    }
     if (ruled) {
       debug($, `final-audit rule ${run.runId}/${node.id}: ${FINAL_AUDIT_CATEGORY} instead of trivial`)
       return { ...node, routing: { source: 'rule' as const, category: FINAL_AUDIT_CATEGORY } }
@@ -931,6 +945,7 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
     return { ...node, routing: { source: 'definition' as const, category } }
   })
   await persistDecisions($, records)
+  if (kept.length > 0) $.ui.log(`Jev routing ${run.runId}: kept the proposed category below ${setting} ${threshold}: ${kept.join(', ')}`)
   return { ...run, nodes }
 }
 
@@ -1550,7 +1565,7 @@ function announce($: EngineInterface, run: Run, text?: string, deferred = false)
   settleSubmits.add(run.runId)
   const send = () => {
     // Plugin submissions run once idle; never await them in the queue.
-    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), boardAnswerRuns.has(run.runId))).then(result => {
+    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), boardAnswerRuns.has(run.runId), settleHolds(run))).then(result => {
       if ('drop' in result) throw new Error(result.drop)
       return serialized(async () => {
         const current = runs.get(run.runId)
@@ -1990,14 +2005,21 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
   const evaluation = await evaluateJev($, request)
   const choice = evaluation.choices.get('recovery')
   const kind = choice ? recoveryKind(choice.choice) : undefined
-  const outcome = decisionOutcome(evaluation, choice, 'recovery')
+  const outcome = decisionOutcome(evaluation, choice, 'recovery', jevRecoveryConfidence)
   await persistDecisions($, [decisionRecord({
     at: await $.clock.now(), kind: 'recovery', subject: node.id, runId: run.runId, nodeId: node.id,
     proposed: 'manual', selected: outcome === 'applied' && kind ? kind : 'manual',
     source: outcome === 'applied' ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
     stateHash: hash(stableStringify(request.state)),
     ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-  }, evaluation)])
+  }, evaluation, jevRecoveryConfidence)])
+  if (outcome === 'low-confidence' && choice && (kind === 'transient' || kind === 'implementation')) {
+    const hold = { choice: kind, confidence: choice.confidence, bar: jevRecoveryConfidence }
+    let held = recoveryHolds.get(run.runId)
+    if (!held) recoveryHolds.set(run.runId, held = new Map())
+    held.set(node.id, { ...hold, attempt: node.attempt })
+    $.ui.log(`Jev recovery ${run.runId}/${node.id}: no automatic retry; ${recoveryHoldReason(hold)}`)
+  }
   if (outcome !== 'applied' || !kind) return run
   const reason = (node.error ?? 'The node failed.').slice(0, 2_000)
   const prepared: Run = {
@@ -3271,6 +3293,17 @@ function settleAsks(run: Run): Map<string, string[]> {
   return asked
 }
 
+// Like settleAsks, only the node's current attempt counts: a retried node's earlier hold no longer explains its result.
+function settleHolds(run: Run): Map<string, RecoveryHold> {
+  const holds = new Map<string, RecoveryHold>()
+  const nodes = recoveryHolds.get(run.runId)
+  for (const node of run.nodes) {
+    const entry = nodes?.get(node.id)
+    if (entry && entry.attempt === node.attempt) holds.set(node.id, entry)
+  }
+  return holds
+}
+
 // claude -p cannot put an ask to anyone, so the host refuses the call; this says why it was left at ask.
 function headlessAskNote(tool: string, why: string): string {
   return `${tool} needs approval that this non-interactive session cannot ask for (${why}); allow it up front with --allowedTools ${tool} or a --permission-mode that covers it`
@@ -3653,6 +3686,10 @@ export function register(on: On, options: PluginOptions) {
   if (typeof jevLimitOption === 'number' && Number.isInteger(jevLimitOption) && jevLimitOption >= 1 && jevLimitOption <= 1000) jevMaxCalls = jevLimitOption
   jevModelFallback = options.jev_model_fallback !== false
   if (typeof options.jev_confidence === 'number' && Number.isFinite(options.jev_confidence) && options.jev_confidence >= 0 && options.jev_confidence <= 1) jevConfidence = options.jev_confidence
+  const routing = options.jev_routing_confidence
+  if (typeof routing === 'number' && Number.isFinite(routing) && routing >= 0 && routing <= 1) jevRoutingConfidence = routing
+  const recovery = options.jev_recovery_confidence
+  if (typeof recovery === 'number' && Number.isFinite(recovery) && recovery >= 0 && recovery <= 1) jevRecoveryConfidence = recovery
   const modelRouting = options.jev_model_routing_confidence
   if (typeof modelRouting === 'number' && Number.isFinite(modelRouting) && modelRouting >= 0 && modelRouting <= 1) jevModelRoutingConfidence = modelRouting
   t = stringsFor(options.language)

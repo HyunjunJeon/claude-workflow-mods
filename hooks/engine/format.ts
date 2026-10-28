@@ -135,6 +135,20 @@ function approvalHint(tools: readonly string[] | undefined): string {
   return `; needed approval this non-interactive session cannot give: ${tools.join(', ')} (allow them up front with --allowedTools)`
 }
 
+// A transient or implementation recovery Jev judged below jev_recovery_confidence: the failed node got no automatic retry.
+export type RecoveryHold = { readonly choice: string; readonly confidence: number; readonly bar: number }
+
+// Node id -> the recovery hold of that node's current attempt.
+export type SettleHolds = ReadonlyMap<string, RecoveryHold>
+
+export function recoveryHoldReason(hold: RecoveryHold): string {
+  return `Jev judged ${hold.choice} at ${hold.confidence}, below jev_recovery_confidence ${hold.bar}`
+}
+
+function recoveryHint(hold: RecoveryHold | undefined): string {
+  return hold ? `; ${recoveryHoldReason(hold)}, so it was not retried automatically` : ''
+}
+
 // Says that the automatic review-fix round ran, so neither the main conversation nor the person mistakes the producers' second
 // attempt for their first. If the reviewers still fail, the verdicts above are what the fix left, and the main conversation
 // amends with them instead of retrying the reviewers or repeating the same fix.
@@ -158,13 +172,13 @@ const BOARD_ANSWER_LINES = [
   'If the tool is unavailable, an edit is refused twice, or open replies shown: false, report the result in chat as before.',
 ]
 
-export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map(), answerOnBoard = false): string {
+export function settleMessage(run: Run, toolName: string, asked: SettleAsks = new Map(), answerOnBoard = false, held: SettleHolds = new Map()): string {
   let budget = SETTLE_TOTAL_CHARS
   const nodes = run.nodes.map(n => {
     const outcomes = { passed: 0, failed: 0, not_run: 0, unknown: 0 }
     for (const item of n.verification?.evidence ?? []) outcomes[evidenceOutcome(item)]++
     const checks = n.verification ? `; checks: ${Object.entries(outcomes).map(([key, count]) => `${key}=${count}`).join(', ')}` : ''
-    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${checks}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}${approvalHint(asked.get(n.id))}`
+    const head = `- ${n.id}: ${n.state}${n.error ? ` (${n.error})` : ''}${n.verification ? `; verification: ${n.verification.status}` : '; verification: unrecorded'}${checks}${n.verification?.reportPath ? `; evidence: ${n.verification.reportPath}` : ''}${n.recovery ? `; automatic retries: ${n.recovery.used}/2 (${n.recovery.kind})` : ''}${n.reportPath ? ` — full report: ${n.reportPath}` : ''}${approvalHint(asked.get(n.id))}${recoveryHint(held.get(n.id))}`
     if (!n.output || budget <= 0) return head
     const excerpt = truncate(n.output, Math.min(SETTLE_OUTPUT_CHARS, budget))
     budget -= excerpt.length
