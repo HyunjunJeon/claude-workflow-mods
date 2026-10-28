@@ -31,7 +31,7 @@
 | A2 | 2.1.292, 2.1.300 | Workflow 에이전트가 `agent.spawn` 훅을 지나고 prompt·model을 다시 쓸 수 있음 | `on('agent.spawn')`(`hooks/register.ts:3916`)가 학습 스킬 목록을 모든 생성 프롬프트에 붙인다. `e.workflow`를 확인하지 않으므로 Workflow 에이전트에도 붙는다 | 채택 → P12에 흡수 |
 | A3 | 2.1.295 | `$.ui.notify(text, { title })`: 터미널 밖 알림 채널. `isSent`가 false면 toast로 대체 | 알림은 toast·notice·band 9곳뿐이라 터미널을 보고 있지 않으면 놓친다 | 채택 → X1 |
 | A4 | 2.1.300 | `$.ui.view({ agentId })`: 에이전트의 대화 기록을 보여 줌 | 인스펙터(`hooks/ui/inspector-*.ts`)는 노드 상태와 출력만 보여 준다 | 채택 → X1 |
-| A5 | 2.1.292 | `$.model.complete` 블록에 `cache: true` | Jev 세션 모델 백엔드(`hooks/register.ts:766`)는 같은 system 프롬프트를 매번 보낸다 | 채택 → X2 |
+| A5 | 2.1.292 | `$.model.complete` 블록에 `cache: true` | Jev 세션 모델 백엔드(`hooks/register.ts:766`)는 같은 system 프롬프트를 매번 보낸다 | 보류 (2026-10-28, X2 참고) |
 | A6 | 2.1.293 | `tool.register`의 `isDeferred: false`: 스키마를 처음부터 프롬프트에 둠 | `dag`·`board` 도구는 지연 로딩이라 첫 사용마다 ToolSearch 왕복이 필요하다. 대신 모든 턴에 스키마 토큰이 든다 | 조사 → X2에서 측정 |
 | A7 | 2.1.304 | `tool.check`의 `e.isReadOnly`, `decider: "person"` | `policy.ts`가 읽기 전용 도구를 자체 목록으로 분류한다. 호스트 값과 어긋날 때를 알 수 없다 | 채택 → X3 |
 | A8 | 2.1.299 | `Text.bold` → `weight` | `bold` 90곳, 20개 파일(테스트 포함) | 채택 → X3 |
@@ -86,7 +86,7 @@
 
 ### X2 — 비용과 지연 (A5, A6)
 
-- `jev-cache`(trivial): Jev 세션 모델 호출의 system 블록에 `cache: true`. 기존 Jev 테스트로 호출 형태 확인.
+- `jev-cache`: 보류(2026-10-28). Jev의 system 프롬프트(`hooks/engine/jev.ts`의 `MODEL_SYSTEM`)는 612자, 약 150토큰이다. 캐시 표시는 그 블록까지의 앞부분을 캐시하는데, 앞에 붙는 CLI 신원 블록을 더해도 모델의 최소 캐시 크기(1,024토큰 이상)에 한참 못 미친다. 호스트 타입 설명대로 이런 표시는 아무것도 캐시하지 않으므로(`cache_creation_input_tokens`·`cache_read_input_tokens` 모두 0) 코드를 바꾸지 않았다. 질문 부분(`prompt`)은 요청마다 달라 캐시할 수 없다. system이 최소 크기를 넘게 커지면 다시 본다.
 - A6는 코드 변경 전에 측정한다. `dag` 도구만 `isDeferred: false`로 둔 브랜치와 현재를 shape eval로 비교한다. 실모델 사용량이 들므로 P14 뒤의 D8 재측정과 한 번에 돌린다. 지표: ToolSearch 왕복 수, 첫 `dag start`까지 시간, 턴당 입력 토큰.
 
 ### X3 — 호스트 API 정리 (A7, A8, A9, H3)
