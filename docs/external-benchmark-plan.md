@@ -53,9 +53,9 @@
 
 | ID | 내용 | 이 저장소 현황 | 판정 |
 | --- | --- | --- | --- |
-| O1 | 작업자가 조정자에게 막는 질문(`orchestration ask`)을 보내고 답을 받아 이어감. 결정 게이트(`gate-create`)가 태스크를 막음 | 노드는 질문할 수 없다. 범위가 모호하면 추측하거나 `failed`로 끝나고, 사람이 amend한다 | 조사 → X4 |
-| O2 | 태스크마다 별도 worktree(`worker-start --worktree`)와 `worktree ps` 요약 | 모든 노드가 한 작업 트리를 공유하고, lint가 파일이 겹치지 않게 막는다. 호스트 에이전트 정의에는 `isolation: 'worktree'`가 있고 `$.agent.spawn`은 `cwd`를 받는다 | 조사 → X4 |
-| O3 | 정산된 작업자를 같은 터미널에서 이어 쓰기(reuse), 보존(retain), 해제(release) 중 하나로 반드시 처리 | review-fix 라운드는 생산자를 새로 띄워 맥락을 다시 읽힌다. 플러그인에서 끝난 에이전트에게 메시지를 보내는 API는 아직 찾지 못했다 | 조사 → X4 |
+| O1 | 작업자가 조정자에게 막는 질문(`orchestration ask`)을 보내고 답을 받아 이어감. 결정 게이트(`gate-create`)가 태스크를 막음 | 노드는 질문할 수 없다. 범위가 모호하면 추측하거나 `failed`로 끝나고, 사람이 amend한다 | 완료 (X4 설계 → `aaacbbe`, `docs/design/node-questions.md`) |
+| O2 | 태스크마다 별도 worktree(`worker-start --worktree`)와 `worktree ps` 요약 | 모든 노드가 한 작업 트리를 공유하고, lint가 파일이 겹치지 않게 막는다. 호스트 에이전트 정의에는 `isolation: 'worktree'`가 있고 `$.agent.spawn`은 `cwd`를 받는다 | 보류 (X4, `docs/design/node-isolation.md`의 다시 볼 조건) |
+| O3 | 정산된 작업자를 같은 터미널에서 이어 쓰기(reuse), 보존(retain), 해제(release) 중 하나로 반드시 처리 | review-fix 라운드는 생산자를 새로 띄워 맥락을 다시 읽힌다. 끝난 에이전트는 `$.session.send({ to: { agentId } })`로 같은 id로 재개된다(2026-10-28 헤드리스 확인) | 보류 (O1의 재개 경로로 붙일 수 있음, `docs/design/node-questions.md`) |
 | O4 | 태스크 명세: Target / Change / Constraints / Ownership / Observable acceptance | TASK / DELIVERABLE / SCOPE / VERIFY / STOP WHEN이 같은 역할을 한다. "건드리지 말 것"은 SCOPE 안에 섞여 있다 | 보류 (근거 1건) |
 | O5 | 원격 호스트, SSH, 모바일, 예약 자동화 | 이 플러그인의 범위 밖 | 해당 없음 |
 
@@ -96,7 +96,7 @@
 - `layout-45`(trivial): 대표 터미널 폭의 45% 너비 사례를 `tests/views.test.ts`·`tests/graph.test.ts`에 추가.
 - `stale-end`(trivial): 재시도한 노드가 이전 시도의 `agent.end`로 정산되지 않는 회귀 테스트. 이미 있으면 노드를 지운다.
 
-### X4 — 설계 조사 (O1, O2, O3), 읽기 전용
+### X4 — 설계 조사 (O1, O2, O3), 읽기 전용 — 완료
 
 산출물: `docs/design/node-questions.md`, `docs/design/node-isolation.md`. 코드는 바꾸지 않는다.
 
@@ -104,6 +104,8 @@
 - **O2 노드 격리:** (a) `isolation: 'worktree'` 에이전트 정의를 플러그인이 배포, (b) 플러그인이 `git worktree add` 후 `$.agent.spawn({ cwd })`. 병합 순서, 충돌 시 처리, review-spec이 볼 diff, 검증 명령의 실행 위치, 정리 시점을 비교한다. 2.1.311에서 고쳐진 "백그라운드 서브에이전트가 쓰는 worktree 삭제" 버그는 (a)의 위험 근거다.
 - **O3 재작업 재사용:** 끝난 노드 에이전트에게 메시지를 보낼 플러그인 API가 있는지 타입 선언에서 확인하고, 없으면 보류로 기록한다.
 - 검증 노드가 각 문서의 API 주장을 타입 선언의 줄 번호로 다시 확인한다.
+
+- **결과 (2026-10-28):** 두 설계 문서(`15c0331`)를 쓴 뒤 재개 경로를 헤드리스로 두 번 확인했다(`7326234`). O1을 구현했다(`aaacbbe`). 실제 헤드리스 실행에서 질문한 노드는 `blocked`로 멈췄다. Jev가 확신도 0.88로 기준 0.9에 못 미쳐 기본값을 보냈고, 노드는 같은 에이전트·같은 시도(attempt 1)로 이어 완료됐다. O2는 보류, O3는 O1의 재개 경로를 쓸 수 있어 남은 후보다.
 
 ### X5 — 다른 도구 안에서 실행 (H4), 수동
 
@@ -133,4 +135,5 @@ P12(+A1, A2) → X1 → P13 → P14 → X2(D8 재측정과 함께) → P15a → 
 
 - Claude Code 2.1.287–2.1.289 변경 이력.
 - Herdr의 Claude 통합 버전 6과 10의 관계(문서끼리 맞지 않음).
-- O3에 쓸 플러그인 API(에이전트에게 메시지 보내기) 존재 여부.
+- ~~O3에 쓸 플러그인 API(에이전트에게 메시지 보내기) 존재 여부.~~ 있다: `$.session.send({ to: { agentId } })`(2026-10-28 확인).
+- 대화형 세션과 `claude --resume` 뒤에도 끝난 서브에이전트가 재개되는지(헤드리스에서만 확인했다).
