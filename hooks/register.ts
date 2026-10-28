@@ -72,7 +72,30 @@ const TOOL_NAME = 'mcp__dag-workflow__dag'
 const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
 const BOARDS_SUBDIR = `${DAG_SUBDIR}/boards`
-const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions|board> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline] | learn | learning [status|on|off|prune]]'
+const DAG_FORMS = [
+  'list',
+  'run <file>',
+  'preview <file>',
+  'status <run>',
+  'cancel <run>',
+  'retry <run> [nodes...]',
+  'approve <run>',
+  'reject <run> [reason]',
+  'approval [off|always]',
+  'context',
+  'note <text>',
+  'note rm <number>',
+  'decisions [id]',
+  'sessions',
+  'handoff <run> <session|cancel>',
+  'accept <run>',
+  'inspect <dag|decisions|context|sessions|board>',
+  'enforce [strict|auto|guide|off]',
+  'view [auto|graph|lanes|timeline]',
+  'learn',
+  'learning [status|on|off|prune]',
+].join(' | ')
+const USAGE = `Usage: /dag [${DAG_FORMS}]`
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'auto', 'guide', 'off']
 type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
@@ -3701,7 +3724,7 @@ export function register(on: On, options: PluginOptions) {
     await $.command.register({
       name: 'dag',
       description: 'Manage DAG workflows and enforcement, or learn and manage reusable skills from the whole session',
-      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|auto|guide|off] | learn | learning [status|on|off|prune]]',
+      argumentHint: `[${DAG_FORMS}]`,
       immediate: true,
     })
     return next(e)
@@ -3782,8 +3805,14 @@ export function register(on: On, options: PluginOptions) {
   on('session.receive', async ($, e, next) => {
     const peer = e.origin.kind === 'peer' || e.origin.kind === 'peer-send-message'
     if (e.agentId || !peer || !/(^|\n)\[dag-handoff\](?:\s|$)/.test(e.text)) return next(e)
-    await refreshSessions($)
-    await serialized(() => refreshExternalRuns($))
+    try {
+      await refreshSessions($)
+      await serialized(() => refreshExternalRuns($))
+    } catch (error) {
+      // The host would reject the delivery with the throw; pass it on unconsumed so the handoff text still reaches its reader.
+      $.ui.log(`could not refresh sessions for a handoff delivery: ${message(error)}`)
+      return next(e)
+    }
     $.ui.log('A manual handoff is available. Open /dag sessions or the Sessions pane to inspect and accept it.')
     $.ui.toast(t.toastHandoff, { timeoutMs: ATTENTION_TOAST_MS })
     $.ui.invalidate('ui.render')
@@ -3863,16 +3892,25 @@ export function register(on: On, options: PluginOptions) {
       const recent = workflowContext.requests.slice(-3).map(entry => entry.text)
       userRequest = e.text
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
-      await persistContext($)
+      try {
+        await persistContext($)
+      } catch (error) {
+        $.ui.log(`could not save the workflow context for this prompt: ${message(error)}`)
+      }
       // Under auto each user prompt is decided anew; a plugin's prompt (settle, keep-alive, progress) keeps the mode and
       // the surface. The strict rules hold while Jev is asked; every answer, none included, then sets the mode, and only
       // a decision that throws leaves the gate closed. The surface starts as chat and is set by the same decision.
       if (enforcement === 'auto') {
         turnMode = 'dag'
         turnSurface = 'chat'
-        const decision = await decideTurn($, e.text, recent, next.signal)
-        turnMode = decision.mode
-        turnSurface = decision.surface
+        try {
+          const decision = await decideTurn($, e.text, recent, next.signal)
+          turnMode = decision.mode
+          turnSurface = decision.surface
+        } catch (error) {
+          // The mode stays dag and the surface chat, set above: the gate stays closed and the prompt still enters.
+          $.ui.log(`could not decide the turn mode, keeping the DAG gate closed: ${message(error)}`)
+        }
       }
     }
     // The protocol rides on every prompt. The block (up to 8,000 characters) goes only on a user prompt whose run and
@@ -3899,7 +3937,11 @@ export function register(on: On, options: PluginOptions) {
     if (block && result.drop === undefined) block.received()
     if (result.drop === undefined && userOrigin && next.origin.plugin === 'engine' && e.text.trim()) {
       learningTurnRequested = true
-      await collectLearning($, 'user', e.text)
+      try {
+        await collectLearning($, 'user', e.text)
+      } catch (error) {
+        $.ui.log(`could not collect session learning for this prompt: ${message(error)}`)
+      }
       if (learningEnabled && learningRoot) {
         try {
           const now = await $.clock.now()
@@ -3920,7 +3962,7 @@ export function register(on: On, options: PluginOptions) {
       if (result.agentId) learningAgents.add(result.agentId)
       return result
     }
-    if (!learningEnabled || !learningRoot || eligibleSkills(learningLibrary, projectRoot).length === 0) return next(e)
+    if (e.workflow || !learningEnabled || !learningRoot || eligibleSkills(learningLibrary, projectRoot).length === 0) return next(e)
     return next({ ...e, prompt: `${e.prompt}\n\n${learningCatalog(learningLibrary, projectRoot, learnedSkillsDir)}` })
   })
 
@@ -3942,7 +3984,13 @@ export function register(on: On, options: PluginOptions) {
     const worker = ownNodeOfAgent(e.agentId ?? call?.agentId)
     // The answer stays with the person: mark the node worker that will wait for it.
     const asked = async (why: string) => {
-      if (call) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+      if (call) {
+        try {
+          await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+        } catch (error) {
+          $.ui.log(`could not record the permission wait for ${e.tool}: ${message(error)}`)
+        }
+      }
       if (!interactive && worker && noteAsk(worker.run.runId, worker.nodeId, worker.attempt, e.tool)) {
         $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
       }

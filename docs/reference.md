@@ -30,6 +30,7 @@ claude --plugin-dir /path/to/this-project
 /dag run flows/review.yaml      JSON 또는 YAML 정의 파일 실행
 /dag preview <file>             정의 파일을 실행하지 않고 단계·모델·쓰기 충돌·경고 미리보기
 /dag                            DAG 패널 열기
+/dag open                       `/dag`와 같음(DAG 패널 열기)
 /dag list                       이 프로젝트의 실행 목록
 /dag status <run_id>            노드별 상태
 /dag cancel <run_id>            실행 취소(실행 중인 노드 에이전트 중단)
@@ -77,6 +78,8 @@ claude --plugin-dir /path/to/this-project
 - `~/.claude/dag-workflow/learning/pending.json`: 스킬 파일과 인덱스 갱신을 끝내기 위한 복구 기록. 정상 저장 후 제거합니다.
 
 다음 사용자 프롬프트와 서브에이전트의 시작 프롬프트에는 적용 가능한 스킬의 설명과 파일 경로를 제공합니다. 모델은 관련 스킬만 `Read`로 읽습니다. 실행 중 새로 만든 스킬도 이 경로로 사용할 수 있으며, `Skill` 목록에서 인식하는 시점은 호스트의 스킬 검색에 따릅니다. 프로젝트 전용 스킬은 같은 프로젝트에서만 안내하고, 일반 기법은 `global` 범위로 여러 프로젝트에서 재사용할 수 있습니다.
+
+Workflow 도구가 시작하는 에이전트에는 이 목록을 제공하지 않습니다. Workflow 스크립트가 에이전트의 프롬프트를 직접 쓰기 때문입니다.
 
 성공한 `Read` 또는 `Skill` 호출을 사용으로 기록합니다. 사용 기회는 적용 가능한 사용자 프롬프트마다 증가하고, 스킬을 사용하면 미사용 기회 수를 초기화합니다. `learning_min_opportunities`번의 기회 동안 사용하지 않은 스킬은 보관합니다. `learning_max_skills`를 넘으면 한 번 이상 노출된 스킬 중 사용량이 적고 오래된 것부터 보관하며, 아직 노출되지 않은 새 스킬은 보호합니다.
 
@@ -798,6 +801,7 @@ Claude Code는 mod가 요청 없이 연 패널을 좁은 터미널(144열 미만
 | `enforcement`                  | `auto`    | 메인 대화의 DAG 강제 수준([강제](#강제)). `strict`, `auto`, `guide`, `off` 중 하나. `auto`는 Jev가 프롬프트마다 DAG와 직접 실행을 고르고(실행 방식, 확신도 0.8 이상의 DAG 판단만 `strict` 규칙, 확신도 미달이나 Jev를 쓸 수 없으면 직접 실행), `/dag enforce`로 세션 중에 바꿈 |
 | `language`                     | `en`      | 패널 언어(`en`, `ko`)                                                                                                 |
 | `max_concurrent`               | `8`       | 실행 하나에서 동시에 도는 노드 수                                                                                               |
+| `main_allowed_tools`           | `[]`      | 엄격(strict) 강제와 `auto`의 DAG 턴에서 읽기 전용·오케스트레이션 도구 외에 메인 대화가 계속 호출할 수 있는 도구 이름 목록 |
 | `retention_days`               | `14`      | 시작 시 이보다 오래된 산출물 삭제([보관 기간](#보관-기간)). `0`이면 모두 보관                                                                 |
 | `node_messages`                | `compact` | 노드 서브에이전트가 `SubagentHandback`으로 메인 세션에 보내는 보고서 처리. `compact`는 짧은 진행 알림으로 바꾸고(전체 보고서는 실행 스냅샷에 보관), `full`은 그대로 둡니다 |
 | `start_approval`               | `off`     | `always`면 대화형 세션에서 모델이 시작한 실행을 만들되 시작하지 않고 사용자의 승인을 기다림([실행 규칙](#실행-규칙)). 사용자가 입력한 `/dag run`과 비대화형 세션은 기다리지 않음. `/dag approval`로 덮어쓴 값은 다음 `/reload-plugins`까지만 유지되고, `off`·`always`가 아닌 값은 `off`로 처리 |
