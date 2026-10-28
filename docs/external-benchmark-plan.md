@@ -32,10 +32,10 @@
 | A3 | 2.1.295 | `$.ui.notify(text, { title })`: 터미널 밖 알림 채널. `isSent`가 false면 toast로 대체 | 알림은 toast·notice·band 9곳뿐이라 터미널을 보고 있지 않으면 놓친다 | 채택 → X1 |
 | A4 | 2.1.300 | `$.ui.view({ agentId })`: 에이전트의 대화 기록을 보여 줌 | 인스펙터(`hooks/ui/inspector-*.ts`)는 노드 상태와 출력만 보여 준다 | 채택 → X1 |
 | A5 | 2.1.292 | `$.model.complete` 블록에 `cache: true` | Jev 세션 모델 백엔드(`hooks/register.ts:766`)는 같은 system 프롬프트를 매번 보낸다 | 보류 (2026-10-28, X2 참고) |
-| A6 | 2.1.293 | `tool.register`의 `isDeferred: false`: 스키마를 처음부터 프롬프트에 둠 | `dag`·`board` 도구는 지연 로딩이라 첫 사용마다 ToolSearch 왕복이 필요하다. 대신 모든 턴에 스키마 토큰이 든다 | 조사 → X2에서 측정 |
-| A7 | 2.1.304 | `tool.check`의 `e.isReadOnly`, `decider: "person"` | `policy.ts`가 읽기 전용 도구를 자체 목록으로 분류한다. 호스트 값과 어긋날 때를 알 수 없다 | 채택 → X3 |
-| A8 | 2.1.299 | `Text.bold` → `weight` | `bold` 90곳, 20개 파일(테스트 포함) | 채택 → X3 |
-| A9 | 2.1.305 | 고정(docked) 패널 너비가 터미널의 45% 이하로 제한 | 레이아웃은 너비를 받지만 45% 폭 사례를 테스트하는지는 확인하지 않았다 | 채택 → X3 (테스트만) |
+| A6 | 2.1.293 | `tool.register`의 `isDeferred: false`: 스키마를 처음부터 프롬프트에 둠 | `dag`·`board` 도구는 지연 로딩이라 첫 사용마다 ToolSearch 왕복이 필요하다. 대신 모든 턴에 스키마 토큰이 든다 | 보류 (2026-10-28, X2 참고) |
+| A7 | 2.1.304 | `tool.check`의 `e.isReadOnly`, `decider: "person"` | `policy.ts`가 읽기 전용 도구를 자체 목록으로 분류한다. 호스트 값과 어긋날 때를 알 수 없다 | 완료 (X3) |
+| A8 | 2.1.299 | `Text.bold` → `weight` | `bold` 90곳, 20개 파일(테스트 포함) | 완료 (X3) |
+| A9 | 2.1.305 | 고정(docked) 패널 너비가 터미널의 45% 이하로 제한 | 레이아웃은 너비를 받지만 45% 폭 사례를 테스트하는지는 확인하지 않았다 | 완료 (X3, 테스트만) |
 | A10 | 2.1.300 | `prompt.change` + `virtualText`: 입력 중 장식 | 라우팅 결과(DAG/보드/직접)를 입력 중에 미리 보여 줄 수 있지만 입력할 때마다 Jev를 부르면 비용이 든다 | 보류 |
 | A11 | 2.1.299 | `$.session.identity()` | 세션 레지스트리·인계 잠금이 sessionId만 쓴다. 이점이 확인되지 않았다 | 보류 |
 | A12 | 2.1.302, 2.1.311 | prompt/agent 훅 동시 실행 상한(이벤트당 12, 세션 24) | 이 플러그인은 settings 훅이 아니라 mod 훅과 `$.model.complete`를 쓴다 | 해당 없음 |
@@ -46,7 +46,7 @@
 | --- | --- | --- | --- |
 | H1 | 상태를 `working`/`blocked`/`done`/`idle`/`unknown`로 나누고, `agent explain --json`이 판정 근거(규칙, 대체 사유)를 보여 줌 | 패널은 `⚠ possibly stalled`만 보여 준다. 세 임계값(`STALL_WAIT_MS`, `STALL_TOKEN_MS`, `STALL_COARSE_MS`) 중 무엇에 걸렸는지 알 수 없다 | 채택 → X1 (인스펙터에 근거 한 줄) |
 | H2 | 에이전트가 답을 기다리면 알림 | 권한 대기는 toast·status·band로만 알린다(`hooks/register.ts:694`) | 채택 → X1 (A3로 구현) |
-| H3 | `agent.wait`가 대상 pane의 현재 점유자를 고정해, 교체된 에이전트가 기다림을 끝내지 못하게 함 | 같은 원칙(재시도한 노드에 이전 시도의 종료 이벤트가 섞이지 않음)이 `agentRuns`로 구현되어 있으나 회귀 테스트가 있는지 확인하지 않았다 | 채택 → X3 (테스트만) |
+| H3 | `agent.wait`가 대상 pane의 현재 점유자를 고정해, 교체된 에이전트가 기다림을 끝내지 못하게 함 | 같은 원칙(재시도한 노드에 이전 시도의 종료 이벤트가 섞이지 않음)이 `agentRuns`로 구현되어 있으나 회귀 테스트가 있는지 확인하지 않았다 | 완료 (X3, 테스트만) |
 | H4 | `herdr integration install claude`가 `SessionStart` 훅을 설치하고, Claude 상태는 화면을 읽어 판정 | 고정 패널과 band가 화면을 바꾸므로 Herdr의 화면 판정이 틀릴 수 있다 | 조사 → X5 |
 
 ### Orca
@@ -87,9 +87,9 @@
 ### X2 — 비용과 지연 (A5, A6)
 
 - `jev-cache`: 보류(2026-10-28). Jev의 system 프롬프트(`hooks/engine/jev.ts`의 `MODEL_SYSTEM`)는 612자, 약 150토큰이다. 캐시 표시는 그 블록까지의 앞부분을 캐시하는데, 앞에 붙는 CLI 신원 블록을 더해도 모델의 최소 캐시 크기(1,024토큰 이상)에 한참 못 미친다. 호스트 타입 설명대로 이런 표시는 아무것도 캐시하지 않으므로(`cache_creation_input_tokens`·`cache_read_input_tokens` 모두 0) 코드를 바꾸지 않았다. 질문 부분(`prompt`)은 요청마다 달라 캐시할 수 없다. system이 최소 크기를 넘게 커지면 다시 본다.
-- A6는 코드 변경 전에 측정한다. `dag` 도구만 `isDeferred: false`로 둔 브랜치와 현재를 shape eval로 비교한다. 실모델 사용량이 들므로 P14 뒤의 D8 재측정과 한 번에 돌린다. 지표: ToolSearch 왕복 수, 첫 `dag start`까지 시간, 턴당 입력 토큰.
+- A6: 보류(2026-10-28). `dag` 도구만 `isDeferred: false`로 둔 변경과 D8을 같은 명령(strict 강제, 시나리오당 2샘플, 16세션)으로 비교했다(`eval/baselines/d8-a6-baseline.md`). ToolSearch 호출은 2회에서 0회로 줄었다. 첫 `dag start`까지 시간 중앙값은 24초에서 25초, 메시지당 입력 토큰 중앙값은 55,114에서 58,210(+5.6%), 세션당 입력 토큰 중앙값은 553,557에서 549,685였다. shape 일치는 13/16에서 15/16이다. 없애는 왕복이 드물고 모든 턴이 스키마 토큰을 내므로 보류한다. ToolSearch 왕복이 흔해지면 다시 본다.
 
-### X3 — 호스트 API 정리 (A7, A8, A9, H3)
+### X3 — 호스트 API 정리 (A7, A8, A9, H3) — 완료
 
 - `bold-weight`(trivial, 기계적): `bold: true` → `weight`. 트리 비교 테스트를 함께 갱신. 파일이 20개라 lint 파일 수 경고가 날 것이므로 D4의 `slice: true`를 쓴다.
 - `readonly-crosscheck`(standard): `policy.ts`의 분류와 `e.isReadOnly`가 다를 때 debug 로그와 판단 기록. 동작은 바꾸지 않고 한 단계 관찰한 뒤 정한다.

@@ -299,6 +299,31 @@ export function mainLoopVerdict(tool: string, input: Readonly<Record<string, unk
   return { allowed: false, reason: `${tool} changes state or delegates work` }
 }
 
+const DISAGREEMENT_TEXT_LIMIT = 80
+
+// Observation only: where the host's `isReadOnly` (the tool's own word) and the plugin's read-only judgment of a main-conversation call differ.
+// Covers Bash and tools outside the main-loop list; returns the debug text, or undefined when they agree or the plugin makes no read-only judgment.
+export function readOnlyDisagreement(tool: string, input: Readonly<Record<string, unknown>>, hostReadOnly: boolean, extraAllowed: ReadonlySet<string>): string | undefined {
+  let plugin: string
+  if (tool === 'Bash') {
+    const problem = readOnlyBashProblem(typeof input.command === 'string' ? input.command : '')
+    if (problem === undefined) {
+      if (hostReadOnly) return undefined
+      plugin = 'read-only'
+    } else {
+      if (!hostReadOnly) return undefined
+      plugin = `refused: ${problem.slice(0, DISAGREEMENT_TEXT_LIMIT)}`
+    }
+  } else {
+    if (MAIN_LOOP_TOOLS.has(tool) || extraAllowed.has(tool) || !hostReadOnly) return undefined
+    const verdict = mainLoopVerdict(tool, input, extraAllowed)
+    // The report-file Write exception allows a write; that is no read-only judgment to compare.
+    if (verdict.allowed) return undefined
+    plugin = `refused: ${verdict.reason.slice(0, DISAGREEMENT_TEXT_LIMIT)}`
+  }
+  return `read-only disagreement: ${tool} host=${hostReadOnly ? 'read-only' : 'not stated'} plugin=${plugin}`
+}
+
 export function denyMessage(tool: string, reason: string): string {
   return [
     `dag-workflow refused ${tool} in the main conversation: ${reason}.`,

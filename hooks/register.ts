@@ -17,7 +17,7 @@ import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
 import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
-import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
+import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, readOnlyDisagreement, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
 import {
   amendRun,
   approveRun,
@@ -3489,7 +3489,7 @@ function drawLine({ Box, Text }: Pick<Elements[RenderSurface], 'Box' | 'Text'>, 
     children: segments.map(s =>
       Text({
         ...(s.color ? { color: s.color } : {}),
-        ...(s.bold ? { bold: true } : {}),
+        ...(s.bold ? { weight: 'semibold' as const } : {}),
         ...(s.dim ? { dimColor: true } : {}),
         wrap: 'truncate-end',
         children: [s.text],
@@ -4081,6 +4081,12 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('tool.check', async ($, e, next) => {
+    // Observation only: no verdict below depends on this line.
+    if (!e.agentId && gatesMainLoop(enforcement, turnMode) && typeof e.input === 'object' && e.input !== null) {
+      // SAFETY: the guard above proved e.input is a non-null object; the helper reads only string-keyed fields.
+      const disagreement = readOnlyDisagreement(e.tool, e.input as Readonly<Record<string, unknown>>, e.isReadOnly === true, extraAllowed)
+      if (disagreement) debug($, disagreement)
+    }
     const decided = await next(e)
     if (decided.decision !== 'ask') return decided
     const call = e.tool_use_id ? openCalls.get(e.tool_use_id) : undefined

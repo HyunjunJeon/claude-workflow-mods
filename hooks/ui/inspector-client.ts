@@ -11,7 +11,7 @@ const InspectorClient: ClientModule<InspectorModel, number> = (model, surface) =
   return Box({
     flexDirection: 'column',
     children: [
-      Text({ bold: true, wrap: 'wrap', children: [model.title] }),
+      Text({ weight: 'semibold', wrap: 'wrap', children: [model.title] }),
       Text({ children: [' '] }),
       ...model.lines.map((line, index) => {
         if (line.length === 0) return Text({ children: [' '] })
@@ -27,7 +27,7 @@ const InspectorClient: ClientModule<InspectorModel, number> = (model, surface) =
           flexDirection: 'row',
           children: line.map(segment => Text({
             ...(segment.color ? { color: segment.color } : {}),
-            ...(segment.bold ? { bold: true } : {}),
+            ...(segment.bold ? { weight: 'semibold' as const } : {}),
             ...(segment.dim ? { dimColor: true } : {}),
             wrap: 'truncate-end',
             children: [segment.text],

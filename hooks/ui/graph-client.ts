@@ -31,7 +31,7 @@ const GraphClient: ClientModule<GraphModel, true> = (model, surface) => {
           children: line.map(segment =>
             Text({
               ...(segment.color ? { color: segment.color } : {}),
-              ...(segment.bold ? { bold: true } : {}),
+              ...(segment.bold ? { weight: 'semibold' as const } : {}),
               ...(segment.dim ? { dimColor: true } : {}),
               wrap: 'truncate-end',
               children: [segment.text],
