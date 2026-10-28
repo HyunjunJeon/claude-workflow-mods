@@ -625,7 +625,7 @@ jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))
 `blocked` 노드는 검증을 하지 않고 질문을 담은 채 기다립니다. 답은 다음 중 하나에서 옵니다.
 
 1. 사용자: DAG 패널의 선택지 버튼 또는 `/dag answer <run> <node> <text>`. 나머지 단어는 공백 하나로 이어 붙입니다. 인자가 모자라면 `Usage: /dag answer <run> <node> <text>`를 돌려주고, 입력창 밖에서 오면 `This action requires a user command or pane control.`로 거부합니다. 실행을 시작하는 명령으로 취급해 메인 턴이 바쁘면 그 턴이 끝난 뒤 새 시도가 시작됩니다.
-2. 메인 모델: `dag` 도구의 `answer` 액션.
+2. 메인 모델: `dag` 도구의 `answer` 액션. 대화형 세션에서는 질문이 생기면 메인 대화에 알림 프롬프트를 한 번 보냅니다. 이 프롬프트는 메인 턴이 끝난 뒤 들어가므로, 그 사이에 질문에 답했거나 질문이 사라졌으면 보내지 않고 버립니다.
 3. Jev: 비대화형 세션에서만, 선택지가 있고 `Needs: person`이 아닌 질문에 대해 `jev_recovery_confidence` 이상의 확신도로 선택지 하나를 고릅니다. 선택지가 없거나 `Needs: person`이면 Jev를 부르지 않습니다. 이 판단은 `/dag decisions`와 패널의 Decisions 탭에 종류 `question`(한국어 패널은 **질문**), 대상은 노드 id로 남습니다.
 4. 기본값: 질문 후 15분 안에 답이 없으면 `Default`로 답합니다(답한 주체 `timeout`). 비대화형 세션처럼 물어볼 사람이 없으면 기다리지 않고 바로 `Default`로 답합니다(답한 주체 `default`).
 

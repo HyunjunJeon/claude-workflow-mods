@@ -1914,6 +1914,17 @@ async function waitForAnswer($: EngineInterface, runId: string, nodeId: string):
   questionTimers.set(questionKey(runId, nodeId), timer)
 }
 
+// The question notices this session submitted, by text, while their questions are open. A plugin's prompt runs once the
+// session is idle, so a notice can wait behind a busy main turn while that turn answers the question: on 2026-10-28 one
+// arrived after the model had answered it from the node's Output, and asked the model to answer again.
+const questionNotices = new Map<string, { runId: string; nodeId: string; askedAt: number }>()
+const ANSWERED_NOTICE = 'the question was answered or withdrawn before this notice ran'
+
+function questionStillOpen(notice: { runId: string; nodeId: string; askedAt: number }): boolean {
+  const node = runs.get(notice.runId)?.nodes.find(current => current.id === notice.nodeId)
+  return node?.state === 'blocked' && node.question?.askedAt === notice.askedAt
+}
+
 // A node that just asked: besides the wait, an interactive session tells the main conversation once (the model may answer
 // unless the question needs the person) and the person.
 async function nodeBlocked($: EngineInterface, runId: string, nodeId: string): Promise<void> {
@@ -1921,9 +1932,12 @@ async function nodeBlocked($: EngineInterface, runId: string, nodeId: string): P
   const run = runs.get(runId)
   const question = run?.nodes.find(node => node.id === nodeId)?.question
   if (!interactive || !run || !question) return
+  const text = questionMessage(run, nodeId, question, TOOL_NAME, QUESTION_TIMEOUT_MS / 60_000)
+  for (const [pending, notice] of questionNotices) if (!questionStillOpen(notice)) questionNotices.delete(pending)
+  questionNotices.set(text, { runId, nodeId, askedAt: question.askedAt })
   // Plugin submissions run once idle; never await them in the queue.
-  submitRunNews($, run, questionMessage(run, nodeId, question, TOOL_NAME, QUESTION_TIMEOUT_MS / 60_000)).then(result => {
-    if ('drop' in result) throw new Error(result.drop)
+  submitRunNews($, run, text).then(result => {
+    if ('drop' in result && result.drop !== ANSWERED_NOTICE) throw new Error(result.drop)
   }).catch(error => {
     $.ui.log(`could not tell the session that ${run.runId}/${nodeId} asks a question: ${message(error)}`)
   })
@@ -4261,6 +4275,11 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    const notice = e.origin.kind === 'plugin' ? questionNotices.get(e.text) : undefined
+    if (notice && !questionStillOpen(notice)) {
+      questionNotices.delete(e.text)
+      return { drop: ANSWERED_NOTICE }
+    }
     const userOrigin = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
     if (next.origin.plugin === 'engine' && userOrigin && e.text.trim()) {
       const recent = workflowContext.requests.slice(-3).map(entry => entry.text)

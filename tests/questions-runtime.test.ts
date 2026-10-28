@@ -335,3 +335,21 @@ test('a session restarted without a person decides a question the earlier sessio
   await finish($, h, 'agent-1')
   expect(nodeA(h, runId)).toMatchObject({ state: 'completed', attempt: 1 })
 })
+
+// The host runs a plugin's prompt once the session is idle, so a notice can pass prompt.submit after the question was
+// answered; the test kit runs it at once, so the late pass is the same notice submitted again after the answer.
+test('a question notice that passes after the question was answered is dropped, and an open one still arrives', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, DEFINITION)
+  await ask($, h, ['Options: json | yaml'])
+  const notice = questionNews(h)[0]?.text ?? ''
+  expect(notice).toContain(QUESTION)
+  await dag($, { action: 'answer', run_id: runId, node_id: 'a', answer: 'yaml' })
+
+  expect(await $.prompt.submit({ text: notice, wait: false, origin: { kind: 'plugin', name: 'dag-workflow' } })).toEqual({ drop: 'the question was answered or withdrawn before this notice ran' })
+  expect(questionNews(h)).toHaveLength(1)
+
+  await ask($, h, ['Options: json | yaml'])
+  expect(questionNews(h)).toHaveLength(2)
+})
