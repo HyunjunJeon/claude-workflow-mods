@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { expiredRuns } from '../hooks/engine/retention.ts'
 import { createRun, markFinished, markRunning } from '../hooks/engine/run.ts'
-import { chunkArrived, finalReport, fromTranscript, isStalled, stepStarted, toolStarted, STALL_COARSE_MS, STALL_TOKEN_MS, STALL_WAIT_MS } from '../hooks/ui/activity.ts'
+import { chunkArrived, finalReport, fromTranscript, isStalled, stallReason, stepStarted, toolStarted, STALL_COARSE_MS, STALL_TOKEN_MS, STALL_WAIT_MS } from '../hooks/ui/activity.ts'
 import { stringsFor } from '../hooks/ui/i18n.ts'
 import { width } from '../hooks/ui/text.ts'
 import { activityLine, buildPane, buildTasks, compactActivity, type Line } from '../hooks/ui/view-model.ts'
@@ -119,4 +119,31 @@ test('retention prunes only old settled runs of other sessions', async () => {
   expect(expiredRuns([oldDone, oldRunning, mineOld], now, 14, 's1').map(r => r.runId)).toEqual(['old'])
   expect(expiredRuns([oldDone], now, 0, 's1')).toEqual([])
   expect(expiredRuns([oldDone], now, 30, 's1')).toEqual([])
+})
+
+test('stallReason names the rule that fired one millisecond past its limit and nothing at the limit', async () => {
+  const talking = chunkArrived(stepStarted(0), { kind: 'text', text: 'x' }, 10)!
+  const coarse = { ...stepStarted(0), coarse: true as const }
+  const cases = [
+    { activity: talking, at: 10 + STALL_TOKEN_MS, reason: { rule: 'token', quietMs: STALL_TOKEN_MS + 1, limitMs: STALL_TOKEN_MS } },
+    { activity: stepStarted(0), at: STALL_WAIT_MS, reason: { rule: 'wait', quietMs: STALL_WAIT_MS + 1, limitMs: STALL_WAIT_MS } },
+    { activity: coarse, at: STALL_COARSE_MS, reason: { rule: 'coarse', quietMs: STALL_COARSE_MS + 1, limitMs: STALL_COARSE_MS } },
+  ]
+  for (const { activity, at, reason } of cases) {
+    expect(stallReason(activity, at)).toBeUndefined()
+    expect(isStalled(activity, at)).toBe(false)
+    expect(stallReason(activity, at + 1)).toEqual(reason)
+    expect(isStalled(activity, at + 1)).toBe(true)
+  }
+  expect(stallReason(toolStarted('Bash', 0), 3_600_000)).toBeUndefined()
+  expect(isStalled(toolStarted('Bash', 0), 3_600_000)).toBe(false)
+})
+
+test('an expanded running card names the stall rule, in both languages, only while stalled', async () => {
+  const run = markRunning(fanIn('r2', 's2', 0), 'a', 'agent-a', 0)
+  const activity = new Map([['agent-a', stepStarted(0)]])
+  const card = (now: number, t: typeof EN) => buildPane([run], { runIndex: 0, details: false, prefs: {} }, now, { activity, t }).cards[0]!.lines.map(text)
+  expect(card(2 * 60_000, EN)).toContain('no first token for 2m 00s (limit 1m 30s)')
+  expect(card(2 * 60_000, KO)).toContain('2m 00s 동안 첫 토큰 없음 (한도 1m 30s)')
+  expect(card(STALL_WAIT_MS, EN).some(l => l.includes('limit'))).toBe(false)
 })

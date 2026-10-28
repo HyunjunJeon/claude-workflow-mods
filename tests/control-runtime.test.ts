@@ -113,7 +113,7 @@ for (const scenario of ['missing-input', 'clarification', 'permanent', 'low-conf
   })
 }
 
-test('the pinned status line follows a run, clears when it settles, and routine completion raises no toast', async ($, on) => {
+test('the pinned status line follows a run, clears when it settles, and routine completion raises no toast', { options: { notify: false } }, async ($, on) => {
   const h = harness(on)
   await boot($)
   await start($, { key: 'status', nodes: [{ id: 'a', prompt: 'Produce artifact', verify: CHECK }] })

@@ -145,6 +145,26 @@ function debug($: EngineInterface, text: string): void {
   $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
 }
 
+const NOTIFY_TITLE = 'dag-workflow'
+
+// Fire and forget: a hook's verdict never waits on the notification, and a refused or rejected call never reaches it.
+// `fallbackToast` is for a case with no toast of its own, so the text still reaches the person.
+function raiseNotify($: EngineInterface, text: string, fallbackToast: boolean): void {
+  if (!notifyEnabled) return
+  const fallback = (why: string) => {
+    debug($, `notification not delivered (${why})`)
+    if (fallbackToast) $.ui.toast(text, { timeoutMs: ATTENTION_TOAST_MS })
+  }
+  try {
+    $.ui.notify(text, { title: NOTIFY_TITLE }).then(
+      result => { if (!result.isSent) fallback(result.reason) },
+      error => fallback(message(error)),
+    )
+  } catch (error) {
+    fallback(message(error))
+  }
+}
+
 // The strict gate must outlive the conversation's process, while the conversation still holds the planning skill.
 // `planningLoaded` is the fast in-process copy, and two stores carry it past a restart of the plugin's code:
 // - /reload-plugins re-runs register() and starts every module variable over; the host keeps $.state across it.
@@ -634,6 +654,7 @@ let metadataWrites: Promise<unknown> = Promise.resolve()
 let decisionSequence = 0
 let sessionClosed = false
 let autoRecovery = true
+let notifyEnabled = true
 let inspectorView: 'dag' | 'board' | InspectorView = 'dag'
 let inspectorPage = 0
 let inspectorColumns = FALLBACK_GRAPH_COLUMNS
@@ -709,6 +730,7 @@ async function markWaiting($: EngineInterface, agentId: string, tool: string, to
     waiting.set(agentId, { tool, since, ...(toolUseId ? { toolUseId } : {}) })
     debug($, `${owner.run.runId}/${owner.nodeId} waits for a permission answer (${tool})`)
     $.ui.toast(text, { timeoutMs: ATTENTION_TOAST_MS })
+    raiseNotify($, text, false)
     updateStatus($)
     $.ui.invalidate('ui.render')
   }
@@ -1503,6 +1525,9 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
       if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
         $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
       }
+      if (!run.cancelReason) {
+        raiseNotify($, failed.length > 0 ? t.notifySettledFailed(run.name, failed.length) : t.notifySettledCompleted(run.name, run.nodes.length), failed.length === 0)
+      }
     }
     announce($, run)
     return run
@@ -1791,6 +1816,7 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   if (runs.get(runId)?.nodes.find(current => current.id === node.id)?.state === 'failed') {
     $.ui.toast(verification && verification.status !== 'passed' ? t.toastVerificationFailed(run.name, node.id) : t.toastNodeFailed(run.name, node.id), { timeoutMs: ATTENTION_TOAST_MS })
     failureToasts.set(runId, (failureToasts.get(runId) ?? new Set()).add(node.id))
+    if (autoRecovery && (runs.get(runId)?.nodes.find(current => current.id === node.id)?.recovery?.used ?? 0) >= 1) raiseNotify($, t.notifyRecoveryStopped(run.name, node.id), false)
   }
   $.ui.log(`${run.name} › ${node.id}: ${outcome.state}${outcome.error ? ` (${outcome.error})` : ''}`)
   const after = await tick($, runId)
@@ -3313,6 +3339,23 @@ function shownRuns(): Run[] {
   return visibleRuns([...runs.values()], sessionId)
 }
 
+// Called straight from the press: the host refuses a view that does not answer the person's own input.
+async function openTranscript($: EngineInterface, node: NodeRun): Promise<void> {
+  if (!node.agentId) {
+    $.ui.toast(t.toastNoTranscript(node.id), { timeoutMs: ATTENTION_TOAST_MS })
+    return
+  }
+  const refused = (reason: string) => $.ui.toast(t.toastTranscriptDenied(node.id, reason, node.reportPath), { timeoutMs: ATTENTION_TOAST_MS })
+  try {
+    const shown = await $.ui.view({ agentId: node.agentId })
+    if (shown.deny !== undefined) refused(shown.deny)
+  } catch (error) {
+    const reason = message(error)
+    debug($, `transcript view failed (${reason})`)
+    refused(reason)
+  }
+}
+
 function shownRun(): Run | undefined {
   const shown = shownRuns()
   return shown[clampRunIndex(view.runIndex, shown.length)]
@@ -3467,6 +3510,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     step()
     redraw()
   }
+  const transcriptNode = view.selected ? shownRun()?.nodes.find(node => node.id === view.selected) : undefined
   const footer = [
     gap(),
     Box({
@@ -3485,6 +3529,9 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
         }),
         Button({ key: 'view-switch', label: t.viewSwitch, hotkey: 'v', plain: true, onPress: () => cycleView($) }),
         Button({ key: 'fold', label: view.unfold ? t.fold : t.unfold, hotkey: 'f', plain: true, onPress: act(() => (view = { ...view, unfold: !view.unfold })) }),
+        ...(transcriptNode
+          ? [Button({ key: 'transcript', label: t.transcript, hotkey: 'o', plain: true, onPress: () => openTranscript($, transcriptNode) })]
+          : []),
         ...(shown.length > 1
           ? [Button({ key: 'completed-runs', label: t.completedToggle, hotkey: 'c', plain: true, onPress: act(() => (view = { ...view, showCompleted: !view.showCompleted })) })]
           : []),
@@ -3581,6 +3628,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
 export function register(on: On, options: PluginOptions) {
   language = options.language === 'ko' ? 'ko' : 'en'
   autoRecovery = options.auto_recovery !== false
+  notifyEnabled = options.notify !== false
   jevEnabled = options.jev_enabled !== false
   const jevLimitOption = options.jev_max_calls
   if (typeof jevLimitOption === 'number' && Number.isInteger(jevLimitOption) && jevLimitOption >= 1 && jevLimitOption <= 1000) jevMaxCalls = jevLimitOption

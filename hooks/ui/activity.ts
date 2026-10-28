@@ -65,9 +65,22 @@ export function fromTranscript(rows: TranscriptRow[], previous: Activity | undef
   }
 }
 
+export type StallReason = { rule: 'coarse' | 'wait' | 'token'; quietMs: number; limitMs: number }
+
+export function stallReason(activity: Activity, now: number): StallReason | undefined {
+  if (activity.coarse) {
+    const quietMs = now - activity.since
+    return activity.phase === 'waiting' && quietMs > STALL_COARSE_MS ? { rule: 'coarse', quietMs, limitMs: STALL_COARSE_MS } : undefined
+  }
+  if (activity.phase === 'tool') return undefined
+  if (activity.phase === 'waiting') {
+    const quietMs = now - activity.since
+    return quietMs > STALL_WAIT_MS ? { rule: 'wait', quietMs, limitMs: STALL_WAIT_MS } : undefined
+  }
+  const quietMs = now - activity.lastAt
+  return quietMs > STALL_TOKEN_MS ? { rule: 'token', quietMs, limitMs: STALL_TOKEN_MS } : undefined
+}
+
 export function isStalled(activity: Activity, now: number): boolean {
-  if (activity.coarse) return activity.phase === 'waiting' && now - activity.since > STALL_COARSE_MS
-  if (activity.phase === 'tool') return false
-  if (activity.phase === 'waiting') return now - activity.since > STALL_WAIT_MS
-  return now - activity.lastAt > STALL_TOKEN_MS
+  return stallReason(activity, now) !== undefined
 }

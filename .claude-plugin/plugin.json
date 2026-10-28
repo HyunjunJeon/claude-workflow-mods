@@ -65,6 +65,12 @@
       "description": "Use confident Jev failure classification to retry within the original scope, at most two extra attempts per node; implementation fixes may use Opus. A reviewer FAIL verdict is never retried: once per run the producers its findings cite rerun with them, then the reviewers",
       "default": true
     },
+    "notify": {
+      "type": "boolean",
+      "title": "Native notifications",
+      "description": "Raise a native notification when a run of this session settles (not a cancelled one), when a node starts waiting for a permission answer, and when automatic recovery stops retrying a node. The in-pane toast is the fallback: it still shows when the notification is not sent or fails",
+      "default": true
+    },
     "jev_enabled": {
       "type": "boolean",
       "title": "Jev automatic decisions",

@@ -2,7 +2,7 @@ import { edgesOf, layers } from '../engine/graph.ts'
 import { STATUS_PREFIX } from '../engine/node-prompt.ts'
 import { awaitingApproval } from '../engine/run.ts'
 import type { NodeRun, NodeState, Run, RunStatus } from '../engine/types.ts'
-import { isStalled, type Activity } from './activity.ts'
+import { isStalled, stallReason, type Activity } from './activity.ts'
 import type { GraphModel, GraphNode, ViewKind } from './graph-model.ts'
 import { ACCENT, formatDuration, type Line, type Segment } from './text.ts'
 import { DEFAULT_STRINGS, type Strings } from './i18n.ts'
@@ -156,6 +156,11 @@ function progressLine(node: NodeRun, activity: Activity | undefined, now: number
   return [{ text: firstOutputLine ?? lastAnswerLine(node.answer) ?? t.state[node.state], dim: true }]
 }
 
+function stallLine(activity: Activity | undefined, now: number, t: Strings): Line[] {
+  const reason = activity && stallReason(activity, now)
+  return reason ? [[{ text: t.stallReason(reason.rule, formatDuration(reason.quietMs), formatDuration(reason.limitMs)), dim: true }]] : []
+}
+
 type Ctx = { activity: ReadonlyMap<string, Activity>; waiting: ReadonlyMap<string, string>; t: Strings }
 
 function liveActivity(node: NodeRun, ctx: Ctx): Activity | undefined {
@@ -225,6 +230,7 @@ function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Ctx
     ...(def?.task_summary || def?.description ? [[{ text: def.task_summary ?? def.description ?? '' }]] : []),
     [{ text: who, dim: true }],
     waiting ? [{ text: waiting, color: WAITING_COLOR }] : progressLine(node, activity, now, t),
+    ...stallLine(activity, now, t),
     [{ text: timing, dim: true }],
   ]
   if (view.details) {

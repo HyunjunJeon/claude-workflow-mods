@@ -32,6 +32,9 @@ export type Strings = {
   fold: string
   unfold: string
   details: string
+  transcript: string
+  toastNoTranscript: (nodeId: string) => string
+  toastTranscriptDenied: (nodeId: string, reason: string, reportPath?: string) => string
   compact: string
   tasksView: string
   dagView: string
@@ -54,6 +57,7 @@ export type Strings = {
   writingTool: (tool: string) => string
   runningTool: (tool: string, elapsed: string) => string
   stalled: string
+  stallReason: (rule: 'coarse' | 'wait' | 'token', quiet: string, limit: string) => string
   waitingPermission: (tool: string) => string
   // `awaiting` is a run held for start approval: the label stands where the running count would, since nothing runs.
   statusLine: (name: string, done: number, total: number, running: number, failed: number, otherRuns: number, waiting: number, awaiting?: boolean) => string
@@ -62,6 +66,9 @@ export type Strings = {
   toastVerificationFailed: (run: string, node: string) => string
   toastHandoff: string
   toastSettledFailed: (run: string, failed: number) => string
+  notifySettledCompleted: (run: string, nodes: number) => string
+  notifySettledFailed: (run: string, failed: number) => string
+  notifyRecoveryStopped: (run: string, node: string) => string
   toastPaneWaiting: (reason: string) => string
   toastApproval: (run: string) => string
   toastBoardUpdated: (title: string) => string
@@ -121,6 +128,9 @@ const EN: Strings = {
   fold: 'fold wide layers',
   unfold: 'unfold wide layers',
   details: 'details',
+  transcript: 'transcript',
+  toastNoTranscript: nodeId => `Node ${nodeId} never started, so it has no transcript`,
+  toastTranscriptDenied: (nodeId, reason, reportPath) => `Node ${nodeId} transcript not shown: ${reason}${reportPath ? ` · report: ${reportPath}` : ''}`,
   compact: 'compact',
   tasksView: 'tasks',
   dagView: 'dag',
@@ -153,6 +163,10 @@ const EN: Strings = {
   writingTool: tool => `⚙ ${tool} now`,
   runningTool: (tool, elapsed) => `▶ ${tool} running ${elapsed}`,
   stalled: '⚠ possibly stalled',
+  stallReason: (rule, quiet, limit) =>
+    rule === 'token' ? `no new output for ${quiet} (limit ${limit})`
+      : rule === 'wait' ? `no first token for ${quiet} (limit ${limit})`
+        : `transcript unchanged for ${quiet} (limit ${limit})`,
   waitingPermission: tool => `waiting: ${tool}`,
   statusLine: (name, done, total, running, failed, otherRuns, waiting, awaiting = false) => `DAG ${name}: ${done}/${total} done · ${awaiting ? EN_AWAITING : `${running} running`}${waiting ? ` · ${waiting} waiting for permission` : ''}${failed ? ` · ${failed} failed` : ''}${otherRuns ? ` · +${otherRuns} runs` : ''}`,
   toastWaiting: (run, node) => `DAG ${run} › ${node} is waiting for your permission`,
@@ -160,6 +174,9 @@ const EN: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: node ${node} failed verification`,
   toastHandoff: 'A DAG run was offered to this session. Open /dag sessions to accept it.',
   toastSettledFailed: (run, failed) => `DAG ${run} settled with ${failed} failed node(s)`,
+  notifySettledCompleted: (run, nodes) => `${run}: completed, ${nodes} node${nodes === 1 ? '' : 's'}`,
+  notifySettledFailed: (run, failed) => `${run}: ${failed} node${failed === 1 ? '' : 's'} failed`,
+  notifyRecoveryStopped: (run, node) => `${run} › ${node}: automatic recovery stopped, the node still fails`,
   runDeferred: 'The run starts when the current turn ends.',
   toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
   toastBoardUpdated: title => `Board updated: ${title} · press b in the /dag pane`,
@@ -215,6 +232,9 @@ const KO: Strings = {
   fold: '넓은 층 접기',
   unfold: '넓은 층 펼치기',
   details: '상세',
+  transcript: '대화 기록',
+  toastNoTranscript: nodeId => `노드 ${nodeId}은(는) 아직 시작하지 않아 대화 기록이 없습니다`,
+  toastTranscriptDenied: (nodeId, reason, reportPath) => `노드 ${nodeId}의 대화 기록을 표시하지 못했습니다: ${reason}${reportPath ? ` · 보고서: ${reportPath}` : ''}`,
   compact: '간단히',
   tasksView: '작업',
   dagView: 'DAG',
@@ -247,6 +267,10 @@ const KO: Strings = {
   writingTool: tool => `⚙ ${tool} 인자 작성 중`,
   runningTool: (tool, elapsed) => `▶ ${tool} 실행 중 ${elapsed}`,
   stalled: '⚠ 멈췄을 수 있음',
+  stallReason: (rule, quiet, limit) =>
+    rule === 'token' ? `${quiet} 동안 새 출력 없음 (한도 ${limit})`
+      : rule === 'wait' ? `${quiet} 동안 첫 토큰 없음 (한도 ${limit})`
+        : `${quiet} 동안 대화 기록 변화 없음 (한도 ${limit})`,
   waitingPermission: tool => `승인 대기: ${tool}`,
   statusLine: (name, done, total, running, failed, otherRuns, waiting, awaiting = false) => `DAG ${name}: ${done}/${total} 완료 · ${awaiting ? KO_AWAITING : `실행 중 ${running}`}${waiting ? ` · 권한 승인 대기 ${waiting}` : ''}${failed ? ` · 실패 ${failed}` : ''}${otherRuns ? ` · +${otherRuns}개 실행` : ''}`,
   toastWaiting: (run, node) => `DAG ${run} › ${node} 노드가 권한 승인을 기다립니다`,
@@ -254,6 +278,9 @@ const KO: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: 노드 ${node} 검증 실패`,
   toastHandoff: '이 세션에 DAG 실행이 넘어왔습니다. /dag sessions에서 수락하세요.',
   toastSettledFailed: (run, failed) => `DAG ${run} 종료: 실패 노드 ${failed}개`,
+  notifySettledCompleted: (run, nodes) => `${run}: 완료, 노드 ${nodes}개`,
+  notifySettledFailed: (run, failed) => `${run}: 노드 ${failed}개 실패`,
+  notifyRecoveryStopped: (run, node) => `${run} › ${node}: 자동 복구를 멈췄습니다, 노드가 여전히 실패 상태입니다`,
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
   toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
   toastBoardUpdated: title => `보드 갱신: ${title} · /dag 패널에서 b`,
