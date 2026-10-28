@@ -14,6 +14,35 @@ export function evidenceOutcome(item: VerificationEvidence): VerificationOutcome
   return item.outcome ?? (item.passed ? 'passed' : 'unknown')
 }
 
+export const CHECK_DETAIL_LIMIT = 4_000
+// A test runner's failing test or error line, as bun test, node:test, pytest, jest and cargo print them.
+const FAILURE_LINE = /\(fail\)|^\s*(?:not ok|FAIL(?:ED)?)\b|\b(?:error|Error|panicked)\b|✗|✘/
+// The failure lines get at most this share of the limit; the end of the output keeps the rest.
+const FAILURE_SHARE = 0.4
+
+// A command check's detail: `head` (the problem and the argv/exit line) and the output, whole when it fits. A longer output
+// keeps the lines that report a failure and its end, where a runner prints its summary. Cut from the front instead, on
+// 2026-10-28 the detail of a failed `claude plugin test .` held only passing tests, so which test failed was lost.
+export function commandDetail(head: string, output: string, limit = CHECK_DETAIL_LIMIT): string {
+  const whole = `${head}\n${output}`
+  if (whole.length <= limit) return whole
+  const omitted = `… output cut to fit ${limit} characters; the lines that report a failure, then the end of the output:`
+  let budget = Math.floor(limit * FAILURE_SHARE)
+  const failures: string[] = []
+  for (const line of output.split('\n')) {
+    if (!FAILURE_LINE.test(line) || failures.includes(line)) continue
+    if (line.length + 1 > budget) break
+    failures.push(line)
+    budget -= line.length + 1
+  }
+  const kept = [head, omitted, ...failures, '…'].join('\n')
+  const room = Math.max(0, limit - kept.length - 1)
+  const end = output.slice(-room)
+  // Start the end at a line, unless one line is longer than the room.
+  const newline = end.indexOf('\n')
+  return `${kept}\n${newline >= 0 && newline < end.length - 1 ? end.slice(newline + 1) : end}`.slice(0, limit)
+}
+
 // A problem quotes at most this many characters of any one text, so a large stdout or file cannot flood the report.
 const QUOTE_LIMIT = 120
 

@@ -11,7 +11,7 @@ import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, de
 import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessions, requestHandoff, sessionConflicts, type SessionRecord } from './engine/sessions.ts'
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES, verdictFailure } from './engine/recovery.ts'
-import { CHECK_DEFECT, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
+import { CHECK_DEFECT, commandDetail, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
 import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
@@ -2129,10 +2129,26 @@ async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<Ch
   return problem ? { outcome: 'failed', detail: problem } : { outcome: 'passed', detail: `File verified: ${check.path}` }
 }
 
+// The tail of each argv's queue of command checks: nodes of one wave that verify with the same command run it one at a time.
+// On 2026-10-28 three nodes ran `claude plugin test .` at once; the suite takes 19 s alone, and together two of the runs
+// passed the 30 s limit and ended not_run.
+const commandCheckQueues = new Map<string, Promise<unknown>>()
+
+async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const current = (commandCheckQueues.get(key) ?? Promise.resolve()).then(work)
+  const tail = current.catch(() => undefined)
+  commandCheckQueues.set(key, tail)
+  try {
+    return await current
+  } finally {
+    if (commandCheckQueues.get(key) === tail) commandCheckQueues.delete(key)
+  }
+}
+
 // A program that cannot start or runs past the limit makes $.process.run reject, which fails the check whatever expect says.
 // The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
 async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<CheckResult> {
-  const result = await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })
+  const result = await oneAtATime(JSON.stringify(check.argv), () => $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 }))
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
   const expectation = check.expect
   const truncated = (stream: 'stdout' | 'stderr') => expectation?.[stream] !== undefined && (stream === 'stdout' ? result.isStdoutTruncated : result.isStderrTruncated)
@@ -2140,12 +2156,12 @@ async function commandCheckResult($: EngineInterface, check: CommandCheck): Prom
   const problem = exitProblem(exitCode, expectation) ??
     truncated('stdout') ?? (expectation?.stdout ? textProblem(result.stdout, expectation.stdout, 'stdout') : undefined) ??
     truncated('stderr') ?? (expectation?.stderr ? textProblem(result.stderr, expectation.stderr, 'stderr') : undefined)
-  const excerpt = `${JSON.stringify(check.argv)} exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`
+  const header = `${JSON.stringify(check.argv)} exited ${result.exitCode}`
   const outcome = exitCode === undefined ? 'unknown'
     : exitProblem(exitCode, expectation) ? 'failed'
     : truncated('stdout') || truncated('stderr') ? 'unknown'
     : problem ? 'failed' : 'passed'
-  return { outcome, detail: (problem ? `${problem}\n${excerpt}` : excerpt).slice(0, 4_000), exitCode }
+  return { outcome, detail: commandDetail(problem ? `${problem}\n${header}` : header, `${result.stdout}\n${result.stderr}`), exitCode }
 }
 
 async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<NonNullable<NodeRun['verification']>> {
