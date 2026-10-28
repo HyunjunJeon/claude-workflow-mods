@@ -156,6 +156,17 @@ export function answerMessage(answer: string, by: AnswerSource): string {
   ].join('\n')
 }
 
+// What a review-fix producer's finished agent receives when the round resumes it: the round's note with the findings, the
+// review ledger section when its start gets one, and the reporting contract again, since its next turn end is its final report.
+export function reworkMessage(note: string, ledger: string | undefined): string {
+  return [
+    note,
+    ...(ledger === undefined ? [] : ['', ledger]),
+    '',
+    `Your node runs again as a new attempt, continuing from your last report. When the fix is done, end your final report as your task says: the "## Output" section, then one ${STATUS_PREFIX} line.`,
+  ].join('\n')
+}
+
 export function keepAliveMessage(run: Run, nodeId: string): string {
   return [
     `Node "${nodeId}" of DAG run "${run.name}" (${run.runId}) finished; dag-workflow is verifying it and continuing the run in the background.`,

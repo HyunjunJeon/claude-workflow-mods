@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { answerMessage, err, keepAliveMessage, listText, nodeMessage, ok, previewText, questionMessage, questionNotice, recoveryHoldReason, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
+import { answerMessage, err, keepAliveMessage, listText, nodeMessage, ok, previewText, questionMessage, questionNotice, recoveryHoldReason, reworkMessage, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { absentOccurrenceWarnings, containsPrecisionWarnings, fileCheckPaths, isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
@@ -1477,6 +1477,10 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   })
   // The ledger joins the task text, so the reporting contract stays the prompt's end.
   const ledger = await ledgerSection($, run, def)
+  if (node.resume) {
+    const resumed = await resumeProducer($, run, node, node.resume, ledger, target.subagentType, node.routing?.category ?? def.category)
+    if (resumed) return resumed
+  }
   const prompt = buildNodePrompt(run, def, ledger === undefined ? node : { ...node, promptOverride: `${node.promptOverride ?? def.prompt}\n\n${ledger}` }, upstream)
   const model = node.recovery?.model ?? target.model
   let spawned: { agentId?: string; model?: string; deny?: string }
@@ -1499,6 +1503,28 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   }
   await record($, { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
+}
+
+// The review-fix round sends its note to the producer's finished agent (NodeRun.resume), as answerNode sends an answer, and
+// the next attempt runs on that agent: its turn end arrives under the same id and is claimed through agentRuns. undefined
+// when the send is not delivered or throws; startNode then spawns a fresh agent, whose promptOverride carries the same note.
+async function resumeProducer($: EngineInterface, run: Run, node: NodeRun, resume: { agentId: string; note: string }, ledger: string | undefined, subagentType: string, category: string | undefined): Promise<Run | undefined> {
+  const text = reworkMessage(resume.note, ledger)
+  agentRuns.set(resume.agentId, run.runId)
+  let failure: string | undefined
+  try {
+    const sent = await $.session.send({ to: { agentId: resume.agentId }, text })
+    if (!sent.isDelivered) failure = sent.reason
+  } catch (error) {
+    failure = message(error)
+  }
+  if (failure !== undefined) {
+    agentRuns.delete(resume.agentId)
+    $.ui.log(`${run.name} › ${node.id}: the review fix did not reach agent ${resume.agentId} (${failure}); a new agent starts with the findings in its prompt`)
+    return undefined
+  }
+  await record($, { kind: 'node.start', runId: run.runId, nodeId: node.id, attempt: node.attempt + 1, agentId: resume.agentId, model: node.model, subagentType, category, recovery: node.recovery, prompt: text })
+  return markRunning(run, node.id, resume.agentId, await $.clock.now(), node.model)
 }
 
 const settleSubmits = new Set<string>()

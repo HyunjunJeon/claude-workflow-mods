@@ -99,6 +99,7 @@ export function markRunning(input: Run, id: string, agentId: string, now: number
   const node = nodeOf(run, id)
   node.state = 'running'
   node.agentId = agentId
+  delete node.resume
   if (model) node.model = model
   else delete node.model
   node.attempt += 1
@@ -220,6 +221,7 @@ export function failToStart(input: Run, id: string, error: string, now: number):
   const node = nodeOf(run, id)
   if (node.state !== 'scheduled') return input
   node.state = 'failed'
+  delete node.resume
   node.error = error
   node.finishedAt = now
   return advance(run, now)
@@ -309,6 +311,7 @@ export function resumePaused(input: Run, sessionId: string, now: number): Run {
     if (node.state === 'paused') {
       node.state = 'pending'
       delete node.agentId
+      delete node.resume
     }
   }
   return advance(run, now)
@@ -359,6 +362,7 @@ export function retryRun(input: Run, options: RetryOptions, now: number): Result
     if (!reset.has(node.id)) continue
     node.state = 'pending'
     delete node.agentId
+    delete node.resume
     delete node.error
     delete node.answer
     delete node.output
@@ -385,6 +389,9 @@ export function reworkRun(input: Run, producers: string[], note: string, reviewe
   const reset = new Set([...producers, ...downstream(run.definition.nodes, producers)])
   for (const node of run.nodes) {
     if (!reset.has(node.id)) continue
+    // A producer's finished agent gets the note on its next start (register.ts startNode); promptOverride carries it too, for
+    // the fresh agent that starts when the send is not delivered.
+    if (producers.includes(node.id) && node.agentId) node.resume = { agentId: node.agentId, note }
     node.state = 'pending'
     delete node.agentId
     delete node.error
@@ -469,7 +476,9 @@ export function amendRun(input: Run, definition: Definition, now: number): Resul
     const previous = old.get(def.id)
     const label = def.label ?? def.id
     if (!previous || rerun.has(def.id)) return freshNode(def.id, label, nodeFingerprint(def), previous?.attempt ?? 0)
-    return { ...previous, label }
+    // An amend never resumes a review-fix producer that has not started yet; it spawns with the note in its prompt.
+    const { resume: _resume, ...kept } = previous
+    return { ...kept, label }
   })
   delete run.cancelReason
   run.settledNotified = false

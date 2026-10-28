@@ -122,6 +122,9 @@ export type NodeRun = {
   agentId?: string
   model?: string
   promptOverride?: string
+  // Set by the review-fix round on a producer only: its finished agent, which gets the note by $.session.send instead of a new
+  // agent being spawned. Any other start of the node (markRunning, retry, amend, failToStart, a session's resume) drops it.
+  resume?: { agentId: string; note: string }
   startedAt?: number
   finishedAt?: number
   error?: string

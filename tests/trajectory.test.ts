@@ -130,14 +130,14 @@ test('with trajectory_log on, a review-fix round keeps each attempt\'s exact pro
   const failNotes = specNotes('Spec verdict: FAIL', '(a) README.md:3 documents greet(name) but never says what it returns\n(b) none\n(c) none')
   h.files.set(`${notes}/review-spec-notes.md`, failNotes)
   await finish($, h, 'agent-3')
-  // The round reran docs; review-spec's next start will remove the FAIL notes.
-  expect(h.spawns.map(spawn => spawn.description).at(-1)).toBe('Greet: docs')
+  // The round resumed docs on its own agent-2; review-spec's next start will remove the FAIL notes.
+  expect(h.sends.map(send => send.to)).toEqual(['agent-2'])
   h.files.set('/work/README.md', '# app\n\nCall greet(name); it returns the greeting string.\n')
-  await finish($, h, 'agent-5')
+  await finish($, h, 'agent-2')
   h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: PASS', '(a) none\n(b) none\n(c) none'))
   h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
+  await finish($, h, 'agent-5')
   await finish($, h, 'agent-6')
-  await finish($, h, 'agent-7')
 
   const logged = events(h, runId)
   const steps = logged.map(event => [event.kind, event.nodeId, event.attempt].filter(part => part !== undefined).join(':'))
@@ -150,8 +150,8 @@ test('with trajectory_log on, a review-fix round keeps each attempt\'s exact pro
   // The FAIL verdict as review-spec wrote it, though the file is gone now.
   expect(find('node.end:review-spec:1')).toMatchObject({ state: 'failed', notes: [{ path: `${notes}/review-spec-notes.md`, text: failNotes }] })
   expect(find('rework')).toMatchObject({ round: 1, reviewers: ['review-spec'], producers: ['docs'], note: expect.stringContaining('(a) README.md:3 documents greet(name)') })
-  // The exact prompt the docs agent got the second time, findings included.
-  expect(find('node.start:docs:2')).toMatchObject({ agentId: 'agent-5', prompt: h.spawns[4]?.prompt })
+  // The exact text the docs agent got the second time, findings included.
+  expect(find('node.start:docs:2')).toMatchObject({ agentId: 'agent-2', prompt: h.sends[0]?.text })
   expect(find('node.start:docs:2').prompt).toContain('[Review fix 1/1]')
   expect(find('node.end:docs:1')).toMatchObject({ state: 'completed', usage, diff: expect.stringContaining('+Call greet(name) to say hello.'), verification: { status: 'passed' } })
   expect(find('node.transcript:docs:1')).toMatchObject({
