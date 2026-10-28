@@ -46,3 +46,10 @@ test('a surface decision survives a reload and an unknown kind is still refused'
   expect(parseDecisionLog(log([surface]), '/p', 's')).toEqual([surface])
   expect(parseDecisionLog(log([{ ...surface, kind: 'canvas' }]), '/p', 's')).toEqual([])
 })
+
+test('a question decision survives a reload and an unknown kind drops the record', () => {
+  const asked: DecisionRecord = { ...record, kind: 'question', subject: 'a', proposed: 'json', selected: 'yaml', runId: 'dag_1', nodeId: 'a' }
+  const log = (records: unknown[]) => ({ schemaVersion: 1, projectRoot: '/p', sessionId: 's', records })
+  expect(parseDecisionLog(log([asked]), '/p', 's')).toEqual([asked])
+  expect(parseDecisionLog(log([{ ...asked, kind: 'guess' }]), '/p', 's')).toEqual([])
+})

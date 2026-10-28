@@ -1834,7 +1834,7 @@ async function decideUnattended($: EngineInterface, runId: string, nodeId: strin
       if (choice.probabilities) scored.probabilities = choice.probabilities
     }
     await persistDecisions($, [decisionRecord({
-      at: await $.clock.now(), kind: 'recovery', subject: `${node.id} question`, runId: run.runId, nodeId: node.id,
+      at: await $.clock.now(), kind: 'question', subject: node.id, runId: run.runId, nodeId: node.id,
       proposed: question.default ?? 'clarification', selected: picked ?? question.default ?? 'clarification',
       source: picked === undefined ? 'baseline' : 'jev', outcome, latencyMs: evaluation.latencyMs,
       stateHash: hash(stableStringify(request.state)), ...scored,
@@ -1845,7 +1845,7 @@ async function decideUnattended($: EngineInterface, runId: string, nodeId: strin
     }
   }
   if (question.default !== undefined) {
-    logUnanswered($, run, nodeId, await answerNode($, run.runId, nodeId, { answer: question.default, by: 'timeout' }))
+    logUnanswered($, run, nodeId, await answerNode($, run.runId, nodeId, { answer: question.default, by: 'default' }))
     return
   }
   await failQuestion($, runId, nodeId)

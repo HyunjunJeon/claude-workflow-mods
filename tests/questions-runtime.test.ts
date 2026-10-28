@@ -102,7 +102,7 @@ async function bootHeadless($: Engine) {
 function questionRecords(h: Harness): DecisionRecord[] {
   const text = h.files.get(`${ROOT}/decisions/source.json`)
   const records: DecisionRecord[] = text ? JSON.parse(text).records : []
-  return records.filter(record => record.subject === 'a question')
+  return records.filter(record => record.kind === 'question')
 }
 
 test('a blocked turn end runs no verification, keeps the agent and tells the main conversation and the person once', async ($, on) => {
@@ -283,7 +283,7 @@ test('a non-interactive session takes the option Jev picks above jev_recovery_co
   expect(questionRequests(h)[0]?.state).toMatchObject({ question: QUESTION, options: ['json', 'yaml'], default: 'json' })
   expect(h.sends[0]?.text).toContain('<answer by="jev">yaml</answer>')
   expect(nodeA(h, runId)).toMatchObject({ state: 'running', attempt: 1, clarifications: [{ answer: 'yaml', by: 'jev' }] })
-  expect(questionRecords(h)).toMatchObject([{ kind: 'recovery', nodeId: 'a', selected: 'yaml', source: 'jev', outcome: 'applied', confidence: 0.95, threshold: 0.9 }])
+  expect(questionRecords(h)).toMatchObject([{ kind: 'question', subject: 'a', nodeId: 'a', selected: 'yaml', source: 'jev', outcome: 'applied', confidence: 0.95, threshold: 0.9 }])
   expect(questionNews(h)).toHaveLength(0)
 })
 
@@ -293,8 +293,8 @@ test('a non-interactive session sends the default when Jev stays below the bar',
   const runId = await start($, DEFINITION)
   await ask($, h, ['Options: json | yaml', 'Default: json'], UNSURE)
 
-  expect(h.sends[0]?.text).toContain('<answer by="timeout">json</answer>')
-  expect(nodeA(h, runId)).toMatchObject({ state: 'running', clarifications: [{ answer: 'json', by: 'timeout' }] })
+  expect(h.sends[0]?.text).toContain('<answer by="default">json</answer>')
+  expect(nodeA(h, runId)).toMatchObject({ state: 'running', clarifications: [{ answer: 'json', by: 'default' }] })
   expect(questionRecords(h)).toMatchObject([{ selected: 'json', source: 'baseline', outcome: 'low-confidence', confidence: 0.6 }])
 })
 
@@ -305,7 +305,7 @@ test('a non-interactive question without options gets its default without asking
   await ask($, h, ['Default: json'])
 
   expect(questionRequests(h)).toHaveLength(0)
-  expect(h.sends[0]?.text).toContain('<answer by="timeout">json</answer>')
+  expect(h.sends[0]?.text).toContain('<answer by="default">json</answer>')
   expect(nodeA(h, runId).state).toBe('running')
 })
 
@@ -331,7 +331,7 @@ test('a session restarted without a person decides a question the earlier sessio
   await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
   expect(h.sends).toHaveLength(1)
   expect(h.sends[0]).toMatchObject({ to: 'agent-1' })
-  expect(h.sends[0]?.text).toContain('<answer by="timeout">json</answer>')
+  expect(h.sends[0]?.text).toContain('<answer by="default">json</answer>')
   await finish($, h, 'agent-1')
   expect(nodeA(h, runId)).toMatchObject({ state: 'completed', attempt: 1 })
 })

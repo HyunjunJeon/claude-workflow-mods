@@ -626,14 +626,14 @@ jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))
 
 1. 사용자: DAG 패널의 선택지 버튼 또는 `/dag answer <run> <node> <text>`. 나머지 단어는 공백 하나로 이어 붙입니다. 인자가 모자라면 `Usage: /dag answer <run> <node> <text>`를 돌려주고, 입력창 밖에서 오면 `This action requires a user command or pane control.`로 거부합니다. 실행을 시작하는 명령으로 취급해 메인 턴이 바쁘면 그 턴이 끝난 뒤 새 시도가 시작됩니다.
 2. 메인 모델: `dag` 도구의 `answer` 액션.
-3. Jev: 비대화형 세션에서만, 선택지가 있고 `Needs: person`이 아닌 질문에 대해 `jev_recovery_confidence` 이상의 확신도로 선택지 하나를 고릅니다. 선택지가 없거나 `Needs: person`이면 Jev를 부르지 않습니다.
-4. 기본값: 질문 후 15분 안에 답이 없으면 `Default`로 답합니다.
+3. Jev: 비대화형 세션에서만, 선택지가 있고 `Needs: person`이 아닌 질문에 대해 `jev_recovery_confidence` 이상의 확신도로 선택지 하나를 고릅니다. 선택지가 없거나 `Needs: person`이면 Jev를 부르지 않습니다. 이 판단은 `/dag decisions`와 패널의 Decisions 탭에 종류 `question`(한국어 패널은 **질문**), 대상은 노드 id로 남습니다.
+4. 기본값: 질문 후 15분 안에 답이 없으면 `Default`로 답합니다(답한 주체 `timeout`). 비대화형 세션처럼 물어볼 사람이 없으면 기다리지 않고 바로 `Default`로 답합니다(답한 주체 `default`).
 
 답이 없고 기본값도 없는 채로 15분이 지나면 노드는 `clarification: <질문>`으로 실패하며, 이 실패는 Jev 호출 없이 끝나고 자동 복구 대상이 아닙니다.
 
 ### 답한 뒤의 실행
 
-답은 `$.session.send`로 같은 에이전트에 보내며, 노드는 `blocked`에서 `running`으로 돌아와 같은 시도 번호와 같은 에이전트로 이어집니다. 전달되지 않으면 노드를 `pending`으로 되돌려 새 시도를 시작하고, 새 프롬프트의 `</task>` 뒤에 질문, 답, 답한 주체(`person`, `model`, `jev`, `timeout`)를 담은 `<clarifications>` 블록을 붙입니다. 답은 노드의 `clarifications`에 쌓이고 재시도와 복구에서도 유지되지만, 프롬프트가 바뀌어 다시 만든 노드에서는 질문과 함께 사라집니다. 로그에는 `<run> › <node>: answered by <by>; the same agent continues` 또는 `a new attempt starts`가 남습니다.
+답은 `$.session.send`로 같은 에이전트에 보내며, 노드는 `blocked`에서 `running`으로 돌아와 같은 시도 번호와 같은 에이전트로 이어집니다. 전달되지 않으면 노드를 `pending`으로 되돌려 새 시도를 시작하고, 새 프롬프트의 `</task>` 뒤에 질문, 답, 답한 주체(`person`, `model`, `jev`, `timeout`, `default`)를 담은 `<clarifications>` 블록을 붙입니다. 답은 노드의 `clarifications`에 쌓이고 재시도와 복구에서도 유지되지만, 프롬프트가 바뀌어 다시 만든 노드에서는 질문과 함께 사라집니다. 로그에는 `<run> › <node>: answered by <by>; the same agent continues` 또는 `a new attempt starts`가 남습니다.
 
 한 시도에서 질문은 두 번까지 답합니다. 같은 시도에서 세 번째 질문이 나오면 노드는 `clarification: <질문>`으로 실패하고 Jev는 부르지 않습니다. 취소하면 `blocked` 노드도 `cancelled`가 되고 질문이 지워집니다.
 

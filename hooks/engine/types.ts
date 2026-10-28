@@ -105,7 +105,9 @@ export type QuestionSpec = { text: string; options?: string[]; default?: string;
 
 export type NodeQuestion = QuestionSpec & { askedAt: number }
 
-export type AnswerSource = 'person' | 'model' | 'jev' | 'timeout'
+// timeout: the default after an interactive question waited its full time; default: the default sent at once, where nobody
+// could be asked (a non-interactive session, or a session that restarted without a person).
+export type AnswerSource = 'person' | 'model' | 'jev' | 'timeout' | 'default'
 
 // One answered question. attempt is the node attempt that asked it, so markBlocked can count the questions of the current
 // attempt and the prompt of a later attempt can say which attempt it came from.
