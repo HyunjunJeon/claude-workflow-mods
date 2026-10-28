@@ -165,7 +165,7 @@ The run is done when the goal's observable condition holds, not merely when the 
 
 ## Running a DAG
 
-- `start` returns immediately with `run_id`, a snapshot and `warnings`. Treat every warning as a definition defect. The contract audit has one exception: the three-files warning on a node identified as a vertical slice in your plan. Cancel and start the corrected definition under a new key, or `amend` it before the affected nodes run.
+- `start` returns immediately with `run_id`, a snapshot and `warnings`. Treat every warning as a definition defect. The contract audit has one exception: the three-files warning on a vertical slice, which you remove by declaring `slice: true` on that node. A lane that widens a shared type must also own its consumers, or a node after the wave runs tsc over the joined result (see the planning reference). Cancel and start the corrected definition under a new key, or `amend` it before the affected nodes run.
 - If `start` returns `awaiting_approval: true`, the user must approve the run in the /dag pane or with /dag approve; tell the user once and end your turn. Do not poll; a message arrives when it is approved or rejected.
 - Do not poll. Each finished node sends a short progress note with an output excerpt. The plugin sends the run-settled message as a prompt with every node's output and report path. Between messages, plan or read independently, or end your turn.
 - `snapshot {run_id}` is a one-off read for a midpoint decision. `wait {run_id}` returns the same snapshot and cannot block.

@@ -165,7 +165,7 @@ No layer can be verified alone. Each waits for the previous contract, and tests 
 - **Size a slice to one node's context.** If it does not fit, reduce behaviors and start with the simplest case. Never split at a layer boundary. The first slice is the smallest complete path; later slices extend it.
 - **Verify the path, not the files.** The slice's `verify` runs the command or test for the whole path. File checks per layer prove existence, not operation.
 - **Prefactor first, as its own node.** If implementation would be awkward, first reshape the code without changing behavior. Verify that earlier node with existing tests. The slice node `dependsOn` it.
-- **A slice is ONE deliverable although it writes files in several layers.** "One node, one deliverable" counts independent files and sections, not layers. A slice may trigger the three-files under-split warning. Name it as a slice in the plan and treat the warning as expected. Slices depend on each other only when one consumes the other's result or edits its files. Disjoint write scopes run in parallel.
+- **A slice is ONE deliverable although it writes files in several layers.** "One node, one deliverable" counts independent files and sections, not layers. A slice may trigger the three-files under-split warning. Declare `slice: true` on the slice node: the warning becomes a note and the node fingerprint is unchanged. Slices depend on each other only when one consumes the other's result or edits its files. Disjoint write scopes run in parallel.
 
 **A wide refactor is a chain, not a set of slices.**
 It makes one mechanical change across the codebase, such as renaming a column or retyping a shared symbol.
@@ -257,6 +257,7 @@ For example, use `Explore` for read-only investigation.
 - **Add an edge exactly when the node consumes the other node's result.** If B only needs a fact YOU already know, paste the fact into B's prompt and leave the edge out - an unnecessary edge serializes work that could run in parallel.
 - **Design every Output for its consumers.** The producer's prompt names what its Output must contain - file paths, values, decisions, counts - in a compact, parseable shape. A downstream node is only as good as the facts it was handed.
 - **Disjoint write scopes or serialize.** No two nodes that can run at the same time may edit the same file. If two lanes must touch the same files, chain them with `dependsOn` or merge them into one node. Declare each node's read and write scope inside its prompt, and list the write scope in the node's `writes` field (project-relative paths or folders, never absolute, `..` or `.claude`). The plugin shows overlaps between `writes` of active sessions in the same project; it never blocks or reschedules on them, so disjointness inside one graph is still your job.
+- **A lane that widens a shared type owns its consumers.** Parallel lanes often verify with file checks only, because the full suite or tsc would see other lanes' unfinished work. If one lane widens a shared type (a new union member, a new required field, a changed signature), a consumer in another lane's files breaks and no node owns it. Either give the widening lane the consumer files in its `writes`, or add a node after the wave (`dependsOn` every lane) that runs tsc and the suite over the joined result. The post-wave node is a convention, not a field.
 - **A commit node declares no `writes`.** It changes no file content, and listing the committed paths makes the under-split lint count them as deliverables: a commit node with `writes` of `hooks/`, `tests/` and `README.md` drew "one producer owns 3 files", whose advice (split into parallel nodes) would race on the git index. Verify it with git commands such as `git diff --quiet HEAD` and `git ls-files --error-unmatch <path>`. Commits share the git index, so never split them into parallel nodes: use one commit node, or a chain with `dependsOn`.
 - **Dependency self-check before `start`:** every `dependsOn` id exists; no cycles; no node depends on something it does not consume; every wave has at least one runnable node. The plugin refuses unknown ids, self-edges and cycles with `unknown_dependency`, `invalid_dependency` and `cycle`.
 
@@ -311,8 +312,8 @@ A final audit is a verification node with two or more inputs and no dependents.
 
 Warnings do not block execution. Treat them as defects.
 Cancel and start the corrected definition under a new key, or `amend` before affected nodes run.
-One warning is expected: three files on a node named as a vertical slice in the plan.
-The lint cannot distinguish a slice from independent files (see Vertical slices and wide refactors).
+The three-files warning on a vertical slice is not a defect: declare `slice: true` on that node and the warning becomes a note.
+The lint cannot distinguish a slice from independent files, so without `slice: true` it still warns (see Vertical slices and wide refactors).
 
 ## The `verify` contract
 
