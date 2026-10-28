@@ -26,10 +26,11 @@ Verification: 64/64 nodes verified, 0 failed, 0 missing; automatic retries: 0; s
 
 ### Misses
 
-- pipeline-stats #2 (expected chain): diamond, 5 nodes, layer widths 1-1-1-2 (producers: chain). The other sample was a 4-node chain.
 - diamond-app #1 (expected diamond): fan-out, 3 nodes, layer widths 1-2, no fan-in (producers: single).
 - diamond-app #2 (expected diamond): fan-out/fan-in, 7 nodes, layer widths 4-1-2, depth 3 (producers: fan-out/fan-in).
 - wide-harvest #2 (expected fan-out/fan-in): single, 1 node (producers: single). The other sample was a 6-node fan-out/fan-in (producers: parallel).
+
+pipeline-stats #2 ran as a 5-node diamond (layer widths 1-1-1-2) whose producers form a chain, and the scorer counts it as matched.
 
 ## A6: dag tool not deferred
 Samples matching their expected shape: 15/16.
@@ -49,7 +50,7 @@ Verification: 73/73 nodes verified, 0 failed, 0 missing; automatic retries: 0; s
 | wide-harvest | 2/2 | fan-out/fan-in | 124-139-153 |
 | research-write | 2/2 | fan-out/fan-in | 81-82-83 |
 
-Misses: pipeline-stats #2 (diamond, 5 nodes, widths 1-1-1-2, producers: chain) and diamond-app #1 (fan-out, 3 nodes, widths 1-2, producers: single).
+Misses: diamond-app #1 (fan-out, 3 nodes, widths 1-2, producers: single). pipeline-stats #2 ran as a 5-node diamond (layer widths 1-1-1-2) whose producers form a chain, and the scorer counts it as matched.
 
 ### Median seconds per scenario, D8 against A6
 
