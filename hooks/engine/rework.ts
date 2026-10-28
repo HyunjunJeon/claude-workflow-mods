@@ -21,8 +21,9 @@ export type ReworkSkip = { skip: string }
 
 // Words in a node's id, label or summary that name work outside the project's files, or on its history: a rerun would push,
 // deploy, upload, migrate, delete or commit again. Matched per word, so "deploy-preview" and "commitPush" count and
-// "product" does not; a false match only hands the FAIL to the main conversation, as before the round existed.
-const EXTERNAL_PREFIXES = ['push', 'deploy', 'publish', 'releas', 'upload', 'migrat', 'delet', 'truncat', 'provision', 'rotat', 'revok', 'commit', 'rebase', 'revert', 'stash', 'notif', 'email']
+// "product" does not; a false match only hands the FAIL to the main conversation, as before the round existed. No notif
+// prefix: it named a notification feature, not a sent message, and cost run dag_mvrn1mj1_b26cng its round (2026-10-28).
+const EXTERNAL_PREFIXES = ['push', 'deploy', 'publish', 'releas', 'upload', 'migrat', 'delet', 'truncat', 'provision', 'rotat', 'revok', 'commit', 'rebase', 'revert', 'stash', 'email']
 const EXTERNAL_WORDS = new Set(['prod', 'production', 'apply', 'drop', 'seed', 'send', 'reset', 'merge', 'tag', 'sms'])
 
 function externalWord(def: NodeDef): string | undefined {
