@@ -335,3 +335,24 @@ test('the dag tool schema and description tell the model about dryRun within the
   expect(TOOL_DESCRIPTION).toContain('dryRun:true')
   expect(TOOL_DESCRIPTION.length).toBeLessThanOrEqual(TOOL_DESCRIPTION_LIMIT)
 })
+
+test('a dry run warns when an absent string already occurs twice in a project file', async ($, on) => {
+  const h = harness(on)
+  h.files.set('/work/notes.txt', 'keep legacy here, and legacy there')
+  await boot($)
+  const definition = { ...DEFINITION, key: 'absent-demo', nodes: [{ id: 'edit', prompt: FULL, writes: ['notes.txt'], verify: [{ kind: 'file', path: 'notes.txt', absent: 'legacy' }] }] }
+  const reply = await dag($, { action: 'start', definition, dryRun: true }) as PreviewReply
+  expect(reply.preview.warnings).toContain('node "edit": check 1 absent "legacy" already occurs 2 times in notes.txt - narrow the string or the path, or the check may never pass')
+})
+
+test('a dry run does not warn about a long contains text that the existing project file already holds', async ($, on) => {
+  const kept = 'Before `start`, state one concise plan and execute it.'
+  const h = harness(on)
+  h.files.set('/work/plan.md', `intro\n${kept}\n`)
+  await boot($)
+  const nodes = [{ id: 'edit', prompt: FULL, writes: ['plan.md'], verify: [{ kind: 'file', path: 'plan.md', contains: kept }] }]
+  const reply = await dag($, { action: 'start', definition: { ...DEFINITION, key: 'kept-demo', nodes }, dryRun: true }) as PreviewReply
+  expect(reply.preview.warnings.filter(warning => warning.includes('exact text'))).toEqual([])
+  const missing = await dag($, { action: 'start', definition: { ...DEFINITION, key: 'new-demo', nodes: [{ ...nodes[0], writes: ['other.md'], verify: [{ kind: 'file', path: 'other.md', contains: kept }] }] }, dryRun: true }) as PreviewReply
+  expect(missing.preview.warnings.filter(warning => warning.includes('exact text'))).toHaveLength(1)
+})

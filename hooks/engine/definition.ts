@@ -50,6 +50,10 @@ function parseNode(raw: unknown, index: number): Result<NodeDef> {
     if (typeof raw.external !== 'boolean') return fail('invalid_node', `Node "${id}": external must be true or false.`)
     if (raw.external) node.external = true
   }
+  if (raw.slice !== undefined) {
+    if (typeof raw.slice !== 'boolean') return fail('invalid_node', `Node "${id}": slice must be true or false.`)
+    if (raw.slice) node.slice = true
+  }
   return { ok: true, value: node }
 }
 

@@ -65,6 +65,9 @@ export type NodeDef = {
   // true when the node changes something outside the project's files: a push, a deploy, a database, storage or settings
   // change, a sent message. The review-fix round (rework.ts) never reruns such a node; outside the fingerprint, like load_skills.
   external?: boolean
+  // true when the node is one vertical slice that legitimately owns several files: the under-split warning becomes a note
+  // (lintNotes). Outside the fingerprint, like load_skills, so amending only slice reruns nothing.
+  slice?: boolean
   // Set only on a node added at run time (run.ts expandNodes): the id of the completed node it came from. Never parsed from
   // a definition and outside the fingerprint, so a declared definition never carries it.
   expandedFrom?: string

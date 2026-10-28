@@ -2,7 +2,7 @@ import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderS
 import { parseDefinition } from './engine/definition.ts'
 import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
-import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
+import { absentOccurrenceWarnings, containsPrecisionWarnings, fileCheckPaths, isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
 import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
 import { shareJevCall, type PendingJevCall } from './engine/jev-calls.ts'
@@ -2329,13 +2329,32 @@ async function missingProgramProblem($: EngineInterface, definition: Definition)
   return absent.length > 0 ? { code: 'invalid_verification', message: missingProgramsMessage(absent) } : undefined
 }
 
+const ABSENT_READ_LIMIT = 1_000_000
+
+// Reads the files the definition's absent and long contains checks target so their current text can be judged. Folders, missing files and
+// files over 1 MB are left out silently; a read error only drops that file, it never fails the caller.
+async function absentWarnings($: EngineInterface, definition: Definition): Promise<string[]> {
+  const texts = new Map<string, string>()
+  for (const path of fileCheckPaths(definition)) {
+    try {
+      const stat = await $.fs.stat(`${projectRoot}/${path}`)
+      if (stat.kind === 'file' && stat.size <= ABSENT_READ_LIMIT) texts.set(path, await $.fs.read(`${projectRoot}/${path}`))
+    } catch {
+      // A missing or unreadable file has nothing to count; the warning is advisory.
+    }
+  }
+  return [...absentOccurrenceWarnings(definition, texts), ...containsPrecisionWarnings(definition, texts)]
+}
+
 // A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
 async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
   const screened = screenDefinition(input)
   if (!screened.ok) return screened
   const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition)
   if (missing) return { ok: false, error: missing }
-  return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
+  const preview = previewDefinition(screened.value.definition, { maxConcurrent })
+  const absent = await absentWarnings($, screened.value.definition)
+  return { ok: true, value: { preview: { ...preview, warnings: [...preview.warnings, ...absent] }, existing: screened.value.existing } }
 }
 
 function effectiveApproval(): StartApproval {
@@ -2377,7 +2396,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   await openPane($, false)
   const held = awaitingApproval(started)
   if (held) $.ui.toast(t.toastApproval(started.name), { timeoutMs: ATTENTION_TOAST_MS })
-  const warnings = [...lintDefinition(definition), ...planningWarning()]
+  const warnings = [...lintDefinition(definition), ...await absentWarnings($, definition), ...planningWarning()]
   return ok({
     reused: false,
     run_id: runId,

@@ -28,8 +28,8 @@
 # Wave-2 nodes declare only file checks: five lanes edit tests/ at once, so a full `claude plugin test .` in their verify
 # could fail on a sibling's half-written file. Each worker still runs the suite itself; board-view, board-host and
 # review-spec run it on the whole result.
-# Expected lint warning: "one producer owns 3 files" on flow-layout. It is one slice (the layout plus the one optional
-# field graph-layout.ts must read to drop the DAG markers) and stays one node.
+# flow-layout declares `slice: true` (the layout plus the one optional field graph-layout.ts must read to drop the DAG
+# markers; one node), so check-definition prints a note instead of the files warning.
 key: improve-p4-board-1
 name: Board P1 - board tool and Board pane section
 goal: >
@@ -196,6 +196,7 @@ nodes:
   - id: flow-layout
     label: Flow diagram layout on the DAG graph layout
     category: standard
+    slice: true
     dependsOn:
       - board-contract
     load_skills:

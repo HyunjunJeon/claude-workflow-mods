@@ -1,4 +1,5 @@
 import { TEXT_FIELDS, type Definition, type NodeDef, type VerificationCheck } from './types.ts'
+import { COMMIT_ID, isReviewStageNode } from './stages.ts'
 import { projectPath, TEXT_FIELD_LIST } from './verification.ts'
 
 // A verification word counts only at the start of a word, so "preview", "contest" and "retest" do not make a node a verifier.
@@ -33,6 +34,8 @@ export function isFinalAudit(definition: Definition, node: NodeDef): boolean {
   return node.dependsOn.length >= 2 && !definition.nodes.some(other => other.dependsOn.includes(node.id)) && isVerificationNode(node)
 }
 
+// A contains this long is an exact sentence; a worker cannot reproduce it unless the prompt gives it.
+const LONG_CONTAINS = 40
 const MIN_SPLIT_FILES = 3
 const MIN_SPLIT_SECTIONS = 3
 // A change and its own tests are one deliverable (the doctrine keeps them in one node), so tests do not count.
@@ -57,7 +60,7 @@ function checkedProjectFiles(node: NodeDef): string[] {
 }
 
 // A declared folder and the files checked inside it are one deliverable, so only the most specific paths count.
-function deliverablePaths(node: NodeDef): string[] {
+export function deliverablePaths(node: NodeDef): string[] {
   const paths = [...(node.writes ?? []), ...checkedProjectFiles(node)]
   const unique = [...new Set(paths.map(normalizePath))].filter(path => !TEST_PATH.test(path))
   return unique.filter(path => !unique.some(other => other.startsWith(`${path}/`)))
@@ -138,13 +141,25 @@ function requestClauses(request: string): string[] {
   return clauses
 }
 
-const DELIVERABLE_START = /^(?:add|create|implement|build|write|introduce|expose|support|make|return|an?|and an?)\b/i
+const DELIVERABLE_START = /^(?:add|create|implement|build|write|introduce|expose|support|make|return)\b/i
 // A criterion is a result word, a status code, an output verb, or a double-quoted literal such as "hello <name>" that the output can be checked against.
 // A backtick span such as `greet` only names the deliverable, so it is not one.
 const CRITERION = /"[^"]+"|\b(?:[1-5]\d\d|returns?|responds|when|if|unless|only|must|never|rejects?|errors?|fails?|status|within|limit|empty|sorted|ordered|matches|contains|exactly|with|as|prints|outputs|displays|shows|writes|logs|exits|emits|renders|sends|redirects|raises|throws|lists)\b/i
 const ACCESS_RULE = /\b(authori[sz]\w*|permission\w*|owners?|admins?|administrators?|roles?|who (?:may|can)|signed[- ]in|logged[- ]in|access control)\b/i
 // Who may act matters only for something other people can reach, so warning 2 needs a network surface in the request or goal.
 const NETWORK_SURFACE = /\b(?:endpoints?|routes?|apis?|urls?|https?|web\w*|servers?|pages?|forms?)\b/i
+
+// Words in a node's id, label or summary that name work outside the project's files, or on its history: a rerun would push,
+// deploy, upload, migrate, delete or commit again. Matched per word, so "deploy-preview" and "commitPush" count and
+// "product" does not; a false match only hands the FAIL to the main conversation, as before the round existed. No notif
+// prefix: it named a notification feature, not a sent message, and cost run dag_mvrn1mj1_b26cng its round (2026-10-28).
+const EXTERNAL_PREFIXES = ['push', 'deploy', 'publish', 'releas', 'upload', 'migrat', 'delet', 'truncat', 'provision', 'rotat', 'revok', 'commit', 'rebase', 'revert', 'stash', 'email']
+const EXTERNAL_WORDS = new Set(['prod', 'production', 'apply', 'drop', 'seed', 'send', 'reset', 'merge', 'tag', 'sms'])
+
+export function externalWord(def: NodeDef): string | undefined {
+  const words = [def.id, def.label, def.task_summary].flatMap(text => (text ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/))
+  return words.find(word => word !== '' && (EXTERNAL_WORDS.has(word) || EXTERNAL_PREFIXES.some(prefix => word.startsWith(prefix))))
+}
 
 export function lintDefinition(definition: Definition): string[] {
   const warnings: string[] = []
@@ -176,7 +191,7 @@ export function lintDefinition(definition: Definition): string[] {
   const producers = definition.nodes.filter(node => !isVerificationNode(node))
   for (const node of producers) {
     const paths = deliverablePaths(node)
-    if (paths.length >= MIN_SPLIT_FILES) {
+    if (paths.length >= MIN_SPLIT_FILES && node.slice !== true) {
       warnings.push(`node "${node.id}": one producer owns ${paths.length} files (${paths.join(', ')}) - give each independent file its own node so the lanes run in parallel and fail in isolation.`)
     }
   }
@@ -200,6 +215,13 @@ export function lintDefinition(definition: Definition): string[] {
   }
   const review = definition.review
   if (review !== undefined) {
+    // The commit and security nodes the plugin generates are named for what they do; only the user's producers can be renamed.
+    for (const node of producers.filter(node => node.id !== COMMIT_ID && !isReviewStageNode(review, node.id))) {
+      const word = node.external === true ? undefined : externalWord(node)
+      if (word !== undefined) {
+        warnings.push(`node "${node.id}": its name contains "${word}", so the automatic review-fix round would not rerun it after a FAIL verdict - rename it (id, label or task_summary) unless it really works outside the project files`)
+      }
+    }
     for (const clause of requestClauses(review.request)) {
       if (DELIVERABLE_START.test(clause) && !CRITERION.test(clause)) {
         warnings.push(`review.request: "${clause}" names a deliverable without an observable criterion (what it returns or does, its error and edge cases) - review-spec judges such a part by its own reading, so repeated runs can disagree; state the expected behavior.`)
@@ -211,4 +233,43 @@ export function lintDefinition(definition: Definition): string[] {
     }
   }
   return warnings
+}
+
+// Findings that are expected and do not fail a check: a producer that declared slice: true and owns the files the files warning would count.
+export function lintNotes(definition: Definition): string[] {
+  return definition.nodes.filter(node => node.slice === true && !isVerificationNode(node)).flatMap(node => {
+    const paths = deliverablePaths(node)
+    return paths.length >= MIN_SPLIT_FILES ? [`node "${node.id}": declared a vertical slice that owns ${paths.length} files (${paths.join(', ')}) - the files warning is expected`] : []
+  })
+}
+
+// The project-relative files the host should read before the file-aware rules run: the targets of absent and long contains checks
+// (absolute paths and .claude are never read).
+export function fileCheckPaths(definition: Definition): string[] {
+  const paths = definition.nodes.flatMap(node => (node.verify ?? []).flatMap(check => (check.kind === 'file' && (check.absent !== undefined || (check.contains?.length ?? 0) >= LONG_CONTAINS) && projectPath(check.path) ? [check.path] : [])))
+  return [...new Set(paths)]
+}
+
+function occurrences(text: string, needle: string): number {
+  return needle === '' ? 0 : text.split(needle).length - 1
+}
+
+// An absent string that the target already holds twice or more may be text the task keeps, so the check could never pass.
+// texts maps a project-relative check path to its current text; a path without an entry (missing, folder, too large) is skipped.
+export function absentOccurrenceWarnings(definition: Definition, texts: ReadonlyMap<string, string>): string[] {
+  return definition.nodes.flatMap(node => (node.verify ?? []).flatMap((check, index) => {
+    if (check.kind !== 'file' || check.absent === undefined) return []
+    const count = occurrences(texts.get(check.path) ?? '', check.absent)
+    return count >= 2 ? [`node "${node.id}": check ${index + 1} absent "${check.absent}" already occurs ${count} times in ${check.path} - narrow the string or the path, or the check may never pass`] : []
+  }))
+}
+
+// A long contains text that neither the prompt nor the target file already holds has to be written by a worker who was never told it.
+// texts maps a project-relative check path to its current text; a path without an entry (missing, folder, absolute, too large) still warns.
+export function containsPrecisionWarnings(definition: Definition, texts: ReadonlyMap<string, string>): string[] {
+  return definition.nodes.flatMap(node => (node.verify ?? []).flatMap((check, index) => {
+    if (check.kind !== 'file' || check.contains === undefined || check.contains.length < LONG_CONTAINS) return []
+    if (node.prompt.includes(check.contains) || texts.get(check.path)?.includes(check.contains)) return []
+    return [`node "${node.id}": check ${index + 1} contains a ${check.contains.length}-character exact text that the prompt does not give the worker - quote it in the prompt or check a shorter stable phrase`]
+  }))
 }
