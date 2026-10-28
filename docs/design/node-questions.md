@@ -72,6 +72,15 @@
 - 플러그인 자신의 `agent.spawn` 훅(`hooks/register.ts:4078`)은 학습 목록을 프롬프트에 붙인다. 재개할 때 이렇게 바꾸면 무시되고 보고 줄이 남으므로, `e.resume`이 있으면 `next(e)`를 그대로 불러야 한다.
 - 확인하지 못한 것: `claude --resume` 뒤나 다른 프로세스에서도 transcript 재개가 되는지. `$.agent.list()`는 끝난 서브에이전트 항목을 얼마 뒤 지운다(`index.d.ts:3284`–`3285`). `send` 주석은 transcript에서 재개한다고 하지만, 목록에서 빠진 뒤에도 그런지는 적혀 있지 않다. 4번의 새 시도 대체가 이 경우를 덮는다.
 
+## 재개 smoke test (2026-10-28)
+
+Claude Code 2.1.312의 헤드리스 세션(`claude -p`, 모델 haiku)에서 두 번 돌렸고 두 번 다 같은 결과였다. 시험용 mod는 첫 메인 턴에 `$.agent.spawn`으로 서브에이전트 하나를 띄워 "ALPHA"만 답하게 했다. 그 에이전트의 `turn.complete`가 오면 `$.session.send({ to: { agentId }, text })`로 "BRAVO"만 답하라고 보냈다. 메인 턴은 `sleep 75`로 세션을 살려 두었고, dag-workflow는 `enforcement: off`로 꺼 두었다.
+
+- `session.send`는 `isDelivered: true`를 돌려줬다.
+- 같은 `agentId`로 `turn.complete`가 두 번 왔다. 첫 번째 `answer`는 `"ALPHA"`, 두 번째는 `"BRAVO"`였다. 끝난 서브에이전트가 이전 대화를 가진 채 재개됐다.
+- **타입 주석과 다른 점:** 재개할 때 `agent.spawn` 훅이 불리지 않았다(`e.resume`을 기록하는 훅에 두 번 모두 0줄). 그러니 `agent.spawn` 훅의 `e.resume` 처리는 이 경로에서는 필요 없다. 다만 SendMessage 도구 같은 다른 재개 경로에서는 불릴 수 있으므로, `e.resume`이면 `next(e)`를 그대로 부르는 처리는 방어용으로 남긴다.
+- 확인하지 못한 것: 대화형 세션, `claude --resume` 뒤, 에이전트가 `$.agent.list()`에서 빠진 뒤의 재개. 권장안의 새 시도 대체가 이 경우를 덮는다.
+
 ## 권장안
 
 **설계.** 노드가 `DAG_NODE_STATUS: blocked: <question>`(선택지·기본값·`Needs: person`은 `## Question` 절)으로 턴을 끝내면, 기존에 쓰이지 않던 `blocked` 상태로 둔다. 사람(패널 버튼, `/dag answer`), 메인 모델(`answer` 액션), 헤드리스에서는 Jev, 끝으로 시간 초과 기본값 중 먼저 온 답을 `$.session.send({ to: { agentId } })`로 같은 에이전트에 보낸다. 전달되지 않으면 질문과 답을 프롬프트에 넣은 새 시도로 대체한다.
