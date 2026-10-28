@@ -36,7 +36,7 @@
 | D6 | B7 범위 | `prompt.submit`, `session.receive`, `tool.check` 3개에 로그 후 `next(e)`로 통과. 사용자 알림 없음. `decideTurn` 예외 시 닫히는 게이트는 유지 | 나머지 8개는 검사하지 않았다. P12 결과를 본 뒤 다음 discover에서 다시 판단한다 |
 | D7 | B9를 어디서 고칠지 | 생성되는 review-spec 템플릿(`hooks/engine/stages.ts`) | REPORT*·SUMMARY* 이름은 host가 서브에이전트 쓰기를 막아 메인이 정산 뒤에 쓴다. 이 규칙은 모든 정의에 해당하므로, 리뷰어에게 노드 초안과 Output을 판단하라고 템플릿에서 알린다 |
 | D8 | eval 재측정 시점과 크기 | P15b 뒤 한 번, 시나리오 8개 × `--repeat 2`(세션 16개) | P14 수정은 다음 기준선부터 적용한다(기존 표는 다시 계산하지 않음). 한 번에 측정하면 실모델 사용량을 아낄 수 있다 |
-| D9 | B6 새 기준값 | P15a 측정 결과를 보고 정함(지금은 정하지 않음) | recovery 확신도 관찰값은 0.53, 0.81, 0.57 세 건뿐이다. 근거 없이 값을 고르면 자동 재시도가 Opus 비용을 늘릴 수 있다 |
+| D9 | B6 새 기준값 | HTTP routing 0.8, recovery 0.9(2026-10-28, `eval/baselines/jev-threshold-replay.md`) | recovery 확신도 관찰값은 0.53, 0.81, 0.57 세 건뿐이다. 근거 없이 값을 고르면 자동 재시도가 Opus 비용을 늘릴 수 있다 |
 
 ## Phase 12 — 문서 정합성과 훅 가드 (B2, B7, LEARN-3)
 
