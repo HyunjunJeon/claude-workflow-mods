@@ -26,3 +26,10 @@ test('the dag tool schema declares a string path for start, and the definition s
   expect(INPUT_SCHEMA.properties.path.description).toContain('.yaml, .yml or .json')
   expect(INPUT_SCHEMA.required).toEqual(['action'])
 })
+
+test('the dag tool schema declares the node fields the definition parser reads, slice among them', () => {
+  const node = INPUT_SCHEMA.properties.definition.properties.nodes.items.properties
+  expect(node.slice.type).toBe('boolean')
+  expect(node.slice.description).toContain('vertical slice')
+  expect(node.external.type).toBe('boolean')
+})

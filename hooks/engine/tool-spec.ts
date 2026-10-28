@@ -47,6 +47,7 @@ const NODE_SCHEMA = {
     load_skills: { type: 'array', items: { type: 'string' } },
     writes: { type: 'array', items: { type: 'string' }, description: 'Project-relative write scopes; [] for read-only work' },
     external: { type: 'boolean', description: 'true when the node changes anything outside the project files (push, deploy, database, storage, settings, messages); the automatic review fix never reruns it' },
+    slice: { type: 'boolean', description: 'true when the node is one vertical slice that owns several files; the many-files lint warning becomes a note' },
     verify: {
       type: 'array',
       minItems: 1,
