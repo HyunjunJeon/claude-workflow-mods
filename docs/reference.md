@@ -47,13 +47,14 @@ claude --plugin-dir /path/to/this-project
 /dag handoff <run> cancel       보낸 제안 취소
 /dag accept <run>               나에게 온 제안 수락
 /dag approve <run>              승인 대기 중인 실행을 승인하고 시작
+/dag answer <run> <node> <text> 막힌(blocked) 노드의 질문에 답하기
 /dag reject <run> [reason]      승인 대기 중인 실행을 거부하고 취소(사유는 모델에 전달)
 /dag approval [off|always]      모델이 시작한 실행의 승인 설정(start_approval) 확인·다음 `/reload-plugins`까지 변경
 /dag learn                     아직 학습하지 않은 세션 경험으로 백그라운드 학습
 /dag learning [status|on|off|prune] 학습 상태 확인·현재 세션 켜기/끄기·미사용 스킬 보관
 ```
 
-`handoff`, `accept`, `note`, `approve`, `reject`는 사용자가 직접 입력하거나 패널 버튼을 눌러야 실행됩니다. `approval`은 읽기와 쓰기가 다릅니다. 인자 없이 `/dag approval`로 지금 값을 읽는 것은 누구에게나 열려 있고, `/dag approval off|always`로 바꾸는 것만 사용자 전용입니다. 사용자 전용 명령은 모델이 대신 실행할 수 없습니다.
+`handoff`, `accept`, `note`, `approve`, `reject`, `answer`는 사용자가 직접 입력하거나 패널 버튼을 눌러야 실행됩니다. `approval`은 읽기와 쓰기가 다릅니다. 인자 없이 `/dag approval`로 지금 값을 읽는 것은 누구에게나 열려 있고, `/dag approval off|always`로 바꾸는 것만 사용자 전용입니다. 사용자 전용 명령은 모델이 대신 실행할 수 없습니다.
 
 `/dag run`과 `/dag retry`를 모델 턴이 진행 중일 때 입력하면 정의를 바로 검증하고 실행을 보류 상태로 저장한 뒤, 그 턴이 끝날 때(중단된 턴 포함) 시작합니다. 모델이 턴 안에서 호출하는 `dag` 도구는 계속 즉시 시작합니다.
 
@@ -579,6 +580,7 @@ jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))
 ## 실행 규칙
 
 - 의존 노드가 모두 `completed`인 노드가 `scheduled`가 되고, 실행 수 상한(기본 8)까지 동시에 시작됩니다.
+- 노드가 질문하며 끝나면(`DAG_NODE_STATUS: blocked: <질문>`) `blocked`가 되어 검증 없이 답을 기다립니다. 자세한 내용은 [노드 질문](#노드-질문)입니다.
 - 노드가 실패하거나 취소되면 그 하위 노드는 `skipped`가 됩니다. 관계없는 노드는 계속 실행됩니다.
 - 노드 상태는 서브에이전트 턴 종료 이유로 정합니다. `aborted`면 `cancelled`, `error`/`refusal`이면 `failed`이고, 답변 마지막 줄이 `DAG_NODE_STATUS: failed: <이유>`여도 `failed`입니다.
 - 노드 작업자는 명령을 포그라운드로 실행하고, 자기가 시작한 백그라운드 작업·모니터·백그라운드 서브에이전트가 아직 돌고 있으면 턴을 끝내지 말라고 지시받습니다. 그런데도 백그라운드 작업을 시작한 노드가 `DAG_NODE_STATUS` 줄 없이 턴을 끝내면 플러그인은 바로 검증하지 않고 그 에이전트의 다음 턴을 기다립니다. 30분 안에 다음 턴이 오지 않으면 `ended its turn with background work pending and was not resumed`로 노드를 실패시킵니다.
@@ -599,9 +601,57 @@ jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))
 | `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |
 | `retry {run_id, node_id|node_ids, prompt}` | 실패/취소 노드와 그 때문에 skip된 하위 노드를 다시 실행. 완료 노드는 재사용                                                |
 | `amend {run_id, definition}`               | 노드 fingerprint(prompt, category, agent, dependsOn, verify, writes)를 비교해 바뀐 노드와 그 하위 노드만 다시 실행 |
+| `answer {run_id, node_id, answer}`         | `blocked` 노드의 질문에 답해 이어서 실행. 거부되는 경우는 [노드 질문](#노드-질문) |
 | `send {run_id, node_id, message}`          | 실행 중인 노드에 메시지를 보내 방향을 바꿈                                                                      |
 | `attach {run_id}`                          | 소유 세션이 끝난 실행을 이 세션으로 가져와 남은 노드를 이어서 실행. 소유 세션이 활성이거나 인계 중이면 거부                                |
 | `context` / `decisions` / `sessions`       | 복원 컨텍스트, 판단 기록, 같은 프로젝트 세션과 충돌 조회                                                             |
+
+## 노드 질문
+
+설계 기록은 [docs/design/node-questions.md](design/node-questions.md)입니다.
+
+### 질문하는 방법
+
+노드가 사용자 결정 없이는 진행할 수 없으면 답변의 마지막 줄을 `DAG_NODE_STATUS: blocked: <질문>`으로 끝냅니다(`blocked`는 대소문자를 가리지 않고 콜론은 생략할 수 있습니다). 이 줄 위에 선택적으로 `## Question` 절을 둘 수 있습니다. 마지막으로 나온 `#`~`####` 제목 줄 `Question`(끝의 `:`은 허용)이 그 절이고, 다음 `#` 제목이나 상태 줄까지 이어집니다. 절 안의 각 줄은 앞의 `- `나 `* `가 있어도 되며 다음 형식을 읽습니다.
+
+- `Options: a | b | ...`: `|`로 나누고 공백을 다듬어 빈 값과 중복을 버립니다. 둘 이상 남을 때만 선택지가 됩니다.
+- `Default: <텍스트>`: 비어 있지 않아야 하며 선택지 중 하나이거나 자유 텍스트입니다.
+- `Needs: person`: 사용자만 답할 수 있는 질문입니다. 다른 값은 무시합니다.
+
+키는 대소문자를 가리지 않고 같은 키가 또 나오면 뒤의 줄이 이깁니다. 그 밖의 줄은 무시합니다. 질문 텍스트가 없으면 노드는 `The node reported blocked without a question.`으로 실패합니다. 질문은 사용자 노드에만 안내하며, 생성된 검토 노드(`review-spec`, `review-standards`, `review-security`, `security-<렌즈>`, `security-verify-*`)와 정의에 `commit`이 있을 때의 커밋 노드는 질문할 수 없습니다. 이런 생성 단계 노드가 `blocked`로 끝나면 `missing-input: <질문>`으로 실패합니다.
+
+### 누가 어떤 순서로 답하는가
+
+`blocked` 노드는 검증을 하지 않고 질문을 담은 채 기다립니다. 답은 다음 중 하나에서 옵니다.
+
+1. 사용자: DAG 패널의 선택지 버튼 또는 `/dag answer <run> <node> <text>`. 나머지 단어는 공백 하나로 이어 붙입니다. 인자가 모자라면 `Usage: /dag answer <run> <node> <text>`를 돌려주고, 입력창 밖에서 오면 `This action requires a user command or pane control.`로 거부합니다. 실행을 시작하는 명령으로 취급해 메인 턴이 바쁘면 그 턴이 끝난 뒤 새 시도가 시작됩니다.
+2. 메인 모델: `dag` 도구의 `answer` 액션.
+3. Jev: 비대화형 세션에서만, 선택지가 있고 `Needs: person`이 아닌 질문에 대해 `jev_recovery_confidence` 이상의 확신도로 선택지 하나를 고릅니다. 선택지가 없거나 `Needs: person`이면 Jev를 부르지 않습니다.
+4. 기본값: 질문 후 15분 안에 답이 없으면 `Default`로 답합니다.
+
+답이 없고 기본값도 없는 채로 15분이 지나면 노드는 `clarification: <질문>`으로 실패하며, 이 실패는 Jev 호출 없이 끝나고 자동 복구 대상이 아닙니다.
+
+### 답한 뒤의 실행
+
+답은 `$.session.send`로 같은 에이전트에 보내며, 노드는 `blocked`에서 `running`으로 돌아와 같은 시도 번호와 같은 에이전트로 이어집니다. 전달되지 않으면 노드를 `pending`으로 되돌려 새 시도를 시작하고, 새 프롬프트의 `</task>` 뒤에 질문, 답, 답한 주체(`person`, `model`, `jev`, `timeout`)를 담은 `<clarifications>` 블록을 붙입니다. 답은 노드의 `clarifications`에 쌓이고 재시도와 복구에서도 유지되지만, 프롬프트가 바뀌어 다시 만든 노드에서는 질문과 함께 사라집니다. 로그에는 `<run> › <node>: answered by <by>; the same agent continues` 또는 `a new attempt starts`가 남습니다.
+
+한 시도에서 질문은 두 번까지 답합니다. 같은 시도에서 세 번째 질문이 나오면 노드는 `clarification: <질문>`으로 실패하고 Jev는 부르지 않습니다. 취소하면 `blocked` 노드도 `cancelled`가 되고 질문이 지워집니다.
+
+### `answer` 액션
+
+`answer {run_id, node_id, answer}`는 성공하면 `{ node_id, resumed, state, attempt }`를 돌려줍니다. `unknown_run`, `not_owner`, `handoff_pending` 검사는 다른 액션처럼 먼저 합니다. 이어서 다음 오류가 이 순서로 나옵니다.
+
+| 코드 | 조건 |
+| --- | --- |
+| `rejected_by_user` | 사용자가 거부한 실행(모델 호출만). 그 노드는 사용자만 답할 수 있습니다 |
+| `unknown_node` | 없는 노드 id |
+| `needs_person` | 질문이 `Needs: person`(모델 호출만). 모델은 사용자에게 질문을 전달해야 합니다 |
+| `invalid_request` | `answer`가 비어 있음 |
+| `node_not_blocked` | `Node "<id>" is <state>; only a blocked node takes an answer.` |
+
+### 패널과 밴드
+
+패널의 노드 카드는 `blocked` 노드를 기본으로 펼쳐 질문, `default: <값>`, `Needs: person`이면 `only you can answer this`(한국어 `직접 답해야 하는 질문입니다`), 선택지가 없으면 `answer with /dag answer <run> <node> <text>` 안내를 보여 줍니다. 선택지는 버튼이며 이 세션이 소유한 실행에만 그려지고, 누르면 사용자 답으로 처리합니다. 인스펙터의 Context 화면도 같은 질문 줄을 보여 주되 버튼은 없습니다. 프롬프트 위 밴드는 답을 기다리는 노드가 있으면 `? N waiting for an answer`(한국어 `답변 대기 N`)를 붙입니다. 메인 모델에는 질문이 생길 때 알림이 가고, 사용자에게는 `DAG <run> › <node> asks: <질문 120자까지>` 알림이 갑니다.
 
 ## DAG 패널
 

@@ -1,10 +1,10 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, recoveryHoldReason, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
+import { answerMessage, err, keepAliveMessage, listText, nodeMessage, ok, previewText, questionMessage, questionNotice, recoveryHoldReason, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
 import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { absentOccurrenceWarnings, containsPrecisionWarnings, fileCheckPaths, isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
+import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, questionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
 import { shareJevCall, type PendingJevCall } from './engine/jev-calls.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
@@ -41,6 +41,10 @@ import {
   snapshotOf,
   advance,
   expandNodes,
+  failUnanswered,
+  requeueAnswered,
+  resumeAnswered,
+  type QuestionAnswer,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
@@ -81,6 +85,7 @@ const DAG_FORMS = [
   'retry <run> [nodes...]',
   'approve <run>',
   'reject <run> [reason]',
+  'answer <run> <node> <text>',
   'approval [off|always]',
   'context',
   'note <text>',
@@ -114,6 +119,9 @@ const HOLD_LIMIT_MS = 3_600_000
 // On 2026-10-10 a node that ended its turn waiting on a background `bun eval/run.ts` was verified at once and failed; it
 // resumed by itself later and passed.
 const BACKGROUND_WAIT_MS = 30 * 60_000
+// How long a blocked node waits for an answer in an interactive session before its default is sent or it fails
+// (docs/design/node-questions.md, decision 5).
+const QUESTION_TIMEOUT_MS = 15 * 60_000
 const PANE_ID = 'dag'
 const PREFS_KEY = 'collapse-prefs'
 const VIEW_KEY = 'pane-view'
@@ -624,6 +632,8 @@ const backgroundAgents = new Set<string>()
 // Workers whose turn ended with that work pending and no status line: the answer they gave and the timer that fails the
 // node if no next turn starts within BACKGROUND_WAIT_MS.
 const backgroundWaits = new Map<string, { answer: string; timer: Timer }>()
+// `<run>/<node>` -> the timeout of the question that node is blocked on, in an interactive session.
+const questionTimers = new Map<string, Timer>()
 // Per run and node, the tools already explained in a non-interactive session for the node's current attempt, in
 // first-seen order: a retried call adds no second line, and the settle summary lists them. A new attempt starts over.
 const askedTools = new Map<string, Map<string, { attempt: number; tools: string[] }>>()
@@ -1408,6 +1418,7 @@ async function recoverRuns($: EngineInterface): Promise<void> {
     }
     runs.set(run.runId, requeueLost(run, live, now))
     await tick($, run.runId)
+    for (const node of run.nodes) await waitForAnswer($, run.runId, node.id)
   }
 }
 
@@ -1728,6 +1739,186 @@ async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Ti
   await applyCompletion($, claim, result)
 }
 
+function questionKey(runId: string, nodeId: string): string {
+  return `${runId}/${nodeId}`
+}
+
+function cancelQuestionTimer(runId: string, nodeId: string): void {
+  const key = questionKey(runId, nodeId)
+  questionTimers.get(key)?.cancel()
+  questionTimers.delete(key)
+}
+
+// A blocked node that a cancel ended or an amend rebuilt waits for nothing: its timer stops and its agent is unmapped.
+function dropQuestionWaits(before: Run, after: Run): void {
+  for (const node of before.nodes) {
+    if (node.state !== 'blocked' || after.nodes.find(current => current.id === node.id)?.state === 'blocked') continue
+    cancelQuestionTimer(before.runId, node.id)
+    if (node.agentId) agentRuns.delete(node.agentId)
+  }
+}
+
+// The one way an answer reaches a blocked node, whoever gave it; callers run inside serialized. The answer goes to the same
+// agent, which resumes the same attempt with its context, and its next turn end is verified as usual. When the send is not
+// delivered or throws, the node starts again as a new attempt whose prompt carries the answer (<clarifications>). `resumed`
+// says which of the two happened.
+async function answerNode($: EngineInterface, runId: string, nodeId: string, reply: QuestionAnswer): Promise<Result<{ run: Run; resumed: boolean }>> {
+  const run = runs.get(runId)
+  if (!run) return fail('unknown_run', `No run "${runId}" in this project.`)
+  const now = await $.clock.now()
+  const resumed = resumeAnswered(run, nodeId, reply, now)
+  if (!resumed.ok) return resumed
+  cancelQuestionTimer(runId, nodeId)
+  const agentId = run.nodes.find(node => node.id === nodeId)?.agentId
+  if (agentId) agentRuns.set(agentId, runId)
+  const delivered = agentId !== undefined && await deliverAnswer($, agentId, answerMessage(reply.answer, reply.by))
+  let next = resumed.value
+  if (!delivered) {
+    if (agentId) agentRuns.delete(agentId)
+    const requeued = requeueAnswered(run, nodeId, reply, now)
+    if (!requeued.ok) return requeued
+    next = requeued.value
+  }
+  runs.set(runId, next)
+  $.ui.log(`${run.name} › ${nodeId}: answered by ${reply.by}; ${delivered ? 'the same agent continues' : 'a new attempt starts'}`)
+  return { ok: true, value: { run: (await tick($, runId)) ?? next, resumed: delivered } }
+}
+
+async function deliverAnswer($: EngineInterface, agentId: string, text: string): Promise<boolean> {
+  try {
+    const sent = await $.session.send({ to: { agentId }, text })
+    if (!sent.isDelivered) $.ui.log(`the answer did not reach agent ${agentId}: ${sent.reason}`)
+    return sent.isDelivered
+  } catch (error) {
+    $.ui.log(`the answer did not reach agent ${agentId}: ${message(error)}`)
+    return false
+  }
+}
+
+// Nobody can answer: the node fails as a clarification, with no Jev call (recoverNode refuses the kind anyway).
+async function failQuestion($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  const run = runs.get(runId)
+  if (!run) return
+  const failed = failUnanswered(run, nodeId, await $.clock.now())
+  if (!failed.ok) {
+    $.ui.log(`${run.name} › ${nodeId}: ${failed.error.message}`)
+    return
+  }
+  cancelQuestionTimer(run.runId, nodeId)
+  const agentId = run.nodes.find(node => node.id === nodeId)?.agentId
+  if (agentId) agentRuns.delete(agentId)
+  runs.set(run.runId, failed.value)
+  $.ui.log(`${run.name} › ${nodeId}: failed (${failed.value.nodes.find(node => node.id === nodeId)?.error})`)
+  $.ui.toast(t.toastNodeFailed(run.name, nodeId), { timeoutMs: ATTENTION_TOAST_MS })
+  failureToasts.set(run.runId, (failureToasts.get(run.runId) ?? new Set()).add(nodeId))
+  await tick($, run.runId)
+}
+
+// A non-interactive session has nobody to wait for: Jev picks one of the node's options when it clears
+// jev_recovery_confidence, else the node's default is sent, else the node fails as a clarification. The decision is logged
+// as a recovery record, since decisions.ts has no question kind and the bar is the recovery one.
+async function decideUnattended($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  const run = runs.get(runId)
+  const node = run?.nodes.find(current => current.id === nodeId)
+  const question = node?.question
+  if (!run || !node || !question) return
+  const request = questionRequest(run, node)
+  if (request) {
+    const evaluation = await evaluateJev($, request)
+    const choice = evaluation.choices.get('question')
+    const outcome = decisionOutcome(evaluation, choice, 'question', jevRecoveryConfidence)
+    const picked = outcome === 'applied' ? question.options?.find(option => option === choice?.choice) : undefined
+    const scored: { confidence?: number, probabilities?: DecisionRecord['probabilities'] } = {}
+    if (choice) {
+      scored.confidence = choice.confidence
+      if (choice.probabilities) scored.probabilities = choice.probabilities
+    }
+    await persistDecisions($, [decisionRecord({
+      at: await $.clock.now(), kind: 'recovery', subject: `${node.id} question`, runId: run.runId, nodeId: node.id,
+      proposed: question.default ?? 'clarification', selected: picked ?? question.default ?? 'clarification',
+      source: picked === undefined ? 'baseline' : 'jev', outcome, latencyMs: evaluation.latencyMs,
+      stateHash: hash(stableStringify(request.state)), ...scored,
+    }, evaluation, jevRecoveryConfidence)])
+    if (picked !== undefined) {
+      logUnanswered($, run, nodeId, await answerNode($, run.runId, nodeId, { answer: picked, by: 'jev' }))
+      return
+    }
+  }
+  if (question.default !== undefined) {
+    logUnanswered($, run, nodeId, await answerNode($, run.runId, nodeId, { answer: question.default, by: 'timeout' }))
+    return
+  }
+  await failQuestion($, runId, nodeId)
+}
+
+function logUnanswered<T>($: EngineInterface, run: Run, nodeId: string, result: Result<T>): void {
+  if (!result.ok) $.ui.log(`${run.name} › ${nodeId}: the answer was not applied: ${result.error.message}`)
+}
+
+async function questionTimedOut($: EngineInterface, runId: string, nodeId: string, askedAt: number): Promise<void> {
+  const run = runs.get(runId)
+  const question = run?.nodes.find(node => node.id === nodeId && node.state === 'blocked')?.question
+  // Answered, cancelled, rebuilt by an amend, asked again or handed to another session since the timer started.
+  if (!run || run.sessionId !== sessionId || question?.askedAt !== askedAt) return
+  questionTimers.delete(questionKey(runId, nodeId))
+  if (question.default !== undefined) {
+    logUnanswered($, run, nodeId, await answerNode($, runId, nodeId, { answer: question.default, by: 'timeout' }))
+    return
+  }
+  await failQuestion($, runId, nodeId)
+}
+
+// A blocked node's agent stays mapped, so the turn an answer starts comes back through onAgentDone. An interactive session
+// waits up to QUESTION_TIMEOUT_MS from when the node asked (less after a restart); a non-interactive one decides at once.
+async function waitForAnswer($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  const node = runs.get(runId)?.nodes.find(current => current.id === nodeId)
+  if (node?.state !== 'blocked' || !node.question || !node.agentId) return
+  agentRuns.set(node.agentId, runId)
+  if (!interactive) {
+    await decideUnattended($, runId, nodeId)
+    return
+  }
+  cancelQuestionTimer(runId, nodeId)
+  const askedAt = node.question.askedAt
+  const timer = $.clock.after(Math.max(0, askedAt + QUESTION_TIMEOUT_MS - await $.clock.now()), () => {
+    serialized(() => questionTimedOut($, runId, nodeId, askedAt)).catch(error => {
+      $.ui.log(`could not end the wait for an answer of ${runId}/${nodeId}: ${message(error)}`)
+    })
+  })
+  questionTimers.set(questionKey(runId, nodeId), timer)
+}
+
+// A node that just asked: besides the wait, an interactive session tells the main conversation once (the model may answer
+// unless the question needs the person) and the person.
+async function nodeBlocked($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  await waitForAnswer($, runId, nodeId)
+  const run = runs.get(runId)
+  const question = run?.nodes.find(node => node.id === nodeId)?.question
+  if (!interactive || !run || !question) return
+  // Plugin submissions run once idle; never await them in the queue.
+  submitRunNews($, run, questionMessage(run, nodeId, question, TOOL_NAME, QUESTION_TIMEOUT_MS / 60_000)).then(result => {
+    if ('drop' in result) throw new Error(result.drop)
+  }).catch(error => {
+    $.ui.log(`could not tell the session that ${run.runId}/${nodeId} asks a question: ${message(error)}`)
+  })
+  raiseNotify($, questionNotice(run.name, nodeId, question.text), true)
+}
+
+// The pane's option buttons: a press is the person's own answer, checked as a typed /dag answer is. A new attempt the
+// fallback starts waits for a busy main turn to end, as an approval does.
+async function paneAnswer($: EngineInterface, runId: string, nodeId: string, answer: string): Promise<void> {
+  const reply = await serialized(async () => {
+    deferStarts = mainTurnBusy
+    try {
+      return await handleTool($, { action: 'answer', run_id: runId, node_id: nodeId, answer }, 'user')
+    } finally {
+      deferStarts = false
+    }
+  })
+  if (reply.isError) $.ui.log(reply.result)
+  $.ui.invalidate('ui.render')
+}
+
 async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   endBackgroundWait(end.agentId)
   const pending = await awaitsBackground($, end)
@@ -1835,6 +2026,10 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   }
   $.ui.log(`${run.name} › ${node.id}: ${outcome.state}${outcome.error ? ` (${outcome.error})` : ''}`)
   const after = await tick($, runId)
+  if (after?.nodes.find(current => current.id === node.id)?.state === 'blocked') {
+    await nodeBlocked($, runId, node.id)
+    return
+  }
   if (!paneSurface && after && !isSettled(after)) {
     // No pane to watch: say that a node finished; the settle summary still goes through announce.
     submitRunNews($, after, nodeMessage(after, node.id)).catch(error => {
@@ -2601,6 +2796,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
       cancelled = markFinished(cancelled, node.id, { state: 'cancelled', error: `Cancelled: ${reason}` }, now)
     }
     for (const node of run.nodes) if (node.agentId) clearWaiting($, node.agentId)
+    dropQuestionWaits(run, cancelled)
     await persist($, cancelled)
     const failures: { agent_id: string; error: string }[] = []
     for (const agentId of stopAgents) {
@@ -2632,6 +2828,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
+    dropQuestionWaits(run, routed)
     runs.set(run.runId, routed)
     await record($, { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
     return ok({
@@ -2653,6 +2850,22 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     return sent.isDelivered
       ? ok({ delivered: true, node_id: node.id })
       : err({ code: 'not_delivered', message: sent.reason ?? 'The message was not delivered.' })
+  }
+  if (input.action === 'answer') {
+    // A run the person rejected takes no answer from the model.
+    if (run.rejected && by === 'model') {
+      return err({ code: 'rejected_by_user', message: `The user rejected run ${run.runId} ("${run.name}"); only the user can answer its nodes.` })
+    }
+    const node = run.nodes.find(n => n.id === input.node_id)
+    if (!node) return err({ code: 'unknown_node', message: `Node "${String(input.node_id)}" is not in run ${run.runId}.` })
+    if (node.question?.needsPerson && by === 'model') {
+      return err({ code: 'needs_person', message: `Node "${node.id}" marked its question Needs: person, so only the user can answer it, in the /dag pane or with /dag answer ${run.runId} ${node.id} <text>. Tell the user the question instead.` })
+    }
+    if (typeof input.answer !== 'string' || input.answer.trim() === '') return err({ code: 'invalid_request', message: 'answer needs a non-empty answer.' })
+    const answered = await answerNode($, run.runId, node.id, { answer: input.answer.trim(), by: by === 'user' ? 'person' : 'model' })
+    if (!answered.ok) return err(answered.error)
+    const after = answered.value.run.nodes.find(n => n.id === node.id)
+    return ok({ node_id: node.id, resumed: answered.value.resumed, state: after?.state, attempt: after?.attempt })
   }
   return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
 }
@@ -3192,6 +3405,13 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
     const text = run ? runStatusText(run) : reply.result
     return { text: warnings.length ? `${text}\nWarnings:\n${warnings.map(warning => `- ${warning}`).join('\n')}` : text }
   }
+  if (verb === 'answer') {
+    const [runId, nodeId, ...words] = rest
+    if (!runId || !nodeId || words.length === 0) return { text: 'Usage: /dag answer <run> <node> <text>' }
+    const reply = await handleTool($, { action: 'answer', run_id: runId, node_id: nodeId, answer: words.join(' ') }, fromComposer ? 'user' : 'model')
+    const run = runs.get(runId)
+    return { text: reply.isError || !run ? reply.result : runStatusText(run) }
+  }
   if (verb !== 'status' && verb !== 'cancel' && verb !== 'retry') return { text: USAGE }
   const run = rest[0] ? runs.get(rest[0]) : undefined
   if (!run) return { text: `Unknown run "${rest[0] ?? ''}".\n${USAGE}` }
@@ -3668,6 +3888,14 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
           ],
         }),
         ...(card.lines.length ? [Box({ flexDirection: 'column', paddingLeft: 4, children: card.lines.map(line) })] : []),
+        ...(card.options.length && run.sessionId === sessionId
+          ? [Box({
+            flexDirection: 'row',
+            columnGap: 2,
+            paddingLeft: 4,
+            children: card.options.map((option, at) => Button({ key: `answer-${card.id}-${at}`, label: option, plain: true, onPress: () => paneAnswer($, run.runId, card.id, option) })),
+          })]
+          : []),
       ],
     }),
   )
@@ -4076,6 +4304,8 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('agent.spawn', async ($, e, next) => {
+    // A resume (an answered node question, a SendMessage) may only be refused: a changed prompt is ignored and reported.
+    if (e.resume) return next(e)
     if (e.parentAgentId && learningAgents.has(e.parentAgentId)) return { deny: 'Session learning returns proposals without spawning agents.' }
     if (learningSpawning && e.name === learningSpawnName) {
       const result = await next({ ...e, background: true })
@@ -4360,10 +4590,11 @@ export function register(on: On, options: PluginOptions) {
   on('command.run', { command: 'dag' }, async ($, e) => {
     const [verb, setting] = splitArgs(e.args ?? '')
     // Approving is the person's call: the model could otherwise approve its own run, or switch the gate off.
-    const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || (verb === 'approval' && setting !== undefined)
+    const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || verb === 'answer' || (verb === 'approval' && setting !== undefined)
     if (userOnly && e.origin.kind !== 'composer') return { text: USER_ONLY }
     const fromComposer = e.origin.kind === 'composer'
-    const starts = verb === 'run' || verb === 'retry' || verb === 'approve'
+    // An answer that cannot reach its agent starts a new attempt.
+    const starts = verb === 'run' || verb === 'retry' || verb === 'approve' || verb === 'answer'
     if (!mainTurnBusy || !starts) {
       const out = await serialized(() => runCommand($, e.args ?? '', fromComposer))
       if (starts) openHeldTurn($)

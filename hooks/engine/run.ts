@@ -1,8 +1,8 @@
 import { definitionHash, nodeFingerprint } from './definition.ts'
-import { extractOutput } from './node-prompt.ts'
+import { extractOutput, MAX_QUESTIONS_PER_ATTEMPT, mayAsk } from './node-prompt.ts'
 import { VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
-import { fail, type Definition, type NodeDef, type NodeRun, type NodeState, type Result, type ReviewFinding, type Run, type RunStatus } from './types.ts'
+import { fail, type AnswerSource, type Definition, type NodeDef, type NodeQuestion, type NodeRun, type NodeState, type QuestionSpec, type Result, type ReviewFinding, type Run, type RunStatus } from './types.ts'
 
 export const MAX_ANSWER_CHARS = 20_000
 
@@ -112,21 +112,107 @@ export function markRunning(input: Run, id: string, agentId: string, now: number
   return advance(run, now)
 }
 
-export type NodeOutcome = { state: 'completed' | 'failed' | 'cancelled'; answer?: string; error?: string; reportPath?: string }
+type OutcomeReport = { answer?: string; error?: string; reportPath?: string }
 
-export function markFinished(input: Run, id: string, outcome: NodeOutcome, now: number): Run {
-  const run = clone(input)
-  const node = nodeOf(run, id)
-  if (node.state !== 'running') return input
-  node.state = outcome.state
-  node.finishedAt = now
+export type BlockedOutcome = OutcomeReport & { state: 'blocked'; question: QuestionSpec }
+
+export type NodeOutcome = (OutcomeReport & { state: 'completed' | 'failed' | 'cancelled' }) | BlockedOutcome
+
+function keepReport(node: NodeRun, outcome: NodeOutcome): void {
   if (outcome.answer !== undefined) {
     node.answer = keepEnds(outcome.answer, MAX_ANSWER_CHARS)
     node.output = extractOutput(outcome.answer)
   }
   if (outcome.reportPath !== undefined) node.reportPath = outcome.reportPath
   if (outcome.error !== undefined) node.error = outcome.error
+}
+
+export function markFinished(input: Run, id: string, outcome: NodeOutcome, now: number): Run {
+  if (outcome.state === 'blocked') return markBlocked(input, id, outcome, now)
+  const run = clone(input)
+  const node = nodeOf(run, id)
+  if (node.state !== 'running') return input
+  node.state = outcome.state
+  node.finishedAt = now
+  keepReport(node, outcome)
   return advance(run, now)
+}
+
+function failAsked(node: NodeRun, error: string, now: number): void {
+  node.state = 'failed'
+  node.error = error
+  node.finishedAt = now
+  delete node.question
+}
+
+// A question nobody answers ends the node failed as a clarification. The kind is recorded the way register.ts attemptRecovery
+// records a kind recoverNode refuses, with the budget and history unchanged: asking is not a failed attempt.
+function failClarification(node: NodeRun, question: string, now: number): void {
+  failAsked(node, `clarification: ${question}`, now)
+  const previous = node.recovery
+  node.recovery = { used: previous?.used ?? 0, kind: 'clarification', reason: `clarification: ${question}`, history: previous?.history ?? [] }
+  if (previous?.model) node.recovery.model = previous.model
+}
+
+// A running node's agent ended its turn on a question: the node waits on it, keeping its agent so an answer can resume that
+// agent at the same attempt. A third question in one attempt fails it as a clarification, and a generated stage node, which
+// may not ask (mayAsk), fails the way its prompt says a missing input does.
+export function markBlocked(input: Run, id: string, outcome: BlockedOutcome, now: number): Run {
+  const run = clone(input)
+  const node = nodeOf(run, id)
+  if (node.state !== 'running') return input
+  keepReport(node, outcome)
+  const asked = (node.clarifications ?? []).filter(entry => entry.attempt === node.attempt).length
+  if (!mayAsk(run.definition, id)) failAsked(node, `missing-input: ${outcome.question.text}`, now)
+  else if (asked >= MAX_QUESTIONS_PER_ATTEMPT) failClarification(node, outcome.question.text, now)
+  else {
+    node.state = 'blocked'
+    node.question = { ...outcome.question, askedAt: now }
+  }
+  return advance(run, now)
+}
+
+export type QuestionAnswer = { answer: string; by: AnswerSource }
+
+function answered(input: Run, id: string, reply: QuestionAnswer, now: number): Result<{ run: Run; node: NodeRun }> {
+  const run = clone(input)
+  const node = run.nodes.find(current => current.id === id)
+  if (!node) return fail('unknown_node', `Node "${id}" is not in run ${run.runId}.`)
+  if (node.state !== 'blocked' || !node.question) return fail('node_not_blocked', `Node "${id}" is ${node.state}; only a blocked node takes an answer.`)
+  node.clarifications = [...(node.clarifications ?? []), { question: node.question.text, answer: reply.answer, by: reply.by, at: now, attempt: node.attempt }]
+  delete node.question
+  delete node.answer
+  delete node.output
+  delete node.reportPath
+  delete node.error
+  return { ok: true, value: { run, node } }
+}
+
+// The answer reached the node's agent: the same attempt goes on with the same agent, whose next turn end is read as usual.
+export function resumeAnswered(input: Run, id: string, reply: QuestionAnswer, now: number): Result<Run> {
+  const result = answered(input, id, reply, now)
+  if (!result.ok) return result
+  result.value.node.state = 'running'
+  return { ok: true, value: advance(result.value.run, now) }
+}
+
+// The answer could not reach the agent: the node starts again as a new attempt, whose prompt lists the answer (buildNodePrompt).
+export function requeueAnswered(input: Run, id: string, reply: QuestionAnswer, now: number): Result<Run> {
+  const result = answered(input, id, reply, now)
+  if (!result.ok) return result
+  result.value.node.state = 'pending'
+  delete result.value.node.agentId
+  return { ok: true, value: advance(result.value.run, now) }
+}
+
+// Nobody answered in time and the question had no default: the node fails as a clarification.
+export function failUnanswered(input: Run, id: string, now: number): Result<Run> {
+  const run = clone(input)
+  const node = run.nodes.find(current => current.id === id)
+  if (!node) return fail('unknown_node', `Node "${id}" is not in run ${run.runId}.`)
+  if (node.state !== 'blocked' || !node.question) return fail('node_not_blocked', `Node "${id}" is ${node.state}; only a blocked node can go unanswered.`)
+  failClarification(node, node.question.text, now)
+  return { ok: true, value: advance(run, now) }
 }
 
 export function failToStart(input: Run, id: string, error: string, now: number): Run {
@@ -166,6 +252,7 @@ function endUnfinished(input: Run, reason: string, nodeError: string, now: numbe
       node.state = 'cancelled'
       node.error = nodeError
       node.finishedAt = now
+      delete node.question
     }
   }
   return { run: advance(run, now), stopAgents }
@@ -416,6 +503,17 @@ export type NodeSnapshot = {
   output?: string
   report_path?: string
   answer?: string
+  question?: QuestionSnapshot
+}
+
+export type QuestionSnapshot = { text: string; options?: string[]; default?: string; needs_person?: true; asked_at: number }
+
+function questionSnapshot(question: NodeQuestion): QuestionSnapshot {
+  const snapshot: QuestionSnapshot = { text: question.text, asked_at: question.askedAt }
+  if (question.options) snapshot.options = question.options
+  if (question.default !== undefined) snapshot.default = question.default
+  if (question.needsPerson) snapshot.needs_person = true
+  return snapshot
 }
 
 export type RunSnapshot = {
@@ -444,25 +542,29 @@ export function snapshotOf(run: Run, answerChars = 2_000): RunSnapshot {
     updated_at: run.updatedAt,
     ...(run.nodes.some(node => node.verification) ? { verification_guidance: VERIFICATION_GUIDANCE } : {}),
     ...(run.approval ? { awaiting_approval: true as const } : {}),
-    nodes: run.nodes.map(n => ({
-      id: n.id,
-      label: n.label,
-      state: n.state,
-      attempt: n.attempt,
-      ...(n.agentId ? { task_id: n.agentId } : {}),
-      ...(defs.get(n.id)?.category ? { category: defs.get(n.id)?.category } : {}),
-      ...(n.routing ? { routing: n.routing } : {}),
-      ...(n.model ? { model: n.model } : {}),
-      ...(n.verification ? { verification: n.verification } : {}),
-      ...(n.recovery ? { recovery: n.recovery } : {}),
-      depends_on: defs.get(n.id)?.dependsOn ?? [],
-      ...(n.startedAt !== undefined ? { started_at: n.startedAt } : {}),
-      ...(n.finishedAt !== undefined ? { finished_at: n.finishedAt } : {}),
-      ...(n.error ? { last_error: { message: n.error } } : {}),
-      ...(n.output ? { output: n.output } : {}),
-      ...(n.reportPath ? { report_path: n.reportPath } : {}),
-      ...(n.answer && answerChars > 0 ? { answer: keepEnds(n.answer, answerChars) } : {}),
-    })),
+    nodes: run.nodes.map(n => {
+      const node: NodeSnapshot = {
+        id: n.id,
+        label: n.label,
+        state: n.state,
+        attempt: n.attempt,
+        ...(n.agentId ? { task_id: n.agentId } : {}),
+        ...(defs.get(n.id)?.category ? { category: defs.get(n.id)?.category } : {}),
+        ...(n.routing ? { routing: n.routing } : {}),
+        ...(n.model ? { model: n.model } : {}),
+        ...(n.verification ? { verification: n.verification } : {}),
+        ...(n.recovery ? { recovery: n.recovery } : {}),
+        depends_on: defs.get(n.id)?.dependsOn ?? [],
+        ...(n.startedAt !== undefined ? { started_at: n.startedAt } : {}),
+        ...(n.finishedAt !== undefined ? { finished_at: n.finishedAt } : {}),
+        ...(n.error ? { last_error: { message: n.error } } : {}),
+        ...(n.output ? { output: n.output } : {}),
+        ...(n.reportPath ? { report_path: n.reportPath } : {}),
+        ...(n.answer && answerChars > 0 ? { answer: keepEnds(n.answer, answerChars) } : {}),
+      }
+      if (n.question) node.question = questionSnapshot(n.question)
+      return node
+    }),
     edges: edgesOf(run.definition.nodes),
   }
 }

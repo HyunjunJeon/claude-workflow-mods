@@ -99,6 +99,18 @@ export type Definition = {
   commit?: CommitEntry[]
 }
 
+// What a node asks when it ends its turn with `DAG_NODE_STATUS: blocked: <text>` (node-prompt.ts parseOutcome). options
+// holds two or more choices; needsPerson means only the person may answer (permissions, cost, external changes).
+export type QuestionSpec = { text: string; options?: string[]; default?: string; needsPerson?: true }
+
+export type NodeQuestion = QuestionSpec & { askedAt: number }
+
+export type AnswerSource = 'person' | 'model' | 'jev' | 'timeout'
+
+// One answered question. attempt is the node attempt that asked it, so markBlocked can count the questions of the current
+// attempt and the prompt of a later attempt can say which attempt it came from.
+export type Clarification = { question: string; answer: string; by: AnswerSource; at: number; attempt: number }
+
 export type NodeRun = {
   id: string
   label: string
@@ -114,6 +126,10 @@ export type NodeRun = {
   answer?: string
   output?: string
   reportPath?: string
+  // Set only while the node is blocked on it.
+  question?: NodeQuestion
+  // Every answered question, oldest first. Retry, recovery and rework keep them; an amend that changes the node drops them.
+  clarifications?: Clarification[]
   routing?: {
     // rule: a final audit proposed or routed as trivial runs on standard.
     readonly source: 'jev' | 'definition' | 'rule'

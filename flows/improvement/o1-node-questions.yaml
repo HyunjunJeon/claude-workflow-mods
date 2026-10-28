@@ -1,0 +1,249 @@
+# O1: a running node can ask one blocking question and resume once it is answered. Design and decisions:
+# docs/design/node-questions.md (`## 권장안`, `## 결정할 것` with every recommended answer taken, and the 2026-10-28 headless
+# smoke test: $.session.send to a finished subagent resumed it under the same agentId with its context; the agent.spawn
+# hook did not fire for that resume). O3 (rework reuse) stays out of scope.
+# Decisions taken (numbers from `## 결정할 것`): 1 implement; 2 reuse the existing `blocked` state; 3 the main model may
+# answer with a dag `answer` action, except a rejected run and a `Needs: person` question; 4 Jev answers only in a
+# non-interactive session and only a question with options, at jev_recovery_confidence; 5 interactive timeout 15 min as a
+# constant, the default is sent if given, otherwise failed: clarification; non-interactive decides at once; 6 at most two
+# questions per attempt, the third is failed: clarification; 7 an amend that changes a node's fingerprint drops its
+# questions and answers; 8 generated review, security and commit nodes do not ask; 9 O3 later.
+#
+# PREREQUISITE: `git status --short` prints nothing but this file.
+# Run it with:  /dag run flows/improvement/o1-node-questions.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves): one chain, because every node verifies with the whole suite and the later nodes build on
+# the earlier ones' types and functions (skills/planning/references/planning.md, the whole-suite bullet).
+#   wave 1: engine   (types, transitions, status-line parsing, the clarifications prompt block, the Jev question request)
+#   wave 2: runtime  (register.ts: blocked branch, resume and fallback, answer paths, timeout, non-interactive decision,
+#                     notification; tool-spec answer action)
+#   wave 3: surface  (pane question card with option buttons, band line, both languages)
+#   wave 4: docs     (reference and README)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: hard for engine and runtime (new state machine edges and async resume/fallback/timeout paths); standard for
+# surface; writing for docs.
+# Edges carry: engine -> runtime the exported names and the question format; runtime -> surface the hooks the buttons
+# call and the snapshot fields; runtime and surface -> docs the commands, action, lines and strings.
+
+key: improve-o1-node-questions-1
+name: O1 - node questions
+goal: >
+  A DAG node that ends its turn with `DAG_NODE_STATUS: blocked: <question>` (options, default and `Needs: person` in a
+  `## Question` section) goes to the blocked state without verification; the answer comes from the person (pane buttons
+  or `/dag answer`), the main model (dag `answer` action, refused for rejected runs and Needs: person questions), Jev in a
+  non-interactive session (options only, at jev_recovery_confidence), or the default after 15 minutes, and is sent to the
+  same agent with $.session.send so it resumes at the same attempt, falling back to a new attempt with a
+  <clarifications> block when the send is not delivered; a third question or a timeout without a default ends the node
+  failed: clarification without a Jev call; generated review, security and commit nodes cannot ask; docs describe it;
+  the plugin tests, tsc and validate pass.
+review:
+  request: |
+    권장 경로로 진행
+    Implement O1 as recommended in docs/design/node-questions.md (`## 권장안`), with the recommended answer to every
+    question in `## 결정할 것` (listed in this definition's header), after the 2026-10-28 smoke test showed that
+    $.session.send resumes a finished subagent under the same agentId:
+    - `DAG_NODE_STATUS: blocked: <question>` on the last line puts the node in `blocked` with no verification; a
+      `## Question` section may give options, a default and `Needs: person`.
+    - Answers: the person in the pane or with `/dag answer <run> <node> <text>` typed in the composer; the main model with
+      a dag `answer` action (refused for a rejected run and for a Needs: person question); Jev only in a non-interactive
+      session and only for a question with options, at jev_recovery_confidence; the default after a 15-minute timeout.
+    - The answer goes to the same agent with $.session.send; the node is running again at the same attempt, and the
+      agent's next turn end is verified as usual. If the send is not delivered, the node starts a new attempt whose
+      prompt carries a <clarifications> block with the question and the answer.
+    - A timeout without a default, a third question in one attempt, or a non-interactive question nobody can answer ends
+      the node `failed: clarification: <question>` with recovery kind clarification and no Jev call.
+    - Generated review, security and commit nodes are not told about blocked and cannot use it.
+    - An amend that changes a node's fingerprint drops its questions and answers.
+    - The pane shows the question with one button per option; the band says a node is waiting for an answer; English and
+      Korean strings change together; docs/reference.md and README.md describe the state, the command and the action.
+  rules:
+    - AGENTS.md
+    - hooks/AGENTS.md
+commit:
+  - message: |
+      feat(questions): let a node ask a blocking question and resume when answered
+
+      A node that ends with DAG_NODE_STATUS: blocked: <question> waits in the blocked state; the person (pane or
+      /dag answer), the main model (answer action), Jev in a non-interactive session or a timeout default answers, and
+      $.session.send resumes the same agent at the same attempt, with a new attempt carrying the answer as the fallback.
+      Design: docs/design/node-questions.md.
+    paths:
+      - hooks
+      - tests
+      - docs/reference.md
+      - README.md
+      - flows/improvement/o1-node-questions.yaml
+nodes:
+  - id: engine
+    label: Blocked state, question parsing and clarifications in the engine
+    category: hard
+    slice: true
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes:
+      - hooks/engine/types.ts
+      - hooks/engine/run.ts
+      - hooks/engine/node-prompt.ts
+      - hooks/engine/jev.ts
+      - tests/questions.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/run.ts
+        matches: "export function markBlocked\\("
+      - kind: file
+        path: tests/questions.test.ts
+        contains: "blocked"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Build the engine half of node questions as docs/design/node-questions.md describes in `## 권장안` (read the
+      whole document first, including `## 이어가기` and the smoke-test section; the decisions taken are in the header of
+      flows/improvement/o1-node-questions.yaml). Pure engine code only; the runtime node after you wires it into
+      hooks/register.ts.
+      DELIVERABLE:
+      (1) hooks/engine/types.ts: `NodeRun.question?` (text, options?, default?, needsPerson?, askedAt) and
+          `NodeRun.clarifications?` (question, answer, by: 'person' | 'model' | 'jev' | 'timeout', at); `blocked` already
+          exists in NodeState.
+      (2) hooks/engine/node-prompt.ts: parseOutcome reads `DAG_NODE_STATUS: blocked: <question>` only on the last line, as
+          it reads completed and failed today, plus an optional `## Question` section in the report with lines
+          `Options: <a> | <b> | ...`, `Default: <option or text>` and `Needs: person` (define the exact grammar, keep it
+          small, and say it in Output). The status-line instructions buildNodePrompt gives a user node gain one sentence on
+          blocked and the section; generated review, security-lens, security-verifier and commit nodes do not get it (find
+          how stages.ts marks them). buildNodePrompt adds a `<clarifications>` block listing every earlier question and
+          answer when the node has any, with a line that an earlier attempt may already have changed files.
+      (3) hooks/engine/run.ts: `blocked` in NodeOutcome; `markBlocked` (running -> blocked, keeps agentId, sets question,
+          counts questions per attempt), `resumeAnswered` (blocked -> running, same attempt, appends to clarifications,
+          clears question) and `requeueAnswered` (blocked -> pending for a new attempt, appends to clarifications); a third
+          question in one attempt becomes failed with error `clarification: <question>`; deriveStatus treats blocked as
+          active; cancel ends a blocked node; snapshotOf exports the question; an amend whose fingerprint changed drops
+          question and clarifications while retry, recovery and rework keep clarifications.
+      (4) hooks/engine/jev.ts: `questionRequest(run, node)` that asks Jev to pick one of the question's options (options as
+          criteria), in the style of the existing request builders.
+      (5) tests/questions.test.ts covering each of these behaviors through the public engine functions, red before green.
+      SCOPE: edit only the files in writes; do not touch hooks/register.ts, tool-spec.ts or hooks/ui.
+      VERIFY: run claude plugin test . and bunx -p typescript@5 tsc -p . --noEmit.
+      STOP WHEN: the tests pass. In Output, give every new export with its signature, the exact question grammar, the
+      error text of each failure case, and which node kinds are excluded and how they are recognized.
+
+  - id: runtime
+    label: Answer paths, resume and fallback in the runtime
+    category: hard
+    slice: true
+    dependsOn: [engine]
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes:
+      - hooks/register.ts
+      - hooks/engine/tool-spec.ts
+      - hooks/engine/format.ts
+      - tests/questions-runtime.test.ts
+      - tests/tool-spec.test.ts
+    verify:
+      - kind: file
+        path: hooks/engine/tool-spec.ts
+        contains: "'answer'"
+      - kind: file
+        path: tests/questions-runtime.test.ts
+        contains: "session.send"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Wire node questions into the runtime, using the engine functions the engine node reports in its Output, as
+      docs/design/node-questions.md describes (`## 답하는 경로`, `## 이어가기`, `## 권장안`; the decisions are in the header
+      of flows/improvement/o1-node-questions.yaml).
+      DELIVERABLE in hooks/register.ts (with format.ts for message text and tool-spec.ts for the schema):
+      (1) onAgentDone: a blocked outcome writes the report, skips verification, calls markBlocked, leaves the agent
+          mapping so the same agentId's next turn end is claimed, and tells the main conversation once (submitRunNews) and
+          the person ($.ui.notify through the existing raiseNotify) that the node waits for an answer.
+      (2) One answer function used by every path: resumeAnswered, re-register the agent mapping, then
+          `$.session.send({ to: { agentId }, text })` with `<answer by="...">...</answer>` and a line to continue the task
+          and end with the status line; when isDelivered is false or the send throws, requeueAnswered and start the node
+          as a new attempt. The next turn end of the resumed agent is verified and recovered as today.
+      (3) Answer paths: the dag tool `answer` action {run_id, node_id, answer} for the main model (refused with clear
+          errors for a run the person rejected, a node that is not blocked, and a Needs: person question; add the action
+          and fields to tool-spec.ts and keep TOOL_DESCRIPTION within its limit and tests/tool-spec.test.ts passing);
+          `/dag answer <run> <node> <text>` typed by the person in the composer, accepted only the way `/dag approve`
+          is (see how approve tells a person's command from a model's); the pane buttons come in the next node, so expose
+          the answer function for it.
+      (4) Timeout: in an interactive session a 15-minute $.clock.after per question; at expiry send the default as
+          `by: timeout`, or end the node failed `clarification: <question>` with recovery kind clarification recorded and
+          no Jev call; cancel the timer when answered or cancelled. In a non-interactive session decide at once: Jev
+          (questionRequest, only with options, applied at jev_recovery_confidence and recorded in decisions like other
+          Jev kinds), else the default, else the same failure.
+      (5) The agent.spawn hook keeps calling next(e) unchanged when e.resume is set (the smoke test saw no such event for
+          this path, but another resume path may raise it).
+      (6) tests/questions-runtime.test.ts through the existing harness (tests/control-harness.ts, its session.send mock):
+          a blocked turn end runs no verification; the answer action and /dag answer resume via session.send at the same
+          attempt and the next turn end completes the node; isDelivered false starts a new attempt whose prompt has the
+          clarifications block; timeout with and without default; non-interactive Jev above and below the bar, default,
+          failure; answer refused for rejected runs and Needs: person; the agent.spawn resume pass-through. Red before green.
+      SCOPE: edit only the files in writes; hooks/ui is the next node's.
+      VERIFY: run claude plugin test ., bunx -p typescript@5 tsc -p . --noEmit and claude plugin validate .
+      STOP WHEN: the checks pass. In Output, give the answer function's name and signature for the surface node, the
+      snapshot fields it can read, the exact /dag answer usage and answer action errors, and the notification texts.
+
+  - id: surface
+    label: Question card, option buttons and band line in the pane
+    category: standard
+    dependsOn: [runtime]
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes:
+      - hooks/ui
+      - hooks/register.ts
+      - tests/inspector.test.ts
+      - tests/view.test.ts
+      - tests/questions-surface.test.ts
+    verify:
+      - kind: file
+        path: tests/questions-surface.test.ts
+        contains: "blocked"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Show node questions in the pane, using the runtime node's Output (answer function, snapshot fields).
+      DELIVERABLE: (1) the node card and inspector of a blocked node show the question text, its default and whether it
+      needs the person (hooks/ui/inspector-model.ts, hooks/ui/view-model.ts); (2) one Button per option that answers with
+      that option through the runtime's answer function as `by: person` (wire the click in hooks/register.ts the way the
+      run approval buttons are wired); a question without options shows the `/dag answer <run> <node> <text>` hint
+      instead; (3) the band (hooks/ui/band.ts) says how many nodes wait for an answer; (4) every new string in
+      hooks/ui/i18n.ts in English and Korean together; (5) tests in tests/questions-surface.test.ts (and the existing
+      inspector/view tests where they already cover cards) for the card, the buttons, the click answering, the hint and
+      the band, in both languages. Red before green.
+      SCOPE: edit only the files in writes; no change to the answer logic itself.
+      VERIFY: run claude plugin test . and bunx -p typescript@5 tsc -p . --noEmit.
+      STOP WHEN: the checks pass. In Output, give the exact English and Korean strings added.
+
+  - id: docs
+    label: Document node questions
+    category: writing
+    dependsOn: [engine, runtime, surface]
+    writes: [docs/reference.md, README.md]
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "DAG_NODE_STATUS: blocked:"
+      - kind: file
+        path: docs/reference.md
+        contains: "/dag answer"
+      - kind: file
+        path: README.md
+        contains: "/dag answer"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md, README.md]
+    prompt: |
+      TASK: Document node questions in Korean, matching the Outputs of engine, runtime and surface exactly.
+      DELIVERABLE: docs/reference.md gains a section on node questions (the status line and the `## Question` grammar,
+      who can answer and in what order, the 15-minute timeout and the non-interactive decision, resume at the same attempt
+      and the new-attempt fallback, the failure cases, the excluded generated nodes, the answer action and its errors, the
+      pane buttons and band line) and mentions `blocked` wherever the node states are listed; README.md gets one short
+      bullet with `/dag answer` where the other /dag commands are listed, pointing to the reference section. Also link
+      docs/design/node-questions.md as the design record.
+      SCOPE: edit only the two files; describe only what the Outputs state.
+      VERIFY: run git diff --check -- docs/reference.md README.md and reread each sentence against the Outputs.
+      STOP WHEN: both files are written.

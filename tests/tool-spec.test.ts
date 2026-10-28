@@ -33,3 +33,9 @@ test('the dag tool schema declares the node fields the definition parser reads, 
   expect(node.slice.description).toContain('vertical slice')
   expect(node.external.type).toBe('boolean')
 })
+
+test('the dag tool takes an answer action with run_id, node_id and a string answer for a blocked node', () => {
+  expect(INPUT_SCHEMA.properties.action.enum).toContain('answer')
+  expect(INPUT_SCHEMA.properties.answer.type).toBe('string')
+  expect(TOOL_DESCRIPTION).toContain('answer {run_id, node_id, answer} (answer a blocked node)')
+})

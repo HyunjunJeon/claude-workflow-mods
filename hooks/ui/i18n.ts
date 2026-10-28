@@ -93,6 +93,11 @@ export type Strings = {
   bandWaiting: (count: number) => string
   bandOtherRuns: (count: number) => string
   bandPaneWaiting: (reason: string) => string
+  bandAsking: (count: number) => string
+  questionAsks: (text: string) => string
+  questionDefault: (value: string) => string
+  questionNeedsPerson: string
+  questionHint: (runId: string, nodeId: string) => string
 }
 
 const EN_AWAITING = 'awaiting approval'
@@ -200,6 +205,11 @@ const EN: Strings = {
   bandWaiting: count => `${count} waiting for permission`,
   bandOtherRuns: count => `+${count} runs`,
   bandPaneWaiting: reason => `pane not shown: ${reason}`,
+  bandAsking: count => `${count} waiting for an answer`,
+  questionAsks: text => `asks: ${text}`,
+  questionDefault: value => `default: ${value}`,
+  questionNeedsPerson: 'only you can answer this',
+  questionHint: (runId, nodeId) => `answer with /dag answer ${runId} ${nodeId} <text>`,
 }
 
 const KO: Strings = {
@@ -304,6 +314,11 @@ const KO: Strings = {
   bandWaiting: count => `권한 승인 대기 ${count}`,
   bandOtherRuns: count => `+${count}개 실행`,
   bandPaneWaiting: reason => `패널 미표시: ${reason}`,
+  bandAsking: count => `답변 대기 ${count}`,
+  questionAsks: text => `질문: ${text}`,
+  questionDefault: value => `기본값: ${value}`,
+  questionNeedsPerson: '직접 답해야 하는 질문입니다',
+  questionHint: (runId, nodeId) => `/dag answer ${runId} ${nodeId} <답변> 으로 답하세요`,
 }
 
 export function stringsFor(language: unknown): Strings {

@@ -5,6 +5,7 @@ import { awaitingApproval } from '../engine/run.ts'
 import { projectSessions, sessionConflicts, type SessionRecord } from '../engine/sessions.ts'
 import type { NodeRun, NodeState, Run, RunStatus, VerificationEvidence } from '../engine/types.ts'
 import { stringsFor, type Language, type Strings } from './i18n.ts'
+import { questionLines } from './view-model.ts'
 import { ACCENT, clean, fit, fitTail, formatDuration, width, type Line, type Segment } from './text.ts'
 
 export type InspectorView = 'decisions' | 'context' | 'sessions'
@@ -573,7 +574,7 @@ function contextView(input: InspectorInput, t: InspectorStrings, s: Strings): In
     const writes = [...new Set(run.definition.nodes.flatMap(node => node.writes ?? []))]
     lines.push(indented(dim(writes.length ? t.writes(writes.join(', ')) : t.noWrites)))
     const nodes = [...run.nodes].sort((a, b) => NODE_PRIORITY[a.state] - NODE_PRIORITY[b.state])
-    for (const node of nodes.slice(0, PAGE_SIZE)) lines.push(nodeLine(node, t, s, input.waiting))
+    for (const node of nodes.slice(0, PAGE_SIZE)) lines.push(nodeLine(node, t, s, input.waiting), ...questionLines(node, run.runId, s).map(line => indented(...line)))
     if (nodes.length > PAGE_SIZE) lines.push(indented(dim(t.more(nodes.length - PAGE_SIZE))))
 
     lines.push([], [heading(t.evidence)])
