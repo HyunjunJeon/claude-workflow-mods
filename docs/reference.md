@@ -617,7 +617,7 @@ jq -c 'select(.kind == "node.end" and (.nodeId | startswith("security-verify-"))
 | `wait {run_id}`                            | 현재 스냅샷 반환. Claude Code에서는 hook이 10초 넘게 기다릴 수 없어서 블로킹하지 않습니다                                   |
 | `cancel {run_id, reason}`                  | 대기 중 노드는 취소, 실행 중 노드 에이전트는 TaskStop으로 중단                                                      |
 | `retry {run_id, node_id|node_ids, prompt}` | 실패/취소 노드와 그 때문에 skip된 하위 노드를 다시 실행. 완료 노드는 재사용                                                |
-| `amend {run_id, definition}`               | 노드 fingerprint(prompt, category, agent, dependsOn, verify, writes)를 비교해 바뀐 노드와 그 하위 노드만 다시 실행 |
+| `amend {run_id, definition}`               | 노드 fingerprint(prompt, category, agent, dependsOn, verify, writes)를 비교해 바뀐 노드와 그 하위 노드만 다시 실행. 노드의 최근 검증에서 실패한 verify 검사를 새 definition이 느슨하게 만들면 응답 `warnings`에 `node "<id>": verify loosened - ...` 줄이 담기고 `run.amend` trajectory의 `loosened` 필드에 기록되며, amend를 거부하지는 않는다 |
 | `answer {run_id, node_id, answer}`         | `blocked` 노드의 질문에 답해 이어서 실행. 거부되는 경우는 [노드 질문](#노드-질문) |
 | `send {run_id, node_id, message}`          | 실행 중인 노드에 메시지를 보내 방향을 바꿈                                                                      |
 | `attach {run_id}`                          | 소유 세션이 끝난 실행을 이 세션으로 가져와 남은 노드를 이어서 실행. 소유 세션이 활성이거나 인계 중이면 거부                                |

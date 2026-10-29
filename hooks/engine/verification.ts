@@ -1,4 +1,5 @@
-import { fail, TEXT_FIELDS, type CommandCheck, type CommandExpect, type Definition, type EngineError, type Result, type TextExpect, type VerificationCheck } from './types.ts'
+import { evidenceOutcome } from './check-eval.ts'
+import { fail, TEXT_FIELDS, type CommandCheck, type CommandExpect, type Definition, type EngineError, type FileCheck, type Result, type Run, type TextExpect, type VerificationCheck } from './types.ts'
 
 // The .claude segment is refused in any letter case: on macOS and Windows .CLAUDE/dag opens the run's own checkpoints.
 export function projectPath(path: string): boolean {
@@ -205,4 +206,70 @@ export function verificationProblem(definition: Definition): EngineError | undef
     code: 'verification_required',
     message: `Declare verify checks for nodes: ${missing.map(node => node.id).join(', ')}. A completion report alone is not evidence; provide file or command checks.`,
   } : undefined
+}
+
+// The exit codes a command check accepts; without exit only 0 passes (exitProblem in check-eval.ts).
+function acceptedExits(expect: CommandExpect | undefined): number[] {
+  return expect?.exit === undefined ? [0] : Array.isArray(expect.exit) ? expect.exit : [expect.exit]
+}
+
+// How each text field of before weakened in after, prefixed by owner ('' or 'stdout.'). A field added, or made stricter
+// (contains lengthened around the old text, absent shortened to part of it), is not a change worth a warning.
+function textLoosening(before: TextExpect, after: TextExpect, owner: string): string[] {
+  return TEXT_FIELDS.flatMap(field => {
+    const old = before[field]
+    const now = after[field]
+    if (old === undefined || now === old) return []
+    if (now === undefined) return [`loosened: ${owner}${field} removed`]
+    if (field === 'contains' && old.includes(now)) return [`loosened: ${owner}contains shortened`]
+    if (field === 'contains' && now.includes(old)) return []
+    if (field === 'absent' && now.includes(old)) return [`loosened: ${owner}absent lengthened`]
+    if (field === 'absent' && old.includes(now)) return []
+    return [`replaced: ${owner}${field} changed`]
+  })
+}
+
+function commandLoosening(before: CommandCheck, after: CommandCheck): string[] {
+  const old = acceptedExits(before.expect)
+  const now = acceptedExits(after.expect)
+  // The same or a narrower set is no warning; a strict superset accepts more failures; any other set is a replacement.
+  const exit = now.every(code => old.includes(code))
+    ? []
+    : [`${old.every(code => now.includes(code)) ? 'loosened' : 'replaced'}: exit [${old.join(',')}] -> [${now.join(',')}]`]
+  const streams = (['stdout', 'stderr'] as const).flatMap(stream => {
+    const was = before.expect?.[stream]
+    if (was === undefined) return []
+    const is = after.expect?.[stream]
+    return is === undefined ? [`loosened: ${stream} removed`] : textLoosening(was, is, `${stream}.`)
+  })
+  return [...exit, ...streams]
+}
+
+// What weakened between a check and its pair in the amended node (same argv, or same path); undefined when it has no pair.
+function pairedLoosening(check: VerificationCheck, amended: VerificationCheck[]): string[] | undefined {
+  if (check.kind === 'file') {
+    const pair = amended.find((other): other is FileCheck => other.kind === 'file' && other.path === check.path)
+    return pair && textLoosening(check, pair, '')
+  }
+  const pair = amended.find((other): other is CommandCheck =>
+    other.kind === 'command' && other.argv.length === check.argv.length && other.argv.every((arg, index) => arg === check.argv[index]))
+  return pair && commandLoosening(check, pair)
+}
+
+// One warning per node whose amended verify weakens a check that failed on the node's latest verification: the check is
+// what proves the deliverable, so loosening it can turn a wrong result into a pass. Checks that passed, did not run or
+// could not be judged are ignored, since amending a defective or unrunnable check is the prescribed recovery.
+export function checkLoosening(run: Run, definition: Definition): string[] {
+  return run.nodes.flatMap(node => {
+    // A declared definition never carries runtime-expanded children (amendRun), so their absence is not a removal.
+    if (run.definition.nodes.find(def => def.id === node.id)?.expandedFrom !== undefined) return []
+    const amended = definition.nodes.find(def => def.id === node.id)?.verify ?? []
+    // verifyNode records one evidence item per declared check, in order, so the index is the check's position.
+    const items = (node.verification?.evidence ?? []).flatMap((item, index) => {
+      if (evidenceOutcome(item) !== 'failed') return []
+      const changes = pairedLoosening(item.check, amended)
+      return changes === undefined ? [`check ${index + 1} removed`] : changes.map(change => `check ${index + 1} ${change}`)
+    })
+    return items.length ? [`node "${node.id}": verify loosened - ${items.join('; ')}`] : []
+  })
 }

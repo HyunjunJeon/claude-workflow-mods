@@ -1,9 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 import { nodeFingerprint, parseDefinition } from '../hooks/engine/definition.ts'
 import { lintDefinition } from '../hooks/engine/lint.ts'
+import { createRun } from '../hooks/engine/run.ts'
 import { INPUT_SCHEMA } from '../hooks/engine/tool-spec.ts'
-import { TEXT_FIELDS, type VerificationCheck } from '../hooks/engine/types.ts'
-import { parseChecks, verificationProblem } from '../hooks/engine/verification.ts'
+import { exitProblem, textProblem } from '../hooks/engine/check-eval.ts'
+import { TEXT_FIELDS, type Definition, type TextExpect, type VerificationCheck, type VerificationOutcome } from '../hooks/engine/types.ts'
+import { checkLoosening, parseChecks, verificationProblem } from '../hooks/engine/verification.ts'
 
 test('verification accepts only bounded typed checks and project file paths', () => {
   expect(parseChecks([{ kind: 'file', path: 'src/result.txt', contains: 'done' }, { kind: 'command', argv: ['bun', 'test'] }]).ok).toBe(true)
@@ -226,4 +228,150 @@ test('changing any field of a check changes the node fingerprint', () => {
   ]
   expect(new Set(variants).size).toBe(variants.length)
   expect(fingerprint(command({ exit: [2, 1], stdout: { contains: 'x' } }))).toBe(fingerprint(command({ exit: [1, 2], stdout: { contains: 'x' } })))
+})
+
+const oneNode = (verify: VerificationCheck[] | undefined): Definition =>
+  ({ key: 'k', name: 'K', nodes: verify ? [{ id: 'a', prompt: 'Make a', dependsOn: [], verify }] : [{ id: 'other', prompt: 'Other', dependsOn: [], verify: [{ kind: 'file', path: 'o.md' }] }] })
+
+// A run whose node a last verified its checks with the given outcomes, in check order.
+function verifiedRun(verify: VerificationCheck[], outcomes: VerificationOutcome[], expandedFrom?: string) {
+  const run = createRun(oneNode(verify), { runId: 'r', sessionId: 's', now: 1 })
+  const def = run.definition.nodes[0]
+  const node = run.nodes[0]
+  if (!def || !node) throw new Error('Missing fixture node')
+  if (expandedFrom !== undefined) def.expandedFrom = expandedFrom
+  node.verification = {
+    status: outcomes.every(outcome => outcome === 'passed') ? 'passed' : 'failed',
+    evidence: verify.map((check, index) => {
+      const outcome = outcomes[index] ?? 'passed'
+      return { check, passed: outcome === 'passed', outcome, checkedAt: 1, detail: '' }
+    }),
+  }
+  return run
+}
+
+const TESTS: VerificationCheck = { kind: 'command', argv: ['bun', 'test'] }
+const DOC: VerificationCheck = { kind: 'file', path: 'doc.md', contains: 'Section done', absent: 'TODO' }
+const loosening: { name: string; before: VerificationCheck[]; outcomes: VerificationOutcome[]; after?: VerificationCheck[]; expandedFrom?: string; warnings: string[] }[] = [
+  { name: 'a failed check missing from the amended node is removed', before: [DOC, TESTS], outcomes: ['passed', 'failed'], after: [DOC], warnings: ['node "a": verify loosened - check 2 removed'] },
+  { name: 'a node missing from the amended definition removes each failed check', before: [DOC, TESTS], outcomes: ['failed', 'failed'], warnings: ['node "a": verify loosened - check 1 removed; check 2 removed'] },
+  { name: 'contains shortened to a part of itself', before: [DOC], outcomes: ['failed'], after: [{ ...DOC, contains: 'Section' }], warnings: ['node "a": verify loosened - check 1 loosened: contains shortened'] },
+  { name: 'absent lengthened to text that holds the old', before: [DOC], outcomes: ['failed'], after: [{ ...DOC, absent: 'TODO: later' }], warnings: ['node "a": verify loosened - check 1 loosened: absent lengthened'] },
+  { name: 'a text field dropped', before: [DOC], outcomes: ['failed'], after: [{ kind: 'file', path: 'doc.md', absent: 'TODO' }], warnings: ['node "a": verify loosened - check 1 loosened: contains removed'] },
+  { name: 'contains changed to unrelated text', before: [DOC], outcomes: ['failed'], after: [{ ...DOC, contains: 'Other' }], warnings: ['node "a": verify loosened - check 1 replaced: contains changed'] },
+  { name: 'exit widened from the implied 0', before: [TESTS], outcomes: ['failed'], after: [{ ...TESTS, expect: { exit: [0, 1] } }], warnings: ['node "a": verify loosened - check 1 loosened: exit [0] -> [0,1]'] },
+  { name: 'exit [0,1] narrowed to the implied 0', before: [{ ...TESTS, expect: { exit: [0, 1] } }], outcomes: ['failed'], after: [TESTS], warnings: [] },
+  { name: 'exit moved to a set that is neither wider nor narrower', before: [TESTS], outcomes: ['failed'], after: [{ ...TESTS, expect: { exit: 1 } }], warnings: ['node "a": verify loosened - check 1 replaced: exit [0] -> [1]'] },
+  { name: 'stdout matches changed', before: [{ ...TESTS, expect: { stdout: { matches: '0 fail' } } }], outcomes: ['failed'], after: [{ ...TESTS, expect: { stdout: { matches: 'fail' } } }], warnings: ['node "a": verify loosened - check 1 replaced: stdout.matches changed'] },
+  { name: 'a stderr expectation removed', before: [{ ...TESTS, expect: { stderr: { equals: '' } } }], outcomes: ['failed'], after: [TESTS], warnings: ['node "a": verify loosened - check 1 loosened: stderr removed'] },
+  { name: 'a field added or made stricter', before: [DOC, TESTS], outcomes: ['failed', 'failed'], after: [{ ...DOC, contains: 'Section done well', lastLine: 'end' }, { ...TESTS, expect: { stdout: { contains: 'pass' } }, timeoutMs: 60_000 }], warnings: [] },
+  { name: 'a passed check loosened', before: [DOC, TESTS], outcomes: ['passed', 'not_run'], after: [{ kind: 'file', path: 'doc.md' }], warnings: [] },
+  { name: 'a runtime-expanded child', before: [TESTS], outcomes: ['failed'], expandedFrom: 'parent', warnings: [] },
+]
+
+for (const { name, before, outcomes, after, expandedFrom, warnings } of loosening) {
+  test(`checkLoosening: ${name}`, () => {
+    expect(checkLoosening(verifiedRun(before, outcomes, expandedFrom), oneNode(after))).toEqual(warnings)
+  })
+}
+
+// Properties of checkLoosening, judged by the evaluator that decides a check (check-eval.ts): a check is the set of
+// outputs it passes. A pair that draws no warning must pass no output the old check failed; a pair whose every changed
+// part is reported loosened must pass every output the old check passed. Texts are every string of up to four characters
+// over a, b and a newline, so contains, absent, lastLine and equals all meet hits and misses. The seed is fixed, so a
+// counterexample reproduces.
+function seeded(seed: number): () => number {
+  let state = seed
+  return () => {
+    state = (state + 0x6d2b79f5) | 0
+    let mixed = Math.imul(state ^ (state >>> 15), 1 | state)
+    mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function pick(random: () => number, items: readonly string[]): string {
+  // SAFETY: random() is below 1, so the index is below items.length, and every caller passes a nonempty list.
+  return items[Math.floor(random() * items.length)] as string
+}
+
+function word(random: () => number): string {
+  return Array.from({ length: 1 + Math.floor(random() * 3) }, () => pick(random, ['a', 'b'])).join('')
+}
+
+function texts(length: number): string[] {
+  return length === 0 ? [''] : texts(length - 1).flatMap(text => ['a', 'b', '\n'].map(letter => text + letter))
+}
+
+const TEXTS = [0, 1, 2, 3, 4].flatMap(texts)
+const PATTERNS = ['a', 'b', '^a', 'a$', 'ab|ba', '\\n']
+
+function randomExpect(random: () => number): TextExpect {
+  const expectation: TextExpect = {}
+  for (const field of TEXT_FIELDS) if (random() < 0.5) expectation[field] = field === 'matches' ? pick(random, PATTERNS) : word(random)
+  return expectation
+}
+
+// Per field: keep, drop, shorten, lengthen or replace, so one pair can loosen one field and tighten another.
+function mutate(random: () => number, before: TextExpect): TextExpect {
+  const after: TextExpect = { ...before }
+  for (const field of TEXT_FIELDS) {
+    const value = before[field]
+    const roll = random()
+    if (roll < 0.4) continue
+    if (roll < 0.55) delete after[field]
+    else if (value !== undefined && field !== 'matches' && roll < 0.7) after[field] = value.slice(0, Math.max(1, value.length - 1))
+    else if (value !== undefined && field !== 'matches' && roll < 0.85) after[field] = random() < 0.5 ? `${value}${word(random)}` : `${word(random)}${value}`
+    else after[field] = field === 'matches' ? pick(random, PATTERNS) : word(random)
+  }
+  return after
+}
+
+// The parts of the warnings, one per changed check part, without the node prefix.
+const warnedParts = (warnings: string[]) => warnings.flatMap(warning => warning.slice(warning.indexOf(' - ') + 3).split('; '))
+
+test('checkLoosening property: no warning passes no text the old file check failed, and all-loosened passes every text it passed', () => {
+  const random = seeded(20261029)
+  const counterexamples: { before: TextExpect; after: TextExpect; text: string; warnings: string[] }[] = []
+  let narrowerOrSame = 0
+  let wider = 0
+  for (let round = 0; round < 3000; round++) {
+    const before = randomExpect(random)
+    const after = mutate(random, before)
+    const changed = TEXT_FIELDS.filter(field => before[field] !== after[field]).length
+    if (changed === 0) continue
+    const warnings = checkLoosening(verifiedRun([{ kind: 'file', path: 'doc.md', ...before }], ['failed']), oneNode([{ kind: 'file', path: 'doc.md', ...after }]))
+    const parts = warnedParts(warnings)
+    const loosened = parts.length === changed && parts.every(part => part.includes(' loosened: '))
+    if (warnings.length === 0) narrowerOrSame++
+    if (loosened) wider++
+    for (const text of TEXTS) {
+      const was = textProblem(text, before, 'text') === undefined
+      const is = textProblem(text, after, 'text') === undefined
+      if ((warnings.length === 0 && is && !was) || (loosened && was && !is)) counterexamples.push({ before, after, text, warnings })
+    }
+  }
+  expect(counterexamples.slice(0, 3)).toEqual([])
+  // Both claims must be exercised, or the property holds vacuously.
+  expect(narrowerOrSame).toBeGreaterThan(100)
+  expect(wider).toBeGreaterThan(100)
+})
+
+test('checkLoosening property: over every pair of exit sets, no warning accepts no new code and loosened keeps every old code', () => {
+  const sets: (number | number[] | undefined)[] = [undefined, 0, 1, 2, [0, 1], [1, 2], [0, 2], [0, 1, 2]]
+  const command = (exit: number | number[] | undefined): VerificationCheck =>
+    exit === undefined ? { kind: 'command', argv: ['t'] } : { kind: 'command', argv: ['t'], expect: { exit } }
+  const counterexamples: { before: unknown; after: unknown; code: number; warnings: string[] }[] = []
+  for (const before of sets) {
+    for (const after of sets) {
+      const warnings = checkLoosening(verifiedRun([command(before)], ['failed']), oneNode([command(after)]))
+      const loosened = warnings.length > 0 && warnedParts(warnings).every(part => part.includes(' loosened: '))
+      for (const code of [0, 1, 2, 3]) {
+        const was = exitProblem(code, before === undefined ? undefined : { exit: before }) === undefined
+        const is = exitProblem(code, after === undefined ? undefined : { exit: after }) === undefined
+        if ((warnings.length === 0 && is && !was) || (loosened && was && !is)) counterexamples.push({ before, after, code, warnings })
+      }
+    }
+  }
+  expect(counterexamples).toEqual([])
 })

@@ -181,7 +181,7 @@ The run is done when the goal's observable condition holds, not merely when the 
 You can recover a settled run. Completed nodes keep their results:
 
 - `retry {run_id}` starts a fresh attempt for each failed or cancelled node and re-runs their skipped dependents. `node_id` + `prompt` edits the retried node's instruction. A running run returns `run_still_active`. A completed node returns `node_not_retryable`; use `amend`.
-- `amend {run_id, definition}` compares fingerprints: prompt, category, agent, dependsOn, verify and writes. Only changed or added nodes and their transitive dependents re-run. Changing a running node returns `amend_running_node`. Keep the same key.
+- `amend {run_id, definition}` compares fingerprints: prompt, category, agent, dependsOn, verify and writes. Only changed or added nodes and their transitive dependents re-run. Changing a running node returns `amend_running_node`. Keep the same key. An amend that loosens a check that failed last time (removes it, widens exit codes, shortens contains, drops a field) returns a `verify loosened` warning; treat it as a claim to justify, and prefer fixing the deliverable over weakening the check.
 - `send {run_id, node_id, message}` steers a running node. A finished node returns `node_not_continuable`; retry it with a prompt.
 - `cancel {run_id, reason}` stops running nodes and cancels nodes not yet started. Cancel only to abandon the plan, never from impatience.
 - A run the user rejected returns `rejected_by_user` to `retry`, `amend` and an identical `start`; a revised plan needs a new key and the user's go-ahead.

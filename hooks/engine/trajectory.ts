@@ -56,10 +56,13 @@ export type SettleRecord = {
   }[]
 }
 
+// loosened: the amend's verify loosened warnings (checkLoosening in verification.ts), present only when there are any.
+export type RunAmendEvent = { kind: 'run.amend'; runId: string; rerun: string[]; definition: Definition; loosened?: string[] }
+
 type RunEvent =
   | { kind: 'run.start'; runId: string; by: 'model' | 'user'; key: string; name: string; goal?: string; definition: Definition }
   | { kind: 'run.retry'; runId: string; by: 'model' | 'user'; nodeIds?: string[]; prompt?: string }
-  | { kind: 'run.amend'; runId: string; rerun: string[]; definition: Definition }
+  | RunAmendEvent
   | {
     kind: 'node.start'; runId: string; nodeId: string; attempt: number; agentId?: string; model?: string; subagentType?: string
     category?: string; recovery?: NodeRun['recovery']; prompt: string; error?: string

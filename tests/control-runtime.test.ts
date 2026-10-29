@@ -30,6 +30,22 @@ test('start and amend refuse missing verification before spawning', async ($, on
   expect(h.spawns).toHaveLength(1)
 })
 
+test('an amend that loosens a failed verify check is accepted with a verify loosened warning, also in its trajectory record', { options: { auto_recovery: false, trajectory_log: true } }, async ($, on) => {
+  const h = harness(on)
+  h.control.exitCode = 1
+  await boot($)
+  const runId = await start($, definition())
+  await finish($, h)
+  expect(checkpoint(h, runId).nodes[0]?.verification?.status).toBe('failed')
+  const reply = await dag($, { action: 'amend', run_id: runId, definition: definition([{ kind: 'command', argv: ['check-control'], expect: { exit: [0, 1] } }]) })
+  expect(reply).not.toHaveProperty('error')
+  expect(reply.rerun).toEqual(['a', 'b'])
+  const warning = 'node "a": verify loosened - check 1 loosened: exit [0] -> [0,1]'
+  expect(reply.warnings).toEqual(expect.arrayContaining([warning]))
+  const records = [...h.files.entries()].filter(([path]) => path.startsWith(`${ROOT}/trajectories/${runId}/`)).map(([, text]) => JSON.parse(text))
+  expect(records.filter(record => record.kind === 'run.amend')).toMatchObject([{ rerun: ['a', 'b'], loosened: [warning] }])
+})
+
 for (const scenario of ['command-pass', 'command-fail', 'file-pass', 'file-missing', 'file-content'] as const) {
   test(`completion is gated by host evidence: ${scenario}`, { options: { auto_recovery: false } }, async ($, on) => {
     const h = harness(on)
