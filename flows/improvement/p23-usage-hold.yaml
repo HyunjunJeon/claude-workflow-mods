@@ -1,0 +1,179 @@
+# Usage hold: start no new node while an account rate-limit window is at or above usage_hold_percent.
+# Why (plan doc "dag-workflow 다음 단계 계획서", item 1, approved 2026-10-23): tick starts nodes looking only at
+# max_concurrent (hooks/engine/run.ts nextToStart). A wide wave that reaches the 5-hour or 7-day limit fails several nodes
+# at once, and automatic recovery hits the same limit again, spending more usage.
+# Host facts (2.1.307 typings, .claude-plugin/types/claude-code/index.d.ts): `$.session.usage()` answers
+# `{ startedAt, context, rateLimits, cost }` and the plain call is free; `rateLimits` is `SessionRateLimit[]`
+# (`kind` five_hour | seven_day | a gateway's spend_limit, `percentUsed` 0-100 with one decimal, past 100 on an exceeded
+# spend limit, `resetsAt` ISO 8601), empty off a subscription or before the first reading. The `session.measure` event
+# pushes the same figures after each main-thread turn and when a window moves a whole point (observe; return next(e)).
+# Decisions:
+# - usage_hold_percent default 90, 0 turns the hold off (approved).
+# - Headless (`claude -p`): the plan said "wait usage_hold_max_minutes (30), then cancel". That cannot hold: the host
+#   ends a -p process about 60 s after the main turn ends once no agent is live and no prompt is queued (AGENTS.md NOTES,
+#   keepSessionUp B6 measurements), so a session whose nodes are all held would exit long before 30 minutes. Instead a
+#   non-interactive session cancels a held run's remaining nodes as soon as none of its nodes is running, with a
+#   "usage limit" reason, so the run settles with the normal message and `retry` works after the reset. No
+#   usage_hold_max_minutes knob.
+# - Plan phase 3 (per-run cost, $.model.complete cache, effort before model upgrade) is optional and not in this run.
+#
+# PREREQUISITE: `git status --short` prints nothing (this file aside), and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p23-usage-hold.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. The generated commit node commits after both reviews pass; nothing
+# is pushed.
+#
+# Run plan (components -> waves):
+#   wave 1: usage-hold, docs   (disjoint writes; docs gets the contract pasted, no edge)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: hard for usage-hold (one vertical slice through the tick loop in register.ts, a new host event, a timer,
+# the headless cancel path, the pane, an option, the test harness and tests; its "owns several files" warning is
+# expected); writing for docs.
+
+key: improve-p23-usage-hold-1
+name: Hold new nodes at the usage limit
+goal: >
+  While any account rate-limit window reported by the host is at or above the new usage_hold_percent option (default 90,
+  0 = off), no run of this session starts a new node (running nodes continue); the hold raises one toast, shows in the
+  /dag pane and in the dag tool's start, snapshot, wait and list results as usage_hold, and lifts when a session.measure
+  reading drops below the threshold or the window's reset time passes; a non-interactive session cancels a held run's
+  remaining nodes with a "usage limit" reason once none of them is running; README.md and docs/reference.md describe it;
+  claude plugin test, tsc and claude plugin validate pass; the change is committed after both reviews pass (not pushed).
+review:
+  request: |
+    권장하는 방향대로 진행
+    Approved plan item 1 (사용량 한도 연동), as specified for this run: new option usage_hold_percent (number 0-100, default 90, 0 turns it off, invalid values keep the default). The plugin keeps the latest rate-limit readings: seeded at session start from $.session.usage() (a failure leaves no readings) and replaced by every session.measure event, whose hook only observes and returns next(e). A pure function usageHold(rateLimits, thresholdPercent, now) in hooks/engine/usage.ts returns the window that holds (highest percentUsed at or above the threshold) or undefined; it returns undefined when the threshold is 0 or below, and ignores a window whose resetsAt is at or before now. While a hold applies, tick starts no new node in any run of this session, running nodes continue, and the tick loop does not spin. When a hold first blocks a start, one toast (EN and KO) names the window, its percent and the minutes until reset when known; no second toast until the hold has cleared and come back. The hold lifts when a session.measure reading no longer holds, or when a $.clock.after timer set for 5 seconds after the window's resetsAt fires; then every run of this session with scheduled nodes is ticked. The dag tool's start, snapshot, wait and list results for a held run of this session carry usage_hold { kind, percent_used, resets_at }, and the /dag pane header shows a badge. A non-interactive session cancels a held run's remaining nodes with a reason starting "usage limit:" as soon as none of its nodes is running; an interactive session never cancels for usage. README.md and docs/reference.md describe the option and the behaviour.
+    Out of scope: per-run cost records, the $.model.complete cache and raising effort before the model on retry (plan phase 3) stay unchanged; plugin.json gains no usage_hold_max_minutes key; no /dag subcommand reads or changes the hold; nothing is pushed.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: |
+      feat(usage): hold new nodes while a rate-limit window is at or above usage_hold_percent
+
+      tick starts no new node while any account rate-limit window the host reports is at or
+      above usage_hold_percent (default 90, 0 turns it off); running nodes continue. The
+      readings come from $.session.usage() at session start and from session.measure; the
+      hold lifts when a reading drops below the threshold or the window's reset time passes.
+      One toast, a /dag pane badge and usage_hold in the dag tool's results show it. A
+      non-interactive session cancels a held run's remaining nodes with a "usage limit"
+      reason once none is running, because the host ends a -p process soon after its last
+      agent stops.
+    paths:
+      - hooks
+      - tests
+      - .claude-plugin/plugin.json
+      - README.md
+      - docs/reference.md
+      - flows/improvement/p23-usage-hold.yaml
+nodes:
+  - id: usage-hold
+    label: Hold new nodes at the usage limit
+    category: hard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/engine/usage.ts
+      - hooks/host
+      - hooks/ui
+      - .claude-plugin/plugin.json
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: .claude-plugin/plugin.json
+        contains: "\"usage_hold_percent\""
+        absent: "usage_hold_max_minutes"
+      - kind: file
+        path: hooks/engine/usage.ts
+        contains: "export function usageHold("
+      - kind: file
+        path: hooks/register.ts
+        contains: "'session.measure'"
+      - kind: file
+        path: hooks/ui/i18n.ts
+        contains: "DAG paused new nodes"
+      - kind: file
+        path: tests
+        contains: "usage_hold_percent"
+    prompt: |
+      TASK: Make the plugin start no new DAG node while an account rate-limit window is at or above a new usage_hold_percent option, and resume when the window drops or resets.
+
+      CONTEXT (facts; read the files to confirm):
+      - Host typings: .claude-plugin/types/claude-code/index.d.ts. `$.session.usage()` (search `usage: (args?: SessionUsageArgs)`) answers `SessionUsage` `{ startedAt, context, rateLimits, cost }`; the plain call costs nothing. `SessionRateLimit` (search `export type SessionRateLimit`) is `{ kind: string; percentUsed: number; resetsAt?: string }`: kind five_hour, seven_day or a gateway's spend_limit; percentUsed 0-100 with one decimal, past 100 on an exceeded spend limit; resetsAt ISO 8601. rateLimits is empty off a subscription or before the first reading. The `session.measure` event (search `'session.measure': SessionMeasureInput`) carries `{ context, rateLimits, cost?, changed }` after each main-thread turn and when a window moves a whole point; a hook observes and returns `next(e)`. Test code fires it with `$.session.measure(input)` (the test kit's session dispatch, next to `$.session.start`). `$.clock.after(ms, fn)` returns a handle with `cancel()` (see `wait.timer.cancel()` in hooks/register.ts).
+      - Scheduler: hooks/register.ts `async function tick($, runId)` calls `nextToStart(run, maxConcurrent)` (hooks/engine/run.ts) and `startNode`. Its loop has `if (!run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue` - while held this must NOT continue, or tick spins forever. `cancelRun(run, reason, now)` in hooks/engine/run.ts cancels a run's unfinished nodes; see how register.ts uses it (search `cancelRun(`) and persists/announces after it. State changes go through `serialized()`. `interactive` (module-level, set from session.start `e.isInteractive`) is false in `claude -p`.
+      - Options: parsed at the top of `register(on, options)` in hooks/register.ts; invalid values silently keep the default (see `trajectory_retention_days` for a bounded number). Each knob is declared in .claude-plugin/plugin.json (see `settle_notify`).
+      - Host modules: hooks/host/*.ts hold host-calling code as top-level functions taking ($, state, ...) because validate refuses $ passed to a method or callback (see the header comment of hooks/host/trajectory.ts). engine/ and ui/ never call $ or read a clock (AGENTS.md).
+      - dag tool results: hooks/register.ts returns `snapshotOf(run)` for snapshot, `{ ...snapshotOf(run), note }` for wait, `snapshot: snapshotOf(started, 0)` for start, and a list whose rows add `awaiting_approval: true` for a run held for approval (search `awaiting_approval`). Follow that last pattern.
+      - Pane: hooks/ui/view-model.ts `buildPane(runs, view, now, context)`; `ViewContext` is its optional context; the run header's state segment shows `t.awaitingApproval` in WAITING_COLOR for an approval hold - mirror it. UI strings live in the EN and KO tables of hooks/ui/i18n.ts; AGENTS.md: change both.
+      - Test harness: tests/control-harness.ts (`harness`, `boot`, `start`; it fakes the clock with `mock.clock` and records toasts). It does not answer `session.usage` today. tests/AGENTS.md describes the harness and the older private harnesses.
+
+      REQUIRED:
+      1. plugin.json: `usage_hold_percent`, type number, default 90, title and description: new nodes wait while any rate-limit window (five_hour, seven_day, spend_limit) is at or above this percent; 0 turns the hold off. register(): accept a finite number from 0 to 100, else keep 90.
+      2. hooks/engine/usage.ts (pure): `export type UsageHold = { kind: string; percentUsed: number; resetsAt?: string }` and `export function usageHold(rateLimits: readonly { kind: string; percentUsed: number; resetsAt?: string }[], thresholdPercent: number, now: number): UsageHold | undefined`. Undefined when thresholdPercent <= 0 or no window has percentUsed >= thresholdPercent. A window whose resetsAt parses (Date.parse) to a time <= now is ignored: that reading predates the reset. An unparsable resetsAt counts as no reset time and the window still counts. Of the windows that hold, return the one with the highest percentUsed (first on a tie).
+      3. Readings: module-level latest rateLimits, seeded in the session.start hook from `$.session.usage()` inside try/catch (a failure or a missing answer leaves an empty list and only a debug line), and replaced by every `session.measure` event in a new `on('session.measure', ...)` hook that returns `next(e)`.
+      4. tick: compute the hold from the readings, usage_hold_percent and `$.clock.now()`. While it holds, start no node in that run (skip the nextToStart loop) and do not take the `continue` branch. Running nodes, approval and handoff behave as before.
+      5. Toast: when a hold first blocks a start (a run of this session has a scheduled node that tick would otherwise start), raise one `$.ui.toast` with EN `DAG paused new nodes: <kind> at <percent>%` plus `, resets in <n> min` when resetsAt is known (n = minutes from now, rounded up), and KO `DAG 새 노드 시작 대기: <kind> <percent>% 사용` plus `, <n>분 뒤 초기화`. No further toast until the hold has cleared and come back.
+      6. Resume: (a) in the session.measure hook, when a hold was in force and no longer applies, tick (through serialized()) every run of this session that has a scheduled node; (b) when a hold with a resetsAt begins or its resetsAt changes, set one `$.clock.after(resetsAt - now + 5000, ...)` timer that re-evaluates and ticks those runs the same way; cancel the old timer when replacing it and when the hold clears.
+      7. Headless: when `interactive` is false and, under a hold, a run of this session has scheduled nodes and no running node, cancel the run's remaining nodes with reason `usage limit: <kind> at <percent>%` plus `, resets at <resetsAt>` when known, then persist and announce it as other cancels do. An interactive session never cancels for usage.
+      8. dag tool: start, snapshot, wait and list results for a run of this session that has a scheduled node while the hold applies carry `usage_hold: { kind, percent_used, resets_at? }` (resets_at only when known). wait's note for such a run says new nodes are paused until the rate-limit window drops below usage_hold_percent or resets. Do not change hooks/engine/tool-spec.ts.
+      9. Pane: pass the hold through ViewContext; when the shown run has a scheduled node and the hold applies, the header state segment reads EN `paused at usage limit: <kind> <percent>%` / KO `한도 대기: <kind> <percent>%` in WAITING_COLOR.
+      10. Tests, red first. tests/usage.test.ts for the pure function: 92 at 90 holds; 80 at 90 does not; empty list; threshold 0 with 99; a past resetsAt is ignored; a future resetsAt holds; the highest of two windows wins; spend_limit at 105 holds; an unparsable resetsAt still holds. Extend tests/control-harness.ts so `session.usage` answers `{ startedAt, context, rateLimits }` with a rateLimits list a test can set (default empty, so existing tests do not change). A new hook-level test file (for example tests/usage-hold.test.ts) proves: (i) a run of two independent nodes started while the seeded reading is five_hour 95% spawns nothing, raises exactly one toast, and its snapshot carries usage_hold; a session.measure at 50% then spawns both; (ii) a chain A -> B: A is running when a measure at 95% arrives; after A completes, B is not spawned; a measure at 40% spawns B; (iii) a hold whose resetsAt is 60 s ahead lifts after the fake clock passes resetsAt + 5 s and the scheduled node spawns; (iv) with isInteractive false, a run held with nothing running is cancelled with a reason that starts with `usage limit:`; (v) with `usage_hold_percent: 0` a 99% reading does not block a start. Change no existing assertion; if an existing test breaks, fix the harness or the code, not the assertion, and report it.
+
+      SCOPE: edit hooks/register.ts, the new hooks/engine/usage.ts, hooks/host/ (a new usage module only if you move host calls there), hooks/ui/i18n.ts and hooks/ui/view-model.ts, .claude-plugin/plugin.json, and files under tests/. A docs node edits README.md and docs/reference.md at the same time; do not touch them. Do not commit, push, install or reload.
+
+      VERIFY: `command claude plugin test .` passes in full, `bunx -p typescript@5 tsc -p . --noEmit` prints nothing, `command claude plugin validate .` passes (the runtime reruns all three).
+
+      STOP WHEN: the new tests pass and the three checks pass.
+
+      In ## Output give: the option definition, the usageHold signature, where the hold is checked in tick and how the spin is avoided, the EN and KO toast and badge texts, the usage_hold field as returned, the headless cancel reason format, the new test names, and the last line of the test run.
+
+  - id: docs
+    label: Document the usage hold
+    category: writing
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "usage_hold_percent"
+        absent: "usage_hold_max_minutes"
+      - kind: file
+        path: README.md
+        contains: "usage_hold_percent"
+        absent: "usage_hold_max_minutes"
+      - kind: command
+        argv: [git, diff, --check, --, README.md, docs/reference.md]
+    prompt: |
+      TASK: Document the new usage hold in README.md and docs/reference.md (both Korean; keep them Korean).
+
+      CONTRACT (another node implements exactly this at the same time):
+      - Option `usage_hold_percent`: number 0-100, default 90; 0 turns the hold off; an invalid value keeps 90.
+      - While any account rate-limit window Claude Code reports (five_hour = 5시간, seven_day = 7일, a gateway's spend_limit) is at or above that percent, no run of this session starts a new node; nodes already running continue. The readings come from Claude Code's status-line figures: read once at session start and updated after each main turn and whenever a window moves by a whole point. API-key or gateway sessions without readings never hold.
+      - When the hold first stops a node from starting, one toast appears (KO: `DAG 새 노드 시작 대기: <kind> <percent>% 사용, <n>분 뒤 초기화`). The /dag pane header shows `한도 대기: <kind> <percent>%` (EN `paused at usage limit: ...`). The dag tool's start, snapshot, wait and list results carry `usage_hold: { kind, percent_used, resets_at }`.
+      - The hold lifts when a new reading drops below the threshold, or 5 seconds after the window's reset time; then the waiting nodes start.
+      - Non-interactive sessions (`claude -p`): once none of a held run's nodes is running, the plugin cancels its remaining nodes with a reason starting `usage limit:`, so the run ends with the normal settle message and can be resumed with retry after the reset. Reason: Claude Code ends a `-p` process about 60 seconds after its turn once no agent is running, so it cannot wait for the reset.
+
+      REQUIRED:
+      1. README.md: under '### 자동 판단과 사용량' add a short paragraph on the hold (what stops, when it resumes, the -p behaviour); under '### 자주 바꾸는 설정' add a `usage_hold_percent` bullet in the same format as the `settle_notify` bullet.
+      2. docs/reference.md: in the '## 설정' table add a `usage_hold_percent` row right after the `settle_notify` row, same column format; under '## 실행 규칙' add a paragraph headed `**사용량 한도 대기**:` right after the `**정산 알림**:` paragraph covering every contract point above; under '## DAG 패널' add one sentence on the header badge.
+      3. Never mention a usage_hold_max_minutes option. Change nothing else.
+
+      SCOPE: edit only README.md and docs/reference.md. Another node edits hooks/, tests/ and .claude-plugin/plugin.json at the same time.
+
+      VERIFY: `git diff --check -- README.md docs/reference.md` prints nothing; `grep -n 'usage_hold' README.md docs/reference.md` shows the new text.
+
+      STOP WHEN: the three changes are written and the check passes.
+
+      In ## Output give each changed or added line with its file and line number.

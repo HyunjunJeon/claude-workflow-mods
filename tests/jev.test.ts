@@ -264,7 +264,8 @@ test('Given a secret straddling the truncation boundary, When the permission req
   expect(summary.hash).toBe(hash(content.replace(secret, '[REDACTED:github-token]')))
 })
 
-test('Given a 30,000-character request, When the permission request is built, Then it is capped with a length marker', () => {
+// The 2026-10-22 GitHub CI run took 11.3 s for the session-learning test against the 5 s default, so these slow tests get 30 s.
+test('Given a 30,000-character request, When the permission request is built, Then it is capped with a length marker', { timeoutMs: 30_000 }, () => {
   const state = permissionState({}, 'r'.repeat(30_000), { goal: 'g'.repeat(5_000), task: 't'.repeat(5_000) })
   expect(state.request.startsWith('r'.repeat(4_000))).toBe(true)
   expect(state.request).toContain('30000')

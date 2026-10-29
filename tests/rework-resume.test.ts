@@ -124,7 +124,9 @@ test('an amend after the round settled spawns a fresh agent for the changed prod
   const h = harness(on)
   const { runId, notes } = await failSpecReview($, h, 'resume-amend')
   await finish($, h, 'agent-2')
+  // Each reviewer's notes are removed before its spawn, so both verdicts are written again for the rerun reviewers.
   h.files.set(`${notes}/review-spec-notes.md`, specNotes('Spec verdict: FAIL', `${FINDING}\n(b) none\n(c) none`))
+  h.files.set(`${notes}/review-standards-notes.md`, standardsNotes('Standards verdict: PASS'))
   await finish($, h, 'agent-5')
   await finish($, h, 'agent-6')
   expect(checkpoint(h, runId).status).toBe('failed')

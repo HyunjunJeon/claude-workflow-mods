@@ -1,5 +1,5 @@
 import { definitionHash, nodeFingerprint } from './definition.ts'
-import { extractOutput, MAX_QUESTIONS_PER_ATTEMPT, mayAsk } from './node-prompt.ts'
+import { extractOutput, hasOutputHeading, MAX_QUESTIONS_PER_ATTEMPT, mayAsk, wholeFacts } from './node-prompt.ts'
 import { VERIFICATION_GUIDANCE } from './check-eval.ts'
 import { downstream, edgesOf, upstream, type Edge } from './graph.ts'
 import { fail, type AnswerSource, type Definition, type NodeDef, type NodeQuestion, type NodeRun, type NodeState, type QuestionSpec, type Result, type ReviewFinding, type Run, type RunStatus } from './types.ts'
@@ -9,10 +9,23 @@ export const MAX_ANSWER_CHARS = 20_000
 const ACTIVE: ReadonlySet<NodeState> = new Set(['pending', 'blocked', 'scheduled', 'running'])
 const ENDED_BADLY: ReadonlySet<NodeState> = new Set(['failed', 'cancelled', 'skipped'])
 
+// The stored answer keeps its start and end; the marker says the report file has the rest, so no reader takes it for whole.
 function keepEnds(text: string, limit: number): string {
   if (text.length <= limit) return text
   const head = Math.floor(limit * 0.4)
-  return `${text.slice(0, head)}\n… (${text.length - limit} characters omitted)\n${text.slice(text.length - (limit - head))}`
+  return `${text.slice(0, head)}\n… (${text.length - limit} characters omitted here: the node's full report has the whole answer)\n${text.slice(text.length - (limit - head))}`
+}
+
+// A report's ## Output as far as the checkpoint has it, for a node finished before NodeRun.whole: markFinished now reads the
+// Ruling, Next and Tried and failed fields from the whole answer. From the stored answer's Output heading when it has one,
+// and all of it when it has none and was never cut, as extractOutput reads a report without a heading. An answer cut by
+// keepEnds and without the heading keeps the stored output, since the text before the cut may be reasoning, where a template
+// line such as "Ruling: <decision>" is no ruling.
+export function fullOutput(node: { answer?: string; output?: string }): string {
+  const answer = node.answer
+  if (answer === undefined) return node.output ?? ''
+  if (hasOutputHeading(answer) || answer.length <= MAX_ANSWER_CHARS) return extractOutput(answer, Number.POSITIVE_INFINITY)
+  return node.output ?? ''
 }
 
 function clone(run: Run): Run {
@@ -29,13 +42,14 @@ function nodeOf(run: Run, id: string): NodeRun {
   return node
 }
 
-export function createRun(definition: Definition, ids: { runId: string; sessionId: string; now: number }): Run {
+export function createRun(definition: Definition, ids: { runId: string; sessionId: string; now: number; root?: string }): Run {
   return advance({
     schemaVersion: 1,
     runId: ids.runId,
     key: definition.key,
     name: definition.name,
     sessionId: ids.sessionId,
+    ...(ids.root ? { root: ids.root } : {}),
     status: 'running',
     createdAt: ids.now,
     updatedAt: ids.now,
@@ -109,6 +123,7 @@ export function markRunning(input: Run, id: string, agentId: string, now: number
   delete node.answer
   delete node.output
   delete node.reportPath
+  delete node.whole
   delete node.verification
   return advance(run, now)
 }
@@ -123,6 +138,7 @@ function keepReport(node: NodeRun, outcome: NodeOutcome): void {
   if (outcome.answer !== undefined) {
     node.answer = keepEnds(outcome.answer, MAX_ANSWER_CHARS)
     node.output = extractOutput(outcome.answer)
+    node.whole = wholeFacts(outcome.answer)
   }
   if (outcome.reportPath !== undefined) node.reportPath = outcome.reportPath
   if (outcome.error !== undefined) node.error = outcome.error
@@ -184,6 +200,7 @@ function answered(input: Run, id: string, reply: QuestionAnswer, now: number): R
   delete node.question
   delete node.answer
   delete node.output
+  delete node.whole
   delete node.reportPath
   delete node.error
   return { ok: true, value: { run, node } }
@@ -367,6 +384,7 @@ export function retryRun(input: Run, options: RetryOptions, now: number): Result
     delete node.answer
     delete node.output
     delete node.reportPath
+    delete node.whole
     delete node.finishedAt
     if (options.prompt !== undefined && targets.includes(node.id)) node.promptOverride = options.prompt
   }
@@ -398,6 +416,7 @@ export function reworkRun(input: Run, producers: string[], note: string, reviewe
     delete node.answer
     delete node.output
     delete node.reportPath
+    delete node.whole
     delete node.finishedAt
     if (producers.includes(node.id)) {
       const declared = run.definition.nodes.find(def => def.id === node.id)?.prompt ?? ''
@@ -510,6 +529,8 @@ export type NodeSnapshot = {
   finished_at?: number
   last_error?: { message: string }
   output?: string
+  // Characters in the whole ## Output; output above holds at most 4,000 of them, and report_path holds all.
+  output_chars?: number
   report_path?: string
   answer?: string
   question?: QuestionSnapshot
@@ -568,6 +589,7 @@ export function snapshotOf(run: Run, answerChars = 2_000): RunSnapshot {
         ...(n.finishedAt !== undefined ? { finished_at: n.finishedAt } : {}),
         ...(n.error ? { last_error: { message: n.error } } : {}),
         ...(n.output ? { output: n.output } : {}),
+        ...(n.whole ? { output_chars: n.whole.outputChars } : {}),
         ...(n.reportPath ? { report_path: n.reportPath } : {}),
         ...(n.answer && answerChars > 0 ? { answer: keepEnds(n.answer, answerChars) } : {}),
       }

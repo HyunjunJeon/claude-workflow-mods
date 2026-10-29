@@ -1,6 +1,7 @@
 import { CATEGORIES } from './node-prompt.ts'
 import { SECURITY_GUIDES } from './stages.ts'
 import { TEXT_FIELDS, type TextField } from './types.ts'
+import { DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS, MIN_COMMAND_TIMEOUT_MS } from './verification.ts'
 
 // Claude Code passes the model only the first 2048 characters of a tool description, so the
 // rules come first and tests/tool-spec.test.ts keeps the whole text under that limit.
@@ -9,12 +10,12 @@ export const TOOL_DESCRIPTION_LIMIT = 2048
 export const TOOL_DESCRIPTION = [
   'The only way to get work done in this session: plan the task as a dependency-ordered DAG of subagent nodes and run it here.',
   'start returns at once. Do not poll: when the run settles you get a summary with every node\'s output. Treat node completion claims as false until you verify them.',
-  'Every node needs verify: 1-16 checks the plugin runs before the node completes, {kind:"file",path,contains?|absent?|matches?|lastLine?|equals?} (path relative, or absolute read-only; a folder allows contains/absent) or {kind:"command",argv,expect?:{exit,stdout,stderr}} (exit 0 unless expect.exit); start/amend refuse nodes without them.',
+  'Every node needs verify: 1-16 plugin-run checks before the node completes, {kind:"file",path,contains?|absent?|matches?|lastLine?|equals?} (path relative, or absolute read-only; a folder allows contains/absent) or {kind:"command",argv,expect?:{exit,stdout,stderr},timeoutMs?} (exit 0 unless expect.exit); start/amend refuse nodes without them.',
   'A node receives the outputs of its dependsOn nodes, so list exactly the nodes whose results it needs. Ready nodes run in parallel waves; a failed node skips its dependents.',
   'Definition: "key" (same key and definition reuses the run; another definition under it is refused), "name", optional "goal" (shown to every node) and "nodes".',
   '"review":{request} and "commit":[{message,paths}] add the review pair and a commit node.',
-  'Node: "id", a self-contained "prompt" saying what to do and produce, optional "dependsOn", "category" (model routing; Jev may override), "agent" (subagent type, e.g. Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
-  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} previews waves, models, write conflicts and warnings, starting nothing; start {preview_id} runs it as previewed; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
+  'Node: "id", a self-contained "prompt" (what to do and produce), optional "dependsOn", "category" (model routing; Jev may override), "agent" (subagent type, e.g. Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
+  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} previews waves, models, write conflicts and warnings, starts nothing; start {preview_id} runs it as previewed; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
   'retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and skipped dependents; completed ones are reused); amend {run_id, definition} (re-runs changed nodes and dependents, adds nodes);',
   'send {run_id, node_id, message} (steer a running node); answer {run_id, node_id, answer} (answer a blocked node); attach {run_id} (adopt another session\'s run).',
 ].join(' ')
@@ -67,6 +68,12 @@ const NODE_SCHEMA = {
               stdout: { type: 'object', properties: TEXT_EXPECT_PROPERTIES },
               stderr: { type: 'object', properties: TEXT_EXPECT_PROPERTIES },
             },
+          },
+          timeoutMs: {
+            type: 'integer',
+            minimum: MIN_COMMAND_TIMEOUT_MS,
+            maximum: MAX_COMMAND_TIMEOUT_MS,
+            description: `command only: time limit in milliseconds, default ${DEFAULT_COMMAND_TIMEOUT_MS}; raise it for a check that is slow by nature`,
           },
         },
         required: ['kind'],

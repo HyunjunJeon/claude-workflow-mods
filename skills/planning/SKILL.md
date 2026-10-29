@@ -100,7 +100,7 @@ Each node has these fields:
 Each check uses one of these forms:
 
 - `{"kind": "file", "path": "<path>", "contains"?, "absent"?, "matches"?, "lastLine"?, "equals"?}`; every given text field must hold.
-- `{"kind": "command", "argv": ["<program>", "<arg>"], "expect"?: {"exit"?, "stdout"?, "stderr"?}}`; without `expect.exit` only exit 0 passes.
+- `{"kind": "command", "argv": ["<program>", "<arg>"], "expect"?: {"exit"?, "stdout"?, "stderr"?}, "timeoutMs"?}`; without `expect.exit` only exit 0 passes, and `timeoutMs` is the limit in milliseconds (default 30000).
 
 `start` and `amend` refuse nodes without checks (`verification_required`).
 Paths in `writes` cannot be absolute, contain `..`, or point inside `.claude`.
@@ -118,7 +118,8 @@ Optional extras are `agent`, `label`, `task_summary`, `description` and `load_sk
 
 `dependsOn` controls order and passes data.
 When a node starts, the plugin adds its direct dependencies' outputs to its prompt.
-Each output includes the `## Output` section, up to 4,000 characters, and the full report path.
+Each output is the `## Output` section, up to 4,000 characters, with the full report path.
+A longer Output ends with a marker naming how much is left, and the node is told to read the report for the rest.
 List as dependencies exactly the nodes whose results a node consumes - no more, no fewer.
 
 ```json
@@ -188,7 +189,10 @@ You can recover a settled run. Completed nodes keep their results:
 ## Verification and automatic recovery
 
 After a node reports completion, the runtime executes its `verify` checks.
-Commands run from the project root without a shell, with a 30-second limit. Exit code 0 passes unless `expect.exit` names other codes.
+Commands run from the project root without a shell. Exit code 0 passes unless `expect.exit` names other codes.
+A command check has a 30-second limit (30000 ms) unless it sets `timeoutMs`: whole milliseconds from 1000 to 600000.
+Keep checks fast; set `timeoutMs` only on a check that is slow by nature, such as a full test suite, and never raise it to hide a hang.
+`start` and `amend` refuse `timeoutMs` on a file check, or a value outside that range or not a whole number, as `invalid_verification`.
 They run with the host's PATH and no shell profile, so `start` refuses a check whose program (or a command inside its `sh -c` script) is not on that PATH; your Bash tool has `rg`, the verify run may not, so prefer `grep -E`.
 The runtime saves evidence to `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking the node `completed`.
 A failed check or missing evidence makes the node `failed` and prevents its dependents from starting.

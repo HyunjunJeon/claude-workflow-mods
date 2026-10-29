@@ -1,0 +1,230 @@
+# UI surfaces: draw the pane in VS Code, notify when a long run settles, and complete /dag arguments.
+# Why (outside review item 15, 2026-10-22): the pane is drawn only when the session surface is terminal, desktop or none
+# (hooks/register.ts paneSurface), though Claude Code draws mods in the VS Code chat panel (2.1.304 extended it to Bedrock,
+# Vertex, Foundry, gateway and telemetry-off sessions); a run that settles while the person is away is announced only in
+# the conversation and a toast; `/dag run <file>` and `/dag status <run>` need the path or id typed out. The plugin uses
+# neither `$.ui.notify` (native notification through the person's channel) nor the `prompt.autocomplete` hook today.
+#
+# PREREQUISITE: `git status --short` prints nothing (this file aside), and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p22-ui.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. The generated commit node commits after both reviews pass; nothing
+# is pushed.
+#
+# Run plan (components -> waves):
+#   wave 1: vscode-pane, docs
+#   wave 2: settle-notify (after vscode-pane)
+#   wave 3: dag-autocomplete (after settle-notify)
+#   then:   review-spec, review-standards, commit (generated)
+# The three code nodes all edit hooks/register.ts and gate on the full suite, so they run as a chain; no edge carries
+# data. docs gets the three contracts pasted and edits only README.md and docs/reference.md.
+# Categories: standard for the three code nodes (each a small slice through register.ts, an option or hook, and tests;
+# settle-notify and dag-autocomplete are vertical slices across register.ts, a pure function, a host module and an option, so
+# their "owns several files" warnings are expected); writing for docs.
+
+key: improve-p22-ui-1
+name: Pane in VS Code, settle notifications, /dag completion
+goal: >
+  The /dag pane is drawn when the session surface is vscode as it is for terminal and desktop; a run of this session
+  that settles completed or failed raises one native notification through $.ui.notify under the new settle_notify option
+  (off, long = only runs that took at least 120 s, always; default long); the prompt.autocomplete hook offers definition
+  file paths after `/dag run ` and `/dag preview ` and run ids after the /dag subcommands that take one; README.md and
+  docs/reference.md describe all three; claude plugin test, tsc and claude plugin validate pass; the change is committed
+  after both reviews pass (not pushed).
+review:
+  request: |
+    정리할 것들 모두 정리하고 다음 작업도 진행해보면 좋겠는데?
+    Next work chosen (2026-10-22): outside review item 15, UI surfaces. (1) Draw the /dag pane on the vscode surface as on terminal and desktop. (2) Native notification when a run settles: a run owned by this session that settles completed or failed raises exactly one $.ui.notify with the run name, its result and node counts; settle_notify option off | long | always, default long, where long notifies only when the run took at least 120000 ms from creation to settle; no $.ui.notify call is made when the settled status is cancelled or the run belongs to another session, and a notify that rejects or reports isSent false is logged with debug and does not throw. (3) prompt.autocomplete: after `/dag run ` or `/dag preview ` the hook offers up to 20 project-relative .yaml, .yml or .json files under flows/ and eval/fixtures/ that start with the typed token; after `/dag status|cancel|retry|approve|reject|handoff|accept ` it offers up to 20 run ids of this project that start with the token, newest first, each labelled with the run name and status; anywhere else it adds nothing.
+    Out of scope: other surfaces (mobile), notification for nodes, completion for other commands or tools, changing the pane's layout; nothing is pushed.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: |
+      feat(ui): draw the pane in VS Code, notify when a long run settles, and complete /dag arguments
+
+      The /dag pane is drawn on the vscode surface as on terminal and desktop. A run of this
+      session that settles completed or failed raises one native notification through
+      $.ui.notify; settle_notify (off, long, always; default long) limits it to runs that took
+      at least 120 s. The prompt.autocomplete hook offers definition file paths after
+      `/dag run` and `/dag preview` and run ids after the /dag subcommands that take one.
+    paths:
+      - hooks
+      - tests
+      - .claude-plugin/plugin.json
+      - README.md
+      - docs/reference.md
+      - flows/improvement/p22-ui.yaml
+nodes:
+  - id: vscode-pane
+    label: Draw the pane on the vscode surface
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: file
+        path: hooks/register.ts
+        contains: "'vscode'"
+    prompt: |
+      TASK: Let the /dag pane be drawn when the session surface is vscode, as it is for terminal and desktop.
+
+      CONTEXT:
+      - hooks/register.ts near line 2855: `paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'`, set at session start; read every use of `paneSurface` before changing it. Claude Code draws mods in the VS Code chat panel (the 2.1.304 changelog extended it to Bedrock, Vertex, Foundry, gateway and telemetry-off sessions). The surface names are in .claude-plugin/types/claude-code/index.d.ts (RenderSurface; the doc example lists 'terminal', 'desktop', 'vscode', 'mobile').
+      - The pane's elements are Box/Text/Button-style elements common to every surface (hooks/ui/); check that the pane code draws nothing terminal-only (Raster, Image) on the path a vscode session takes, and say what you found.
+
+      REQUIRED:
+      1. Make paneSurface true for 'vscode' too, keeping 'mobile' and any other surface false; update the comment there.
+      2. A hook-level test (tests/control-harness.ts, claude-code/testing), red first: a session that starts with surface 'vscode' gets the pane (whatever the existing terminal/desktop tests assert for a pane surface), and one with 'mobile' does not.
+
+      SCOPE: edit only hooks/register.ts (the paneSurface line and its comment) and files under tests/. Later nodes of this run edit hooks/register.ts for notifications and autocomplete; a docs node edits README.md and docs/reference.md.
+
+      VERIFY: `command claude plugin test .` passes in full and `bunx -p typescript@5 tsc -p . --noEmit` prints nothing (the runtime reruns both).
+
+      STOP WHEN: the tests pass and both checks pass.
+
+      In ## Output give: the new condition, what you found about terminal-only elements, the new test names, and the last line of the test run.
+
+  - id: settle-notify
+    label: Notify when a run settles
+    category: standard
+    dependsOn:
+      - vscode-pane
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/host
+      - hooks/ui
+      - .claude-plugin/plugin.json
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: .claude-plugin/plugin.json
+        contains: "\"settle_notify\""
+      - kind: file
+        path: hooks
+        contains: "$.ui.notify("
+    prompt: |
+      TASK: Raise one native notification through $.ui.notify when a run of this session settles completed or failed, under a new settle_notify option.
+
+      CONTEXT:
+      - `$.ui.notify(text, { title })` (.claude-plugin/types/claude-code/index.d.ts, search `notify: (text`) raises a native notification through the person's own channel; it resolves `{ isSent: true, channel }` or `{ isSent: false, reason }` and rejects on a hook's deny or a failed write; with no terminal only the person's Notification hooks run.
+      - A run settles in hooks/register.ts where the settle message and the settle toast are produced (search `toastSettledFailed` and the settle announcement); a run has `createdAt`, `status`, `name`, `sessionId` and nodes with states (hooks/engine/types.ts). UI strings live in the EN/KO string tables (search `toastSettledFailed`); AGENTS.md: a UI string changes in both EN and KO.
+      - A new userConfig knob goes in .claude-plugin/plugin.json plus the top of register(), where invalid values silently keep the default (see `start_approval` for a string option with fixed values).
+
+      REQUIRED:
+      1. plugin.json: `settle_notify`, type string, options ["off", "long", "always"], default "long", with a title and a description that says long means runs that took at least 120 s.
+      2. When a run whose sessionId is this session settles with status completed or failed: unless settle_notify is off, or it is long and the run took less than 120000 ms from createdAt to settle, call $.ui.notify once with a short text naming the run, its result and its node counts (for example completed 4/4, or failed with the failed node count), title 'dag-workflow', both texts from the EN/KO tables. Never notify for cancelled runs, other sessions' runs, or twice for one settle. A rejected or unsent notify is logged with debug and never thrown. Put the decision (whether to notify and the text) in a pure function under hooks/ui or hooks/engine so it is unit-tested without a host; the $.ui.notify call stays in register.ts or a hooks/host module.
+      3. Tests, red first: the pure decision (off, long under and over 120 s, always, cancelled, other session); one hook-level test that a long completed run raises exactly one ui.notify with the expected text and a short one under long raises none. Extend tests/control-harness.ts to capture ui.notify if it does not already.
+
+      SCOPE: edit hooks/register.ts (the settle path and the option parse), hooks/host/ and hooks/ui/ or hooks/engine/ only for the new function and strings, .claude-plugin/plugin.json and files under tests/. The previous node changed the paneSurface line; the next node adds autocomplete to hooks/register.ts; a docs node edits README.md and docs/reference.md.
+
+      VERIFY: `command claude plugin test .` passes in full, tsc prints nothing, `command claude plugin validate .` passes (the runtime reruns all three).
+
+      STOP WHEN: the tests pass and the three checks pass.
+
+      In ## Output give: the option definition, the decision function's name and signature, the EN and KO texts, the new test names, and the last line of the test run.
+
+  - id: dag-autocomplete
+    label: Complete /dag arguments in the prompt box
+    category: standard
+    dependsOn:
+      - settle-notify
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/host
+      - hooks/engine
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: hooks/register.ts
+        contains: "on('prompt.autocomplete'"
+    prompt: |
+      TASK: Add a prompt.autocomplete hook that completes the argument of /dag subcommands: definition file paths after `/dag run ` and `/dag preview `, run ids after the subcommands that take a run.
+
+      CONTEXT:
+      - The hook's contract is in .claude-plugin/types/claude-code/index.d.ts: search `type PromptAutocompleteInput` (text, cursor, token = the non-whitespace run ending at the cursor, start) and `type PromptAutocompleteResult` (the rows a plugin adds), plus the event's doc comment and any time budget for it; read them in full before writing.
+      - hooks/register.ts: `USAGE` (near line 77) lists the /dag subcommands; the runs map holds this project's runs (runId, name, status, createdAt). Definition files are run with `/dag run <file.yaml|yml|json>`; this repo keeps them under flows/ and eval/fixtures/.
+      - The hook runs as the person types, so it must not spawn a process per keystroke: use $.fs.list on the two folders (recursive only as deep as needed) and cache the list for at most 10 s, or another way the typings allow that stays within the event's budget; say which.
+
+      REQUIRED:
+      1. After `/dag run ` or `/dag preview ` with the cursor in that argument: rows for up to 20 project-relative .yaml, .yml or .json files under flows/ and eval/fixtures/ whose path starts with the token (an empty-looking argument offers the first 20, sorted).
+      2. After `/dag status `, `cancel `, `retry `, `approve `, `reject `, `handoff ` or `accept ` with the cursor in the first argument: rows for up to 20 run ids of this project that start with the token, newest first, each labelled with the run name and status.
+      3. Anywhere else (other text, other subcommands, a later argument) the hook adds nothing and passes the chain on unchanged.
+      4. Put the matching (which rows for a given text, cursor, token, file list and run list) in a pure function under hooks/engine so it is unit-tested without a host; the listing and the hook stay in register.ts or a hooks/host module.
+      5. Tests, red first: the pure matcher for each case above, including the 20-row cap and the no-op cases; one hook-level test that the hook returns run-id rows for `/dag status dag_` if the testing kit can raise prompt.autocomplete (say how, or why not).
+
+      SCOPE: edit hooks/register.ts (the new hook and what it needs), hooks/engine/ and hooks/host/ only for the new functions, and files under tests/. Earlier nodes of this run changed the paneSurface line and the settle path; a docs node edits README.md and docs/reference.md.
+
+      VERIFY: `command claude plugin test .` passes in full, tsc prints nothing, `command claude plugin validate .` passes (the runtime reruns all three).
+
+      STOP WHEN: the tests pass and the three checks pass.
+
+      In ## Output give: the matcher's name and signature, the row shape returned, how the file list is gathered and cached, the new test names, and the last line of the test run.
+
+  - id: docs
+    label: Document the three UI changes
+    category: writing
+    writes:
+      - README.md
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "settle_notify"
+      - kind: file
+        path: README.md
+        contains: "VS Code"
+      - kind: command
+        argv: [git, diff, --check, --, README.md, docs/reference.md]
+    prompt: |
+      TASK: Document three UI changes in README.md and docs/reference.md (both Korean; keep them Korean).
+
+      CONTRACT (other nodes implement exactly this at the same time):
+      1. The /dag pane is also drawn in the VS Code chat panel (session surface vscode), as in the terminal and the desktop app; mobile still has no pane.
+      2. Settle notification: when a run of this session settles completed or failed, the plugin raises one native notification through Claude Code's notification channel (`$.ui.notify`, the person's preferredNotifChannel and Notification hooks), naming the run, its result and node counts. Option `settle_notify`: `off`, `long` (default: only runs that took at least 120 s from creation to settle), `always`. Cancelled runs and other sessions' runs raise none; a notification that cannot be sent is only logged.
+      3. Completion in the prompt box: after `/dag run ` or `/dag preview ` the typeahead offers up to 20 .yaml, .yml or .json files under flows/ and eval/fixtures/ that start with what was typed; after `/dag status`, `cancel`, `retry`, `approve`, `reject`, `handoff` or `accept` it offers up to 20 run ids of this project, newest first, with the run name and status.
+
+      REQUIRED:
+      1. README.md: under '## 기본 사용법' (its '### 진행 확인' or '### 정의 파일 실행' subsection) add one sentence on completion; where the README describes the pane, say it also appears in VS Code; add one sentence on the settle notification and settle_notify under '### 진행 확인', and a settle_notify line in '### 자주 바꾸는 설정' if that subsection lists options. Search README.md for other statements that the pane is terminal/desktop only and update them.
+      2. docs/reference.md: add a `settle_notify` row to the settings table (search '| `jev_permission_scope`' for the table; same column format) and a short paragraph on the notification near the settle message description; add completion to the /dag command description; mention VS Code where the pane's surfaces are described (search '패널').
+      3. Change nothing else.
+
+      SCOPE: edit only README.md and docs/reference.md. Other nodes edit hooks/, tests/ and .claude-plugin/plugin.json at the same time.
+
+      VERIFY: `git diff --check -- README.md docs/reference.md` prints nothing; `grep -n 'settle_notify\|VS Code' README.md docs/reference.md` shows the new text.
+
+      STOP WHEN: all three changes are documented and the check passes.
+
+      In ## Output give each changed or added line with its file and line number.

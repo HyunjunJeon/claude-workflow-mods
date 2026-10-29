@@ -597,12 +597,22 @@ test('the surface question is not asked in a session that draws no pane', async 
   const h = harness(on)
   const jev = jevModel(on, h)
   jev.surface = BOARD
-  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.session.start({ surface: 'mobile', isInteractive: true, cwd: '/work' })
   await ask($, 'How does a DAG run settle?')
   expect(modeRequests(h)).toHaveLength(1)
   expect(Object.keys(modeRequests(h)[0]?.questions ?? {})).toEqual(['mode'])
   expect(h.submits[0]?.context[0]).toBe(DIRECT)
   expect(surfaceRecords(h)).toHaveLength(0)
+})
+
+test('the surface question is asked in a vscode session, which draws the pane', async ($, on) => {
+  const h = harness(on)
+  const jev = jevModel(on, h)
+  jev.surface = BOARD
+  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await ask($, 'How does a DAG run settle?')
+  expect(Object.keys(modeRequests(h)[0]?.questions ?? {})).toEqual(['mode', 'surface'])
+  expect(h.submits[0]?.context[0]).toContain(BOARD_PROTOCOL)
 })
 
 test('the surface question is not asked when the turn is decided without Jev', async ($, on) => {

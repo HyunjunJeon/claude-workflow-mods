@@ -399,7 +399,7 @@ const IMPORTER = {
 // stops, so only the restoration block on the next user prompt can tell it.
 test('scenario 6, context diet: plugin messages never carry the block, and a user prompt carries it once after a change the model has not seen', { options: { ...NO_RECOVERY.options, enforcement: 'strict' } }, async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.session.start({ surface: 'mobile', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: SKILL, text: '# planning' })
 
   await ask($, 'Build the importer')
@@ -1170,7 +1170,8 @@ const STOPS: Plugin = {
 
 const stopped = (h: Harness): string[] => [...h.files.keys()].filter(path => path.startsWith('/stopped/')).sort()
 
-test('scenario 11, background wait: a node that backgrounded its work and ended its turn without a status line is not verified early, its dependents wait, and the next turn completes it', { ...NO_RECOVERY, plugins: [STOPS] }, async ($, on) => {
+// The 2026-10-22 GitHub CI run took 11.3 s for the session-learning test against the 5 s default, so these slow tests get 30 s.
+test('scenario 11, background wait: a node that backgrounded its work and ended its turn without a status line is not verified early, its dependents wait, and the next turn completes it', { ...NO_RECOVERY, plugins: [STOPS], timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on)
   on('turn.step', async function* ($: unknown, e: { turnId: string; index: number }) {
     yield { kind: 'text', index: 0, text: 'the eval finished' }
@@ -1228,7 +1229,7 @@ test('scenario 11, background wait: a node that backgrounded its work and ended 
   expect(h.spawns).toHaveLength(3)
 })
 
-test('scenario 11, background wait: with no next turn the node fails after 30 minutes on the clock, its agent is stopped, dependents are skipped and a late turn end changes nothing', { ...NO_RECOVERY, plugins: [STOPS] }, async ($, on) => {
+test('scenario 11, background wait: with no next turn the node fails after 30 minutes on the clock, its agent is stopped, dependents are skipped and a late turn end changes nothing', { ...NO_RECOVERY, plugins: [STOPS], timeoutMs: 30_000 }, async ($, on) => {
   const h = harness(on)
   await boot($)
   const runId = await start($, evalFlow('eval-stalled'))

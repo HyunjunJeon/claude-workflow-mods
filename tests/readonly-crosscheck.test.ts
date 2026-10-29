@@ -11,11 +11,8 @@ test('isReadOnly from the host is compared with the plugin judgment and only a d
       tool: 'Bash', input: { command: 'python3 -c "print(1)"' }, host: true,
       expected: 'read-only disagreement: Bash host=read-only plugin=refused: python3 is not on the read-only command list',
     },
-    {
-      name: 'host silent, plugin holds the Bash command read-only',
-      tool: 'Bash', input: { command: 'git status' }, host: false,
-      expected: 'read-only disagreement: Bash host=not stated plugin=read-only',
-    },
+    // recordHostReadOnlyGap records this case as a readonly decision (tests/readonly-shadow.test.ts), so no debug line repeats it.
+    { name: 'host silent, plugin holds the Bash command read-only', tool: 'Bash', input: { command: 'git status' }, host: false, expected: undefined },
     {
       name: 'host read-only, plugin refuses a tool outside the main-loop list',
       tool: 'WebSearch2', input: {}, host: true,

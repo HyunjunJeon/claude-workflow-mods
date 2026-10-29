@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { evidenceOutcome, exitProblem, isCheckDefect, missingProgram, observedFailures, textProblem } from '../hooks/engine/check-eval.ts'
+import { commandDetail, evidenceOutcome, exitProblem, isCheckDefect, missingProgram, observedFailures, textProblem } from '../hooks/engine/check-eval.ts'
 import type { VerificationCheck, VerificationEvidence } from '../hooks/engine/types.ts'
 import { parseChecks } from '../hooks/engine/verification.ts'
 
@@ -79,6 +79,21 @@ test('equals compares the whole text after trailing whitespace is removed', () =
   expect(problem).toContain('notes.md')
   expect(textProblem('warning: x', { equals: '' }, 'stderr')).toContain('equals')
   expect(textProblem(' ok', { equals: 'ok' }, 'stdout')).toContain('equals')
+})
+
+// On 2026-10-22 a headless probe declared equals "A\n" for a file holding exactly A and a newline. The text side was trimmed
+// and the expected side was not, so the check could never hold; the node failed and the main model rewrote the check.
+test('trailing whitespace of the expected lastLine or equals is ignored as the text\'s is', () => {
+  expect(textProblem('A\n', { equals: 'A\n' }, 'a.txt')).toBeUndefined()
+  expect(textProblem('A', { equals: 'A\r\n' }, 'a.txt')).toBeUndefined()
+  expect(textProblem('', { equals: ' \n' }, 'stderr')).toBeUndefined()
+  expect(textProblem('a\nPASS\n', { lastLine: 'PASS\n' }, 'notes.md')).toBeUndefined()
+  expect(textProblem('a\nPASS', { lastLine: 'PASS  ' }, 'notes.md')).toBeUndefined()
+  // Only the end is trimmed: a leading or inner difference still fails, as does a different value.
+  expect(textProblem('A\n', { equals: ' A\n' }, 'a.txt')).toContain('equals')
+  expect(textProblem('A B\n', { equals: 'A  B\n' }, 'a.txt')).toContain('equals')
+  expect(textProblem('B\n', { equals: 'A\n' }, 'a.txt')).toContain('equals')
+  expect(textProblem('FAIL\n', { lastLine: 'PASS\n' }, 'notes.md')).toContain('lastLine')
 })
 
 test('with several fields the failing one is named even when the others hold', () => {
@@ -192,4 +207,134 @@ test('failure hints exclude claims, successful checks, timeouts and expectation 
     { ...item, detail: 'ECONNREFUSED', outcome: 'unknown' },
     { ...item, detail: 'ECONNREFUSED', check: { kind: 'file', path: 'result.txt' } },
   ])).toEqual([])
+})
+
+// What a bun run prints: passing lines, then a failing test with its error, then more passing lines and the totals last.
+const passing = (from: number, to: number) => Array.from({ length: to - from }, (_, index) => `(pass) payments > case ${from + index} [0.12ms]`)
+const FAILED_TEST = '(fail) payments > refunds a partial amount [3.1ms]'
+const ASSERTION = 'AssertionError: expected 5 to equal 6'
+const MARKER = /^\[\.\.\. (\d+) characters left out \.\.\.\]$/m
+
+test('text within the limit comes back unchanged', () => {
+  const text = ['["bun","test"] exited 1', FAILED_TEST, ASSERTION, ' 1 fail'].join('\n')
+  expect(commandDetail(text)).toBe(text)
+  expect(commandDetail('x'.repeat(4_000))).toBe('x'.repeat(4_000))
+  expect(commandDetail('')).toBe('')
+})
+
+test('a long output keeps its first line, the failure lines from the middle and the totals at the end', () => {
+  const lines = ['["claude","plugin","test","."] exited 1', ...passing(0, 150), FAILED_TEST, ASSERTION, ...passing(150, 300), ' 299 pass', ' 1 fail']
+  const text = lines.join('\n')
+  expect(text.length).toBeGreaterThan(10_000)
+  const detail = commandDetail(text)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail.startsWith('["claude","plugin","test","."] exited 1\n')).toBe(true)
+  expect(detail.endsWith('\n 299 pass\n 1 fail')).toBe(true)
+  expect(detail).toMatch(MARKER)
+  // The three parts keep their order: head, then the marker, then the failure lines, then the tail.
+  const at = [detail.indexOf('exited 1'), detail.search(MARKER), detail.indexOf(FAILED_TEST), detail.indexOf(ASSERTION), detail.lastIndexOf(' 299 pass')]
+  expect(at.every((place, index) => place >= 0 && (index === 0 || place > (at[index - 1] ?? 0)))).toBe(true)
+  // Passing lines from the middle are what gets left out.
+  expect(detail).not.toContain('payments > case 100 ')
+  // What the marker counts is every character no part shows: the head, the two failure lines and the tail are shown.
+  const [before = '', count = '', after = ''] = detail.split(MARKER)
+  const tail = after.slice(`\n${FAILED_TEST}\n${ASSERTION}\n`.length)
+  expect(Number(count)).toBe(text.length - (before.length - 1) - FAILED_TEST.length - ASSERTION.length - tail.length)
+})
+
+test('the marker counts exactly the characters of the output that no part shows', () => {
+  const text = 'x'.repeat(10_000)
+  const [head = '', marker = '', tail = ''] = commandDetail(text).split('\n')
+  expect(head.length).toBeGreaterThan(900)
+  expect(head.length).toBeLessThanOrEqual(1_000)
+  expect(Number(MARKER.exec(marker)?.[1])).toBe(text.length - head.length - tail.length)
+})
+
+test('a long output without failure lines keeps its head and its tail only', () => {
+  const text = Array.from({ length: 2_000 }, (_, index) => `line ${index + 1}`).join('\n')
+  const detail = commandDetail(text)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail.startsWith('line 1\nline 2\n')).toBe(true)
+  expect(detail.endsWith('\nline 1999\nline 2000')).toBe(true)
+  const parts = detail.split(MARKER)
+  expect(parts.length).toBe(3)
+  expect(detail).not.toContain('line 1000\n')
+  // With nothing to show from the middle, the tail takes the budget the failure lines would have had.
+  expect(parts[2]?.length).toBeGreaterThan(2_500)
+})
+
+test('a failure line is kept once, even when the longer tail would have reached it', () => {
+  const late = '(fail) payments > late failure [1ms]'
+  const text = [...passing(0, 230), late, ...passing(230, 300), ' 1 fail'].join('\n')
+  const detail = commandDetail(text)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail.split(late).length - 1).toBe(1)
+  expect(detail.endsWith(' 1 fail')).toBe(true)
+})
+
+test('a flood of failure lines leaves the totals and a run of the last lines intact', () => {
+  const text = [...Array.from({ length: 400 }, (_, index) => `(fail) suite > case ${index} [1ms]`), ' 400 fail'].join('\n')
+  const detail = commandDetail(text)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail).toMatch(MARKER)
+  // The failure lines take a quarter of the limit at most, so the tail still holds the last 59 cases and the totals unbroken.
+  expect(detail.split('\n').slice(-60)).toEqual([...Array.from({ length: 59 }, (_, index) => `(fail) suite > case ${341 + index} [1ms]`), ' 400 fail'])
+})
+
+test('a failure line is recognised by its start or by the error it names, and only in the middle', () => {
+  const runner = ['FAIL  tests/a.test.ts', 'not ok 7 - parses', 'TypeError: x is not a function', 'AssertionError [ERR_ASSERTION]: boom', '  (fail) indented']
+  const noise = ['(pass) fine', 'ok 1 fine', 'a failing word and a Fail without the colon', 'unfail', 'error: lower case']
+  const text = ['head', ...passing(0, 100), ...runner, ...noise.flatMap(line => [line, ...passing(0, 1)]), ...passing(100, 300), 'tail'].join('\n')
+  const detail = commandDetail(text)
+  for (const line of runner) expect(detail).toContain(line)
+  for (const line of noise) expect(detail).not.toContain(`${line}\n`)
+})
+
+test('a pytest FAILED line from the middle is kept next to the FAIL lines of other runners', () => {
+  const pytest = 'FAILED tests/test_pay.py::test_refund - assert 5 == 6'
+  const text = ['============ test session starts ============', ...passing(0, 150), pytest, ...passing(150, 300), '1 failed, 299 passed in 4.21s'].join('\n')
+  const detail = commandDetail(text)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail).toContain(`\n${pytest}\n`)
+  expect(detail.endsWith('\n1 failed, 299 passed in 4.21s')).toBe(true)
+})
+
+test('a first line longer than the head share is kept whole, up to half of what the detail can show', () => {
+  const command = `["bash","-c","${'x'.repeat(1_400)}"] exited 1`
+  const detail = commandDetail([command, ...passing(0, 300), ' 1 fail'].join('\n'))
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail.startsWith(`${command}\n`)).toBe(true)
+  expect(detail.endsWith('\n 1 fail')).toBe(true)
+  // A first line past the bound is cut there, so it cannot take the room of the failure lines and the totals.
+  const huge = commandDetail(['y'.repeat(5_000), FAILED_TEST, ...passing(0, 300), ' 1 fail'].join('\n'))
+  expect(huge.length).toBeLessThanOrEqual(4_000)
+  expect(huge).toContain(`\n${FAILED_TEST}\n`)
+  expect(huge.endsWith('\n 1 fail')).toBe(true)
+  expect(huge.startsWith('y'.repeat(1_900))).toBe(true)
+  expect(huge).not.toContain('y'.repeat(2_000))
+})
+
+test('a long failure line is clipped, so it neither floods the failure lines nor hides the next one', () => {
+  const second = '(fail) payments > second failure [1ms]'
+  const text = [...passing(0, 100), `AssertionError: ${'y'.repeat(2_000)}`, second, ...passing(100, 300), ' 2 fail'].join('\n')
+  const detail = commandDetail(text)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail).toContain(`AssertionError: ${'y'.repeat(100)}`)
+  expect(detail).not.toContain('y'.repeat(300))
+  expect(detail).toContain(`\n${second}\n`)
+})
+
+test('a line the head cut in two is not shown again as a failure line', () => {
+  const text = ['Error: boom '.repeat(100), ...passing(0, 300)].join('\n')
+  const [head = '', , afterMarker = ''] = commandDetail(text).split(MARKER)
+  expect(head.startsWith('Error: boom Error: boom ')).toBe(true)
+  expect(afterMarker).not.toContain('Error: boom')
+})
+
+test('a smaller limit is kept too, and a limit within the text changes nothing', () => {
+  const text = Array.from({ length: 300 }, (_, index) => `line ${index}`).join('\n')
+  const detail = commandDetail(text, 600)
+  expect(detail.length).toBeLessThanOrEqual(600)
+  expect(detail.endsWith('\nline 299')).toBe(true)
+  expect(commandDetail(text, text.length)).toBe(text)
 })

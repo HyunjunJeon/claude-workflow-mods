@@ -369,6 +369,21 @@ test('the evidence keeps the exit code whether the command passed or failed', SE
   expect(verification.evidence.map(item => item.exitCode)).toEqual([1, 3])
 })
 
+test('a long failing output keeps its failure line and its last line in the recorded detail', SETTINGS, async ($, on) => {
+  const h = harness(on)
+  const failed = '(fail) payments > refunds a partial amount [3.1ms]'
+  const passing = (from: number, to: number) => Array.from({ length: to - from }, (_, index) => `(pass) payments > case ${from + index} [0.12ms]`)
+  const stdout = [...passing(0, 80), failed, 'AssertionError: expected 5 to equal 6', ...passing(80, 160), ' 159 pass', ' 1 fail'].join('\n')
+  const verification = await verdict($, h, [{ kind: 'command', argv: ['report', '1', stdout] }])
+  const detail = verification.evidence[0]?.detail ?? ''
+  expect(verification.status).toBe('failed')
+  expect(detail.startsWith('exit code 1 is not accepted (expected 0)')).toBe(true)
+  expect(detail.length).toBeLessThanOrEqual(4_000)
+  expect(detail).toContain(`\n${failed}\nAssertionError: expected 5 to equal 6\n`)
+  expect(detail.trimEnd().endsWith('\n 159 pass\n 1 fail')).toBe(true)
+  expect(detail).toContain('characters left out')
+})
+
 test('stdout lastLine is applied to the command output', SETTINGS, async ($, on) => {
   const h = harness(on)
   const verification = await verdict($, h, [

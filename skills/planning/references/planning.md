@@ -117,7 +117,7 @@ Thus `verify-repro` is run 1's whole verification wave. The two-axis review belo
   - `Root cause:` File and line, or "not yet determined".
 - Use one verification node (`trivial`, id `verify-repro`) that depends on diagnosis. It runs the recorded command exactly. It checks for a non-zero exit and the user's symptom line. It writes `Reproduction confirmed: exit <n>` to `notes/<bug>-repro-check.md`; this is its `verify` file check. If the command exits 0 or fails differently, end with `DAG_NODE_STATUS: failed: <what differs>`. Without `expect.exit` the runtime accepts only exit 0, so declare the expected failure natively: `expect` with the recorded exit code and a `stdout` or `stderr` text field naming the symptom (see "Checks for absence or expected failure"). This node independently checks both symptom and exit code. An unrelated command error is not a reproduction.
 - **Red-capable rule.** Diagnosis must already have run the command and observed failure. A command that exits 0 before the fix proves nothing. The failure must be the user's symptom, not another failure. Keep the verdict the same on every run: pin the clock, seed randomness and isolate files. For intermittent bugs, repeat the trigger inside the command and exit non-zero if any iteration fails. Remove inputs, steps and configuration one at a time until each remaining element is required to reproduce the failure.
-- **Fast.** The runtime kills checks after 30 seconds. First narrow slower loops to one test, a fixture or smaller input. Aim for seconds.
+- **Fast.** By default the runtime kills a check after 30 seconds, and only a check that is slow by nature sets `timeoutMs`. A reproduction check is not one: first narrow slower loops to one test, a fixture or smaller input. Aim for seconds.
 - **No loop.** If no red-capable loop can be built, do not guess hypotheses. List the attempts and end with `DAG_NODE_STATUS: failed: clarification: <what is needed>`. The main conversation asks for a reproducing environment, redacted artifact (log, HAR, payload), or permission for temporary instrumentation. Then it `retry`s the node with the answer.
 
 **Run 2 - fix.** After run 1 settles, read its Output and notes.
@@ -184,7 +184,7 @@ Example chain for retyping a shared `userId` as `accountId`:
 - `contract` - dependsOn: [`migrate-api`, `migrate-web`, `migrate-jobs`]
 - `review-spec` and `review-standards` - each dependsOn: [`expand`, `migrate-api`, `migrate-web`, `migrate-jobs`, `contract`]; the refactor changes code, so the two-axis review applies (see Two-axis review), and `review-spec` reads every batch's Output and reruns the build and tests
 
-**The limit of this plugin.** There is no integration branch: every node writes into the one working tree as it finishes, and per-node worktree isolation is not available. When `migrate` batches cannot stay green alone even with the old form kept, do not launch them as parallel lanes that each promise green. Merge them into fewer nodes (in the limit one `migrate` node) or serialize them with `dependsOn`, and put the green check on the last node of the stage. The order `expand`, `migrate`, `contract` never changes.
+**The limit of this plugin.** There is no integration branch: every node writes into the run's one working tree as it finishes, and per-node worktree isolation is not available. That tree is the folder the session worked in when the run started, so a run started after EnterWorktree spawns, checks and reviews in that git worktree; its record stays in the session's starting folder. When `migrate` batches cannot stay green alone even with the old form kept, do not launch them as parallel lanes that each promise green. Merge them into fewer nodes (in the limit one `migrate` node) or serialize them with `dependsOn`, and put the green check on the last node of the stage. The order `expand`, `migrate`, `contract` never changes.
 
 **How this meets the existing rules.** "By file domain" still splits independent file sets.
 A `migrate` stage adds two conditions: keep the old form, and chain batches that share files.
@@ -253,7 +253,7 @@ For example, use `Explore` for read-only investigation.
 
 ## Edges, data and write scopes
 
-- **`dependsOn` carries data.** A node receives the `## Output` of each DIRECT dependency (up to 4,000 characters each) and the path of each dependency's full report. Transitive ancestors are not pasted: when a node needs a grandparent's fact, make the parent's Output carry it or add the direct edge.
+- **`dependsOn` carries data.** A node receives the `## Output` of each DIRECT dependency (up to 4,000 characters each; a longer one ends with a marker, and the node is told to read the rest from the report) and the path of each dependency's full report. Transitive ancestors are not pasted: when a node needs a grandparent's fact, make the parent's Output carry it or add the direct edge.
 - **Add an edge exactly when the node consumes the other node's result.** If B only needs a fact YOU already know, paste the fact into B's prompt and leave the edge out - an unnecessary edge serializes work that could run in parallel.
 - **Design every Output for its consumers.** The producer's prompt names what its Output must contain - file paths, values, decisions, counts - in a compact, parseable shape. A downstream node is only as good as the facts it was handed.
 - **Disjoint write scopes or serialize.** No two nodes that can run at the same time may edit the same file. If two lanes must touch the same files, chain them with `dependsOn` or merge them into one node. Declare each node's read and write scope inside its prompt, and list the write scope in the node's `writes` field (project-relative paths or folders, never absolute, `..` or `.claude`). The plugin shows overlaps between `writes` of active sessions in the same project; it never blocks or reschedules on them, so disjointness inside one graph is still your job.
@@ -322,11 +322,16 @@ Every node in `start` and `amend` requires `verify` with 1-16 checks.
 Each check has one of these forms:
 
 - `{"kind": "file", "path": "<path>", "contains": "<text>", "absent": "<text>", "matches": "<regex>", "lastLine": "<text>", "equals": "<text>"}`; every text field is optional.
-- `{"kind": "command", "argv": [...], "expect": {"exit": 0, "stdout": {...}, "stderr": {...}}}`; `expect` and each of its keys are optional.
+- `{"kind": "command", "argv": [...], "expect": {"exit": 0, "stdout": {...}, "stderr": {...}}, "timeoutMs": 120000}`; `expect`, each of its keys and `timeoutMs` are optional.
 
 Missing checks return `verification_required`. Malformed checks return `invalid_verification`.
 After the worker reports completion, the runtime executes the checks itself.
-Commands run from the project root without a shell, with a 30-second limit. Exit 0 passes unless `expect.exit` names other codes.
+Commands run from the project root without a shell. Exit 0 passes unless `expect.exit` names other codes.
+A command check has a 30-second limit (30000 ms) unless it sets `timeoutMs`: whole milliseconds from 1000 to 600000.
+`start` and `amend` refuse `timeoutMs` on a file check, or a value outside that range or not a whole number, as `invalid_verification`.
+A check that runs past its limit is `not_run`, and its detail says a check that is slow by nature can set `timeoutMs` up to 600000.
+Keep checks fast and set `timeoutMs` only on a check that is slow by nature, such as `{"kind": "command", "argv": ["claude", "plugin", "test", "."], "timeoutMs": 120000}`.
+Never raise it to hide a hang, and aim for seconds in a reproduction check of the Debug chain.
 They use the host's PATH without a shell profile. `start`, `amend` and a dry run look up `argv[0]` and the commands of an `sh -c` script there and refuse a missing one; the Bash tool's `rg` is the usual trap, so use `grep -E`, or call a program the run installs by its path.
 The runtime writes `.claude/dag/runs/<run_id>/<node>.verification.<attempt>.json` before marking the node `completed`.
 A failed check or missing evidence fails the node and blocks its dependents.

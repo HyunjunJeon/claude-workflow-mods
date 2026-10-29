@@ -105,6 +105,16 @@ test('decision detail exposes the recorded fields and only a back action', () =>
   expect(ids(missing)).toEqual(['decision:back', 'decision:d3', 'decision:d2', 'decision:d1'])
 })
 
+test('a read-only decision is named in both languages in its row and its detail', () => {
+  const readonly = decision(1, { kind: 'readonly', subject: 'Bash', proposed: 'allow', selected: 'ask', source: 'baseline', outcome: 'existing-decision', note: 'git status' })
+  const named = { en: 'read-only', ko: '읽기 전용' } as const
+  for (const language of LANGUAGES) {
+    const detail = buildInspector(input({ decisions: [readonly], selectedDecisionId: 'd1', language }))
+    expect(detail.lines.some(line => line.some(segment => segment.text === named[language] && segment.bold === true))).toBe(true)
+    expect(flat(buildInspector(input({ decisions: [readonly], language, columns: 120 }))).includes(named[language])).toBe(true)
+  }
+})
+
 test('decision rows distinguish outcomes by icon and color and hide other sessions', () => {
   const decisions = [
     decision(1, { outcome: 'applied' }),

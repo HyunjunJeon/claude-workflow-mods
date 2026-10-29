@@ -1,7 +1,7 @@
-import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, Timer, ToolCallResult } from 'claude-code'
+import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, SessionRateLimit, Timer, ToolCallResult, ToolCheckDecision } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
 import { answerMessage, err, keepAliveMessage, listText, nodeMessage, ok, previewText, questionMessage, questionNotice, recoveryHoldReason, reworkMessage, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
-import { buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
+import { attemptReportPath, buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
 import { absentOccurrenceWarnings, containsPrecisionWarnings, fileCheckPaths, isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
 import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, questionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
@@ -12,11 +12,11 @@ import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessio
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES, verdictFailure } from './engine/recovery.ts'
 import { CHECK_DEFECT, commandDetail, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
-import { projectPath, readOnlyAbsolutePath, verificationProblem } from './engine/verification.ts'
+import { DEFAULT_COMMAND_TIMEOUT_MS, projectPath, readOnlyAbsolutePath, timeoutAdvice, verificationProblem } from './engine/verification.ts'
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
-import { isReviewStageNode, lensNotesFile, lensVerifyFolder, parseCandidates, REVIEW_SECURITY_ID, securityLensOf, verifierNodes } from './engine/stages.ts'
+import { isReviewStageNode, lensVerifyFolder, REVIEW_SECURITY_ID, securityLensOf } from './engine/stages.ts'
 import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, readOnlyDisagreement, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
 import {
   amendRun,
@@ -47,35 +47,41 @@ import {
   type QuestionAnswer,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
-import { addedLines, allowedPatterns, familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
-import { addedLinesByFile, applyEdit, kisaRows, lensNotesWithSemgrep, mergeCandidates, owaspCweRows, parseSemgrepReport, SEMGREP_RULES_DIR, semgrepArgv, semgrepCandidates, semgrepNote, semgrepRefusal, semgrepTarget, semgrepVersion, type GuideRows, type SemgrepHit } from './engine/semgrep.ts'
-import { addUsage, eventFileName, rowsAfter, settleRecord, TRAJECTORY_SUBDIR, trajectoryLine, transcriptRows, type NotesFile, type RowMark, type TrajectoryInput, type Usage } from './engine/trajectory.ts'
+import { familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
+import { autocompleteRows, autocompleteWant } from './engine/autocomplete.ts'
+import { killByName, killRefusal } from './engine/kill-guard.ts'
+import { applyEdit, semgrepNote, semgrepRefusal, semgrepTarget, type SemgrepHit } from './engine/semgrep.ts'
+import { addUsage, cut, settleRecord } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
-import { appendLearningEvent, applyLearningProposals, archiveUnusedSkills, eligibleSkills, emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary, parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch, recordSkillOpportunity, recordSkillUse, renderLearnedSkill, reserveLearningUsage, type LearningEvent, type LearningLibrary, type LearningTransaction } from './engine/learning.ts'
-import { boundInput, capText } from './engine/jev.ts'
+import { DEFAULT_HOLD_PERCENT, parseHoldPercent, resetMinutes, usageHold, usageHoldField, usageLimitReason, type UsageHold, type UsageHoldField } from './engine/usage.ts'
+import { archiveUnusedSkills, eligibleSkills, emptyLearningSession, learningCatalog, recordSkillOpportunity } from './engine/learning.ts'
+import { boundInput } from './engine/jev.ts'
 import { INPUT_SCHEMA, TOOL_DESCRIPTION } from './engine/tool-spec.ts'
-import { applyEdits, boardForModel, diffKey, diffsNeeded, newBoard, parseBoardFile, parseEdits, peekKey, peeksNeeded, traceKey, tracesNeeded, type DiffRequest, type PeekRequest, type TraceRequest } from './engine/board.ts'
 import { BOARD_INPUT_SCHEMA, BOARD_TOOL_DESCRIPTION } from './engine/board-spec.ts'
-import { boardToMarkdown } from './engine/board-export.ts'
-import { chipContext, chipLabel, chipSpans, citedChips } from './engine/board-chips.ts'
-import type { Board, BoardEdit, BoardFile } from './engine/board-types.ts'
+import { chipSpans } from './engine/board-chips.ts'
+import type { Board } from './engine/board-types.ts'
 import { fail, TEXT_FIELDS, type CommandCheck, type Definition, type EngineError, type FileCheck, type NodeDef, type NodeRun, type Result, type Run, type VerificationEvidence, type VerificationOutcome } from './engine/types.ts'
-import { chunkArrived, finalReport, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
+import { chunkArrived, fromTranscript, stepStarted, toolStarted, type Activity, type StepChunk, type TranscriptRow } from './ui/activity.ts'
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
+import { NOTICE_TITLE, SETTLE_NOTIFIES, settleNotice, type SettleNotify } from './ui/settle-notice.ts'
 import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
 import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
 import { adjacentBoardId, buildBoardView } from './ui/board-model.ts'
 import { viewLines, VIEWS } from './ui/views.ts'
 import { BACKGROUND_WAIT_TOOL, buildPane, buildTasks, clampRunIndex, countTasks, isExpanded, nodeOrder, stepSelection, visibleRuns, type CollapsePrefs, type Line, type ViewState } from './ui/view-model.ts'
+import { ATTENTION_TOAST_MS, atomicWrite, DAG_SUBDIR, debug, ensureGitignore, GIT_READ_TIMEOUT_MS, listIfPresent, message, readOrEmpty, recoverReport, removePath, SAFE_RUN_DIR, workingRoot, type AgentEnd, type CompletionClaim, type CompletionResult, type ToolInput } from './host/io.ts'
+import { collectLearning, createLearning, finishLearning, initializeLearning, observeLearnedSkill, pruneLearningData, readLearningLibrary, saveLearningSession, startLearning, updateLearningLibrary } from './host/learning.ts'
+import { BOARDS_SUBDIR, CHIP_PAINT, chipContexts, citeBlock, createBoards, handleBoardTool, inheritBoards, latestBoardTitle, loadBoards, type BoardCalls } from './host/boards.ts'
+import { createTrajectory, exportTrajectory, pruneTrajectories, recordMainTurn, recordNodeEnd, recordTrajectory, startTrajectory, type TrajectoryCalls } from './host/trajectory.ts'
+import { createScan, guideRows, lensExpansion, resetScan, scanEdit, slopSkips } from './host/scan.ts'
+import { createDefinitionFiles, definitionPaths } from './host/autocomplete.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
-const DAG_SUBDIR = '.claude/dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const BOARDS_SUBDIR = `${DAG_SUBDIR}/boards`
 const DAG_FORMS = [
   'list',
   'run <file>',
@@ -106,7 +112,11 @@ type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
 const USER_ONLY = 'This action requires a user command or pane control.'
 const APPROVAL_NOTE = 'The user must approve this run in the /dag pane or with /dag approve <run_id> before any node starts. Do not poll; you will receive a message when it is approved or rejected.'
-const REPORT_LIMIT = 4_000_000
+// The host refuses to write a file over 4 MiB, in bytes. A UTF-16 unit takes at most 3 bytes in UTF-8, so this many keeps a
+// report writable in any script; at 4,000,000 a Korean report over about 1.4 million characters failed to write and left
+// no report at all. A worker's answer is one model reply, far below either (the largest of 37 reports on 2026-10-23 was
+// 10,413 characters), so no real report reaches it.
+const REPORT_LIMIT = Math.floor(4 * 1024 * 1024 / 3)
 // A headless host waits for a held main turn.complete for 60 000 ms only ("[WARN] headless session: turn events still
 // running after 60000ms; the turn ends without them", measured in a live `claude -p` run); it does not abort the hold.
 // Past that only live agents and queued prompts keep the session up, which is why a node completion while the turn
@@ -122,6 +132,9 @@ const BACKGROUND_WAIT_MS = 30 * 60_000
 // How long a blocked node waits for an answer in an interactive session before its default is sent or it fails
 // (docs/design/node-questions.md, decision 5).
 const QUESTION_TIMEOUT_MS = 15 * 60_000
+// The usage hold's reset timer fires this long after its window's resetsAt. usageHold already ignores a window once its reset
+// time has come; the margin covers a local clock a few seconds behind the API's (a chosen margin, not a measured one).
+const USAGE_RESET_GRACE_MS = 5_000
 const PANE_ID = 'dag'
 const PREFS_KEY = 'collapse-prefs'
 const VIEW_KEY = 'pane-view'
@@ -131,10 +144,6 @@ const JEV_TIMEOUT_MS = 5_000
 // so the model gets about twice the slowest of them, more room than HTTP.
 const JEV_MODEL_TIMEOUT_MS = 10_000
 const JEV_MODEL_CALLS = 8
-// A board edit runs inside serialized(), so a git read that hangs (an index lock, a stalled network disk) would hold spawns and
-// ticks behind it. git show and git diff against a local ref took 17-26 ms in this repository (git 2.54), so 10 s leaves room
-// for a slow disk and still gives the queue back.
-const GIT_READ_TIMEOUT_MS = 10_000
 // The whole mode decision under enforcement auto, both backends together: the user's prompt waits for it before it
 // enters. HTTP alone may take JEV_TIMEOUT_MS and the model JEV_MODEL_TIMEOUT_MS after it (15 s), while session-model
 // routing calls took 1.5-5.3 s, so 8 s covers a slow model answer and runs an unanswered turn directly.
@@ -145,15 +154,9 @@ const MODE_BUDGET_MS = 8_000
 const ANSWER_DAG_LINE = '[dag-workflow] This answer selects work that runs as a DAG under enforcement auto, so the main-loop tools are now gated for the rest of this turn: plan it with the dag-workflow:planning skill and start a run.'
 // The planning skill's final audit never runs on trivial; the plugin holds it to that whatever the proposal or Jev said.
 const FINAL_AUDIT_CATEGORY = 'standard'
-const GITIGNORE = '# dag-workflow run checkpoints and node reports\n*\n'
-const SAFE_RUN_DIR = /^dag_[A-Za-z0-9_-]+$/
+// The command a readonly decision keeps in its note: enough to tell which command the host did not mark read-only.
+const DECISION_COMMAND_CHARS = 200
 const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
-
-function debug($: EngineInterface, text: string): void {
-  $.ui.log(`dag-workflow: ${text}`, { to: 'debug' })
-}
-
-const NOTIFY_TITLE = 'dag-workflow'
 
 // Fire and forget: a hook's verdict never waits on the notification, and a refused or rejected call never reaches it.
 // `fallbackToast` is for a case with no toast of its own, so the text still reaches the person.
@@ -164,7 +167,7 @@ function raiseNotify($: EngineInterface, text: string, fallbackToast: boolean): 
     if (fallbackToast) $.ui.toast(text, { timeoutMs: ATTENTION_TOAST_MS })
   }
   try {
-    $.ui.notify(text, { title: NOTIFY_TITLE }).then(
+    $.ui.notify(text, { title: NOTICE_TITLE }).then(
       result => { if (!result.isSent) fallback(result.reason) },
       error => fallback(message(error)),
     )
@@ -210,9 +213,7 @@ async function restorePlanningLoaded($: EngineInterface): Promise<void> {
   }
 }
 
-type ToolInput = Readonly<Record<string, unknown>>
 type RenderEvent = RenderInput<'Pane'>
-type AgentEnd = { agentId: string; reason?: string; isAborted: boolean; answer?: string }
 
 const runs = new Map<string, Run>()
 const agentRuns = new Map<string, string>()
@@ -237,6 +238,21 @@ let turnSurface: TurnSurface = 'chat'
 // start_approval from settings, and the /dag approval override that wins over it until the plugin's code reloads.
 let startApproval: StartApproval = 'off'
 let approvalOverride: StartApproval | undefined
+// settle_notify from settings: which settled runs of this session raise a native notification.
+let settleNotify: SettleNotify = 'long'
+// usage_hold_percent from settings: while an account rate-limit window is at or above it, no run of this session starts a
+// node (engine/usage.ts). 0 turns the hold off.
+let usageHoldPercent = DEFAULT_HOLD_PERCENT
+// The account's rate-limit windows as the host last reported them: seeded at session.start from $.session.usage(), then
+// replaced by every session.measure. tick reads them for each scheduling decision.
+let rateLimits: readonly SessionRateLimit[] = []
+// A hold applied at the last re-evaluation of new readings or of the reset timer (syncUsageHold). A hold begins only with a
+// reading, so this is how a later re-evaluation tells that one lifted.
+let usageHeld = false
+// The timer that re-evaluates the hold just after its window resets, and the resetsAt it was set for.
+let usageTimer: { timer: Timer; resetsAt: string } | undefined
+// The hold's toast has been raised; it stays quiet until the hold lifts and comes back.
+let usageToasted = false
 let planningLoaded = false
 // Skill tool calls for the planning skill that a node worker has in flight; see the tool.call hook.
 let nodePlanningCalls = 0
@@ -247,369 +263,49 @@ let mainHeld = false
 let holdGeneration = 0
 // A keep-alive prompt is with the host and its turn has not started yet; it covers every completion until then.
 let keepAliveQueued = false
-// Only the terminal and desktop surfaces draw the pane and band; elsewhere progress goes out as text.
+// The terminal, desktop and vscode (the VS Code chat panel) surfaces draw the pane and band; elsewhere (mobile) progress goes out as text.
 let paneSurface = true
 // A /dag run|retry typed during a main model turn is persisted pending and started when that turn ends.
 let mainTurnBusy = false
 let deferStarts = false
 const pendingStarts: string[] = []
 let extraAllowed: ReadonlySet<string> = new Set()
-let learningEnabled = true
-let learningInterval = 20
-let learningMinOpportunities = 50
-let learningMaxSkills = 30
-let learningMaxInputChars = 60_000
-let learningDailyLimit = 20
-let learningRetentionDays = 30
-let learningRoot = ''
-let learnedSkillsDir = ''
-let learningSession = emptyLearningSession()
-let learningLibrary = emptyLibrary()
-const learningAgents = new Set<string>()
-let learningTurnRequested = false
-let learningSpawning = false
-let learningSpawnName: string | undefined
-let learningWriteSequence = 0
-let learningQueue: Promise<unknown> = Promise.resolve()
-
-function learningSessionPath(id = sessionId): string {
-  return `${learningRoot}/sessions/${hash(id)}.json`
-}
-
-async function learningDirectory($: EngineInterface, path: string): Promise<void> {
-  const made = await $.process.run(['mkdir', '-p', path])
-  if (made.exitCode !== 0) throw new Error(`cannot create learning directory: ${made.stderr.trim()}`)
-  const stat = await $.fs.stat(path)
-  if (stat.kind !== 'dir' || stat.isLink) throw new Error(`learning directory is not a plain directory: ${path}`)
-}
-
-async function learningWrite($: EngineInterface, path: string, text: string): Promise<void> {
-  const temp = `${path}.${hash(sessionId)}.${++learningWriteSequence}.tmp`
-  await $.fs.write(temp, text)
-  const moved = await $.process.run(['mv', '-f', temp, path])
-  if (moved.exitCode !== 0) throw new Error(`could not save learning data: ${moved.stderr.trim()}`)
-}
-
-async function saveLearningSession($: EngineInterface, id = sessionId): Promise<void> {
-  if (!learningRoot) return
-  await learningWrite($, learningSessionPath(id), JSON.stringify(learningSession) + '\n')
-}
-
-async function readLearningLibrary($: EngineInterface): Promise<LearningLibrary> {
-  const path = `${learningRoot}/library.json`
-  if (!await $.fs.exists(path)) return emptyLibrary()
-  const parsed = parseLearningLibrary(await $.fs.read(path))
-  if (!parsed.ok) throw new Error(parsed.error.message)
-  return parsed.value
-}
-
-// Callers in this session queue here, so the directory lock only ever meets another session's holder. This is not
-// serialized(): that queue also holds agent spawns and Jev calls, which a prompt or a worker's Read must not wait
-// behind. Nothing on this queue awaits serialized() or another library update, so the two queues cannot deadlock.
-function updateLearningLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary | Promise<LearningLibrary>): Promise<void> {
-  const result = learningQueue.then(() => updateLockedLibrary($, update))
-  learningQueue = result.catch(() => undefined)
-  return result
-}
-
-// A directory lock protects read/modify/write across independent sessions, not just this module's queue.
-// Contention leaves the session's unlearned evidence intact for its next turn; no hook waits for another session.
-async function updateLockedLibrary($: EngineInterface, update: (library: LearningLibrary) => LearningLibrary | Promise<LearningLibrary>): Promise<void> {
-  const lock = `${learningRoot}/.lock`
-  let acquired = await $.process.run(['mkdir', lock])
-  if (acquired.exitCode !== 0 && await $.fs.exists(lock)) {
-    const stat = await $.fs.stat(lock)
-    if (!stat.isLink && stat.kind === 'dir' && (await $.clock.now()) - stat.mtimeMs > 60_000) {
-      const released = await $.process.run(['rmdir', lock])
-      if (released.exitCode === 0) acquired = await $.process.run(['mkdir', lock])
-    }
-  }
-  if (acquired.exitCode !== 0) throw new Error('Learning library is busy; retained evidence for the next turn.')
-  try {
-    const pending = `${learningRoot}/pending.json`
-    if (await $.fs.exists(pending)) {
-      const parsed = parseLearningTransaction(await $.fs.read(pending))
-      if (!parsed.ok) throw new Error(parsed.error.message)
-      await publishLearningTransaction($, parsed.value, true)
-    }
-    const before = await readLearningLibrary($)
-    const after = await update(before)
-    const changed = after.skills.some(skill => {
-      const previous = before.skills.find(item => item.id === skill.id)
-      return previous?.revision !== skill.revision || previous.archived !== skill.archived
-    })
-    if (changed) await publishLearningTransaction($, { schemaVersion: 1, before, after })
-    else {
-      await learningWrite($, `${learningRoot}/library.json`, JSON.stringify(after) + '\n')
-      learningLibrary = after
-    }
-  } finally {
-    const released = await $.process.run(['rmdir', lock])
-    if (released.exitCode !== 0) $.ui.log('Could not release the session learning library lock.')
-  }
-}
-
-async function publishLearningTransaction($: EngineInterface, transaction: LearningTransaction, recovering = false): Promise<void> {
-  const current = stableStringify(await readLearningLibrary($))
-  if (current !== stableStringify(transaction.before) && current !== stableStringify(transaction.after)) {
-    throw new Error('Learning library changed outside the pending publication; preserving both records.')
-  }
-  const changed = transaction.after.skills.filter(skill => {
-    const previous = transaction.before.skills.find(item => item.id === skill.id)
-    return previous?.revision !== skill.revision || previous.archived !== skill.archived
-  })
-  // Validate every destination before publishing the first file. Recovery accepts only the exact before/after text,
-  // so a failed index write is distinguishable from an unmanaged file or a person's later edit. Recovery skips such a
-  // skill rather than stopping: a pending.json that never clears would fail every later update in every session.
-  const preserved = new Set<string>()
-  for (const skill of changed) {
-    const previous = transaction.before.skills.find(item => item.id === skill.id)
-    const active = `${learnedSkillsDir}/${skill.id}/SKILL.md`
-    const archived = `${learningRoot}/archive/${skill.id}/SKILL.md`
-    for (const path of skill.archived ? [active, archived] : [active]) {
-      if (!await $.fs.exists(path)) continue
-      const stat = await $.fs.stat(path)
-      const text = await $.fs.read(path)
-      const beforeText = path === active && previous ? renderLearnedSkill(previous) : undefined
-      const afterText = recovering ? renderLearnedSkill(skill) : undefined
-      if (stat.isLink || stat.kind !== 'file' || (text !== beforeText && text !== afterText)) {
-        if (!recovering) throw new Error(`Preserving an unmanaged or manually changed skill: ${path}`)
-        preserved.add(skill.id)
-        $.ui.log(`Preserving a manually changed skill while finishing a learning publication: ${path}`)
-      }
-    }
-  }
-  const pending = `${learningRoot}/pending.json`
-  if (!recovering) await learningWrite($, pending, JSON.stringify(transaction) + '\n')
-  for (const skill of changed) {
-    if (preserved.has(skill.id)) continue
-    const path = `${learnedSkillsDir}/${skill.id}/SKILL.md`
-    if (skill.archived) {
-      if (await $.fs.exists(path)) {
-        const folder = `${learningRoot}/archive/${skill.id}`
-        await learningDirectory($, folder)
-        const moved = await $.process.run(['mv', '-f', path, `${folder}/SKILL.md`])
-        if (moved.exitCode !== 0) throw new Error(`could not archive ${skill.id}`)
-        // rmdir removes only an empty folder, so files a person added beside SKILL.md keep it in place.
-        await $.process.run(['rmdir', `${learnedSkillsDir}/${skill.id}`])
-      }
-    } else {
-      await learningDirectory($, `${learnedSkillsDir}/${skill.id}`)
-      const wanted = renderLearnedSkill(skill)
-      if (!await $.fs.exists(path) || await $.fs.read(path) !== wanted) await learningWrite($, path, wanted)
-    }
-  }
-  await learningWrite($, `${learningRoot}/library.json`, JSON.stringify(transaction.after) + '\n')
-  learningLibrary = transaction.after
-  const removed = await $.process.run(['rm', '-f', pending])
-  if (removed.exitCode !== 0) throw new Error('Could not clear completed learning publication; it will be recovered next time.')
-}
-
-async function pruneLearningData($: EngineInterface): Promise<void> {
-  if (!learningRoot || learningRetentionDays === 0) return
-  const cutoff = (await $.clock.now()) - learningRetentionDays * 86_400_000
-  await updateLearningLibrary($, async library => {
-    const skills: LearningLibrary['skills'] = []
-    for (const skill of library.skills) {
-      if (!skill.archived || skill.updatedAt >= cutoff) {
-        skills.push(skill)
-        continue
-      }
-      const path = `${learningRoot}/archive/${skill.id}/SKILL.md`
-      if (await $.fs.exists(path)) {
-        const stat = await $.fs.stat(path)
-        if (stat.isLink || stat.kind !== 'file' || await $.fs.read(path) !== renderLearnedSkill(skill)) {
-          skills.push(skill)
-          $.ui.log(`Preserving a manually changed archived skill: ${path}`)
-          continue
-        }
-        const removed = await $.process.run(['rm', '-f', path])
-        if (removed.exitCode !== 0) {
-          skills.push(skill)
-          $.ui.log(`Could not remove expired archived skill: ${path}`)
-          continue
-        }
-        await $.process.run(['rmdir', `${learningRoot}/archive/${skill.id}`])
-      }
-      // An active file created at this name since archival is not ours to remove.
-      if (await $.fs.exists(`${learnedSkillsDir}/${skill.id}/SKILL.md`)) skills.push(skill)
-    }
-    return { ...library, skills }
-  })
-  for (const entry of await $.fs.list(`${learningRoot}/sessions`)) {
-    if (entry.kind !== 'file' || entry.isLink || !/^[a-f0-9]+\.json$/.test(entry.name) || entry.mtimeMs >= cutoff) continue
-    const path = `${learningRoot}/sessions/${entry.name}`
-    if (path === learningSessionPath()) continue
-    try {
-      const parsed = parseLearningSession(await $.fs.read(path))
-      if (!parsed.ok || parsed.value.batch || parsed.value.events.some(event => event.at >= cutoff)) continue
-      const removed = await $.process.run(['rm', '-f', path])
-      if (removed.exitCode !== 0) $.ui.log(`Could not remove expired learning session: ${path}`)
-    } catch (error) {
-      $.ui.log(`Could not inspect expired learning session ${path}: ${message(error)}`)
-    }
-  }
-}
-
-async function initializeLearning($: EngineInterface): Promise<void> {
-  if (!learningEnabled) return
-  const home = await $.env.get('HOME')
-  if (!home || !home.startsWith('/')) {
-    $.ui.log('Session learning unavailable: HOME is not an absolute directory.')
-    return
-  }
-  learningRoot = `${home.replace(/\/$/, '')}/.claude/dag-workflow/learning`
-  learnedSkillsDir = `${home.replace(/\/$/, '')}/.claude/skills`
-  await learningDirectory($, `${learningRoot}/sessions`)
-  await learningDirectory($, learnedSkillsDir)
-  await updateLearningLibrary($, library => library)
-  const path = learningSessionPath()
-  learningSession = emptyLearningSession()
-  if (await $.fs.exists(path)) {
-    const parsed = parseLearningSession(await $.fs.read(path))
-    if (!parsed.ok) throw new Error(parsed.error.message)
-    learningSession = parsed.value
-    if (learningSession.batch) {
-      const active = (await $.agent.list()).some(agent => agent.id === learningSession.batch?.agentId && agent.status === 'running')
-      if (active) learningAgents.add(learningSession.batch.agentId)
-      else {
-        learningSession = { ...learningSession, batch: undefined }
-        await saveLearningSession($)
-      }
-    }
-  }
-  await pruneLearningData($)
-}
-
-async function collectLearning($: EngineInterface, kind: LearningEvent['kind'], text: string, agentId?: string): Promise<void> {
-  if (!learningEnabled || !learningRoot || (agentId && learningAgents.has(agentId)) || !text.trim()) return
-  const at = await $.clock.now()
-  const id = `${hash(sessionId)}:${learningSession.nextId}`
-  const event: LearningEvent = { id, sessionId, projectRoot, kind, text: capText(text, 3_900).replace(/\0/g, '').slice(0, 4_000), at, ...(agentId ? { agentId } : {}) }
-  learningSession = appendLearningEvent(learningSession, event)
-}
-
-async function startLearning($: EngineInterface, force = false, manual = false): Promise<string> {
-  if (!learningEnabled || !learningRoot) return 'Session learning is off or unavailable.'
-  if (learningSession.batch || learningSpawning) return 'Session learning is already running.'
-  if (!force && learningSession.toolsSinceLearn < learningInterval) return 'Session learning will run after more tool calls.'
-  if (!learningSession.events.some(event => event.kind === 'user')) return 'No new user-session experience to learn.'
-  if (!learningSession.events.some(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough)) return 'No new user-session experience to learn.'
-  const now = await $.clock.now()
-  let limit: string | undefined
-  await updateLearningLibrary($, library => {
-    if (manual) return library
-    const reserved = reserveLearningUsage(library, now, learningDailyLimit)
-    if (!reserved.ok) {
-      limit = reserved.error.message
-      return library
-    }
-    return reserved.value
-  })
-  if (limit) return limit
-  const prepared = prepareLearningBatch(learningSession, learningLibrary, projectRoot, learningMaxInputChars)
-  if (!prepared.ok) return prepared.error.message
-  const snapshot = prepared.value
-  learningSpawning = true
-  learningSpawnName = `dag-learning-${hash(sessionId)}-${++learningWriteSequence}`
-  try {
-    const spawned = await $.agent.spawn({
-      prompt: snapshot.prompt, name: learningSpawnName,
-      description: 'Learn reusable skills from this user session',
-      subagentType: 'general-purpose', model: 'sonnet',
-    })
-    if (!spawned.agentId) return `Could not start session learning: ${spawned.deny ?? 'no agent id'}`
-    learningAgents.add(spawned.agentId)
-    learningSession = {
-      ...learningSession,
-      batch: { agentId: spawned.agentId, events: snapshot.events, baseline: snapshot.baseline, through: snapshot.through, editableIds: snapshot.editableIds },
-    }
-    await saveLearningSession($)
-    return 'Session learning started in the background.'
-  } finally {
-    learningSpawning = false
-    learningSpawnName = undefined
-  }
-}
-
-async function finishLearning($: EngineInterface, end: AgentEnd): Promise<void> {
-  const batch = learningSession.batch
-  if (!batch || batch.agentId !== end.agentId) return
-  try {
-    if (!learningEnabled || end.isAborted || end.reason !== 'answer') return
-    const answer = end.answer || await recoverReport($, end.agentId)
-    const parsed = parseLearningProposals(answer, batch.events, batch.baseline)
-    if (!parsed.ok) throw new Error(parsed.error.message)
-    if (batch.editableIds && parsed.value.some(proposal => [proposal.id, ...proposal.replaces]
-      .some(id => batch.baseline.some(skill => skill.id === id) && !batch.editableIds?.includes(id)))) {
-      throw new Error('A proposed update needs the complete existing skill body; retained evidence for relearning.')
-    }
-    const now = await $.clock.now()
-    await updateLearningLibrary($, library => {
-      for (const proposal of parsed.value) {
-        for (const id of [proposal.id, ...proposal.replaces]) {
-          const expected = batch.baseline.find(skill => skill.id === id)
-          const current = library.skills.find(skill => skill.id === id)
-          if (current?.revision !== expected?.revision || current?.archived !== expected?.archived) {
-            throw new Error(`Skill ${id} changed in another session; retained evidence for relearning.`)
-          }
-        }
-      }
-      const applied = applyLearningProposals(library, parsed.value, { events: batch.events, sessionId, projectRoot, now })
-      if (!applied.ok) throw new Error(`${applied.error.message} Retained evidence for relearning.`)
-      return applied.value
-    })
-    learningSession = { ...learningSession, learnedThrough: batch.through }
-    $.ui.log(`Session learning saved ${parsed.value.length} skill proposal(s).`)
-  } finally {
-    // A failed batch keeps its evidence, but only tool calls made after it count toward the next automatic batch;
-    // otherwise a persistent failure spawns a learner at every turn boundary until the daily limit.
-    learningSession = {
-      ...learningSession, batch: undefined,
-      toolsSinceLearn: learningSession.events.filter(event => event.kind === 'tool' && Number(event.id.split(':').at(-1)) > batch.through).length,
-    }
-    await saveLearningSession($)
-  }
-  if (learningTurnRequested && !mainTurnBusy) {
-    learningTurnRequested = false
-    await startLearning($, true)
-  }
-}
-
-async function observeLearnedSkill($: EngineInterface, tool: string, input: Readonly<Record<string, unknown>>): Promise<void> {
-  if (!learningEnabled || !learningRoot) return
-  const id = tool === 'Skill' && typeof input.skill === 'string' ? input.skill.split(':').at(-1)
-    : tool === 'Read' && typeof input.file_path === 'string'
-      ? eligibleSkills(learningLibrary, projectRoot).find(skill => input.file_path === `${learnedSkillsDir}/${skill.id}/SKILL.md`)?.id
-      : undefined
-  if (!id || !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) return
-  const now = await $.clock.now()
-  await updateLearningLibrary($, library => recordSkillUse(library, id, projectRoot, now))
-}
-let antiSlopScan = true
-let antiSlopSkip: ReadonlySet<string> = new Set()
-let secureScan = true
-// The semgrep version a session found on its first scan, '' when there is none; undefined until it asks.
-let semgrepFound: string | undefined
-let guideRowsRead: Promise<GuideRows> | undefined
-// The Semgrep hits of a run's change, keyed by the run and the change, so the lenses of one review share one scan.
-const changeScans = new Map<string, Promise<Result<SemgrepHit[]>>>()
-// The patterns the repository's rule files allow, read once per session; undefined until then or after one of them is edited.
-let repositoryAllows: ReadonlySet<string> | undefined
-// The trajectory log (trajectory.ts): its own write queue, so no run step waits on it, a counter that orders events of the same
-// millisecond, where the main conversation's log stopped, and each node agent's token counts until its node ends.
-let trajectoryLog = false
-let trajectoryWrites: Promise<unknown> = Promise.resolve()
-let trajectorySeq = 0
-let mainRows: RowMark | undefined
-const agentUsage = new Map<string, Usage>()
+// Numbers temp files of atomicWrite and the names of learning agents, so each is unique within the process.
+let writeSequence = 0
+// Session learning's state and library queue (host/learning.ts). Created once per module load, as its old module variables
+// were; the getters hand it this file's session id, project root and main-turn flag at the moment it reads them.
+const learning = createLearning({
+  sessionId: () => sessionId,
+  projectRoot: () => projectRoot,
+  mainTurnBusy: () => mainTurnBusy,
+  nextWriteSequence: () => ++writeSequence,
+})
+// The edit scans' state (host/scan.ts): the anti-slop and secure-coding switches, the skip list, and what a session found or
+// read once (the semgrep version, the guide rows, a run change's hits, the rule files' allows). Created once per module load,
+// as its old module variables were; the getter hands it this file's project root at the moment it reads it.
+const scan = createScan({
+  projectRoot: () => projectRoot,
+  rootOf,
+})
+// The definition files the prompt.autocomplete hook offers after /dag run and /dag preview, and when they were listed
+// (host/autocomplete.ts reuses the listing for 10 s).
+const definitionFiles = createDefinitionFiles()
+// The trajectory log's state (host/trajectory.ts): its switch and retention limits, its write queue, where the main
+// conversation's log stopped, and each node agent's token counts. Created once per module load, as its old module variables
+// were; the getters hand it this file's session id, project root and runs at the moment it reads them.
+const trajectory = createTrajectory({
+  sessionId: () => sessionId,
+  projectRoot: () => projectRoot,
+  runs: () => runs.values(),
+  rootOf,
+})
 // The review ledger (ledger.ts): the review-fix round keeps the findings it sends and the producers' files before the fix, and
 // the rerun review-spec and review-standards get both.
 let reviewLedger = true
 const dirsMade = new Set<string>()
 let gitignoreChecked = false
 let contextOnDisk = false
-let jevPermissionScope: 'all' | 'dag' = 'all'
+let jevPermissionScope: 'off' | 'dag' | 'all' = 'dag'
 const activity = new Map<string, Activity>()
 const agentEventSources = new Set<string>()
 const handbacks = new Map<string, string>()
@@ -677,22 +373,20 @@ let inspectorView: 'dag' | 'board' | InspectorView = 'dag'
 let inspectorPage = 0
 let inspectorColumns = FALLBACK_GRAPH_COLUMNS
 let selectedDecisionId: string | undefined
-// This session's boards in creation order, which is the Board section's order, and the one it shows; unset, it shows the
-// board updated last.
-let boards: Board[] = []
-let selectedBoardId: string | undefined
-// The chips the person put into the prompt box from the Board section, by label, oldest first. The next user prompt gets the
-// content of the ones it carries, and all are forgotten. A label holds no board id, so a later chip with the same label wins.
-const chips = new Map<string, { boardId: string; blockId: string }>()
-// More chips than a person cites in one prompt; the oldest beyond it are dropped.
-const MAX_CHIPS = 20
-const CHIP_PAINT = { bold: true, color: ACCENT }
+// The board subsystem's state (host/boards.ts): this session's boards, the one the Board section shows, and the chips cited
+// from it. Created once per module load, as its old module variables were; the getters hand it this file's session id,
+// project root, run folder and strings at the moment it reads them.
+const boards = createBoards({
+  sessionId: () => sessionId,
+  projectRoot: () => projectRoot,
+  runsDir: () => runsDir,
+  strings: () => t,
+})
 let language: 'en' | 'ko' = 'en'
 let pinnedStatus: string | undefined
 const settleToasts = new Set<string>()
 // Node ids that already raised their own failure toast, per run; the settle toast skips them.
 const failureToasts = new Map<string, Set<string>>()
-const ATTENTION_TOAST_MS = 12_000
 let lastPaneAgentId: string | undefined
 
 const pendingJevCalls = new Map<string, PendingJevCall>()
@@ -718,10 +412,6 @@ function serialized<T>(job: () => Promise<T>): Promise<T> {
   const result = queue.then(job)
   queue = result.catch(() => undefined)
   return result
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 function seenAgent($: EngineInterface, agentId: string, source: string): void {
@@ -889,12 +579,13 @@ async function ensureDir($: EngineInterface, dir: string): Promise<void> {
   if (made.exitCode !== 0) throw new Error(`cannot create ${dir}: ${made.stderr.trim()}`)
   dirsMade.add(dir)
   if (gitignoreChecked) return
-  const path = `${projectRoot}/${DAG_SUBDIR}/.gitignore`
-  if (!(await $.fs.exists(path))) await $.fs.write(path, GITIGNORE)
+  await ensureGitignore($, projectRoot)
   gitignoreChecked = true
 }
 
-async function persistDecisions($: EngineInterface, records: DecisionRecord[]): Promise<void> {
+// `report` takes a write failure: a record that is the session's own evidence is logged in the transcript, one written on
+// every tool call (the read-only shadow) goes to the debug log so a full disk does not add a line per call.
+async function persistDecisions($: EngineInterface, records: DecisionRecord[], report: (text: string) => void = text => $.ui.log(text)): Promise<void> {
   decisionRecords = appendDecisions(decisionRecords, records)
   const content = JSON.stringify({ schemaVersion: 1, projectRoot, sessionId, records: decisionRecords })
   const dir = `${projectRoot}/${DAG_SUBDIR}/decisions`
@@ -906,14 +597,33 @@ async function persistDecisions($: EngineInterface, records: DecisionRecord[]): 
   try {
     await result
   } catch (error) {
-    $.ui.log(`could not persist decision history: ${message(error)}`)
+    report(`could not persist decision history: ${message(error)}`)
   }
   $.ui.invalidate('ui.render')
 }
 
-function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: JevEvaluation, threshold = jevConfidence): DecisionRecord {
+// `evaluation` is what Jev answered; a record no Jev call is behind passes `{}`.
+function decisionRecord(input: Omit<DecisionRecord, 'id' | 'sessionId' | 'ruleset' | 'threshold' | 'backend'>, evaluation: Pick<JevEvaluation, 'note' | 'backend'>, threshold = jevConfidence): DecisionRecord {
   const note = [input.note, evaluation.note].filter(Boolean).join('; ')
   return { ...input, ...(note ? { note } : {}), ...(evaluation.backend ? { backend: evaluation.backend } : {}), id: `${input.at.toString(36)}-${++decisionSequence}`, sessionId, ruleset: JEV_RULESET_VERSION, threshold }
+}
+
+// The main-conversation gate lets a Bash call through only when readOnlyBashProblem finds nothing, so a call that reaches
+// tool.check there (and Bash is not in main_allowed_tools) was judged read-only by this plugin. When the host's own
+// isReadOnly did not hold it too, the two judges differ; this records where, as evidence, and never touches the verdict.
+// A failure to record goes to the debug log.
+async function recordHostReadOnlyGap($: EngineInterface, input: unknown, verdict: ToolCheckDecision): Promise<void> {
+  try {
+    const command = typeof input === 'object' && input !== null && 'command' in input && typeof input.command === 'string' ? input.command : ''
+    // cut() masks before it cuts and adds a marker after the cut; the marker would take the note past 200 characters.
+    const note = cut(command, DECISION_COMMAND_CHARS).slice(0, DECISION_COMMAND_CHARS)
+    await persistDecisions($, [decisionRecord({
+      at: await $.clock.now(), kind: 'readonly', subject: 'Bash', proposed: 'allow', selected: verdict,
+      source: 'baseline', outcome: 'existing-decision', latencyMs: 0, stateHash: hash(note), note,
+    }, {}, 0)], text => debug($, text))
+  } catch (error) {
+    debug($, `could not record a read-only Bash call: ${message(error)}`)
+  }
 }
 
 async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Run> {
@@ -1131,95 +841,6 @@ function contextWanted(): boolean {
   return contextOnDisk || workflowContext.notes.length > 0 || [...runs.values()].some(run => run.sessionId === sessionId)
 }
 
-// A file the plugin reads for the anti-slop scan; a file that does not exist yet reads as empty.
-async function readOrEmpty($: EngineInterface, path: string): Promise<string> {
-  try {
-    return await $.fs.read(path)
-  } catch {
-    return ''
-  }
-}
-
-// Semgrep is optional. The first scan of a session asks for its version once; without one every scan stays off.
-async function semgrepReady($: EngineInterface): Promise<boolean> {
-  if (!secureScan) return false
-  if (semgrepFound === undefined) {
-    try {
-      const probe = await $.process.run(['semgrep', '--version'], { timeoutMs: 30_000 })
-      semgrepFound = (probe.exitCode === 0 && semgrepVersion(probe.stdout)) || ''
-    } catch {
-      semgrepFound = ''
-    }
-    debug($, semgrepFound ? `semgrep ${semgrepFound} runs the secure-coding rules` : 'semgrep is not installed; the secure-coding scan is off')
-  }
-  return semgrepFound !== ''
-}
-
-async function runSemgrep($: EngineInterface, cwd: string, targets: readonly string[]): Promise<Result<SemgrepHit[]>> {
-  try {
-    const done = await $.process.run(semgrepArgv(`${$.plugin.root}/${SEMGREP_RULES_DIR}`, targets), { cwd, timeoutMs: 120_000 })
-    return parseSemgrepReport(done.stdout)
-  } catch (error) {
-    return fail('semgrep_error', `semgrep could not run (${message(error)}).`)
-  }
-}
-
-// The names and lenses a hit cites, from the guide references the plugin ships.
-function guideRows($: EngineInterface): Promise<GuideRows> {
-  const reference = (id: string) => readOrEmpty($, `${$.plugin.root}/skills/secure-coding/references/${id}.md`)
-  guideRowsRead ??= Promise.all([reference('kisa'), reference('owasp')]).then(([kisa, owasp]) => ({ kisa: kisaRows(kisa), owasp: owaspCweRows(owasp) }))
-  return guideRowsRead
-}
-
-// The hits an Edit or Write would add, scanned before it lands. The new text goes to a copy at the same project-relative path
-// in a scratch folder, so the rules' path filters (tests/, *Test.java) match as they would in the project.
-async function scanEdit($: EngineInterface, path: string, before: string, after: string): Promise<SemgrepHit[]> {
-  if (!projectRoot || !path.startsWith(`${projectRoot}/`) || path.startsWith(`${projectRoot}/.claude/`) || !(await semgrepReady($))) return []
-  const rel = path.slice(projectRoot.length + 1)
-  const made = await $.process.run(['mktemp', '-d'], { timeoutMs: 10_000 })
-  const scratch = made.stdout.trim()
-  if (made.exitCode !== 0 || !scratch.startsWith('/')) return []
-  try {
-    await $.fs.write(`${scratch}/${rel}`, after)
-    const report = await runSemgrep($, scratch, [rel])
-    if (!report.ok) {
-      $.ui.log(`secure-coding scan skipped ${rel}: ${report.error.message}`)
-      return []
-    }
-    const added = addedLines(before, after)
-    return report.value.filter(hit => hit.path === rel && added.has(hit.line))
-  } finally {
-    await $.process.run(['rm', '-rf', scratch]).catch(() => undefined)
-  }
-}
-
-// The Semgrep hits on the lines a run's change added, read as the review nodes read the change: tracked files against
-// HEAD and untracked files whole. The lenses of one review share one scan; undefined when semgrep is not there.
-async function changeHits($: EngineInterface, run: Run): Promise<Result<SemgrepHit[]> | undefined> {
-  if (!(await semgrepReady($))) return undefined
-  const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '-U0', '--no-color', '--relative', 'HEAD'], { cwd: projectRoot })
-  const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], { cwd: projectRoot })
-  if (diff.exitCode !== 0 || untracked.exitCode !== 0) return fail('semgrep_change', `git could not list the change (${(diff.stderr || untracked.stderr).trim()}).`)
-  const added = addedLinesByFile(diff.stdout)
-  const fresh = new Set(untracked.stdout.split('\0').filter(Boolean))
-  const targets = [...new Set([...added.keys(), ...fresh])].filter(path => semgrepTarget(path) && !path.startsWith('.claude/'))
-  if (targets.length === 0) return { ok: true, value: [] }
-  const key = `${run.runId}\0${hash(`${diff.stdout}\0${untracked.stdout}`)}`
-  let scan = changeScans.get(key)
-  if (!scan) {
-    scan = runSemgrep($, projectRoot, targets).then((report): Result<SemgrepHit[]> => report.ok
-      ? { ok: true, value: report.value.filter(hit => fresh.has(hit.path) || added.get(hit.path)?.has(hit.line) === true) }
-      : report)
-    changeScans.set(key, scan)
-  }
-  return scan
-}
-
-async function slopSkips($: EngineInterface): Promise<ReadonlySet<string>> {
-  repositoryAllows ??= new Set((await Promise.all(RULE_FILES.map(name => readOrEmpty($, `${projectRoot}/${name}`)))).flatMap(allowedPatterns))
-  return new Set([...antiSlopSkip, ...repositoryAllows])
-}
-
 async function persistContext($: EngineInterface): Promise<void> {
   if (!contextWanted()) return
   const path = contextPath()
@@ -1264,7 +885,10 @@ async function refreshSessions($: EngineInterface, closed = false): Promise<void
   const own: SessionRecord = {
     schemaVersion: 1, sessionId, projectRoot, updatedAt: now, status: closed ? 'closed' : 'active',
     runIds: owned.map(run => run.runId),
-    writes: [...new Set(owned.flatMap(run => run.definition.nodes.filter(def => run.nodes.some(node => node.id === def.id && node.state === 'running')).flatMap(node => node.writes ?? [])))],
+    // A run in a worktree names its writes by absolute path (sessions.ts resolves those as they are): the same relative
+    // path in another tree is another file.
+    writes: [...new Set(owned.flatMap(run => run.definition.nodes.filter(def => run.nodes.some(node => node.id === def.id && node.state === 'running'))
+      .flatMap(node => (node.writes ?? []).map(path => run.root ? `${run.root}/${path}` : path))))],
   }
   const prefix = `dag-session:${hash(projectRoot)}:`
   await $.store.set(`${prefix}${sessionId}`, own)
@@ -1305,7 +929,7 @@ async function persist($: EngineInterface, run: Run): Promise<void> {
   runs.set(run.runId, run)
   updateStatus($)
   await ensureDir($, runsDir)
-  await $.fs.write(`${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n')
+  await atomicWrite($, `${runsDir}/${run.runId}.json`, JSON.stringify(run, null, 2) + '\n', 'run checkpoint', sessionId, ++writeSequence)
   // The session's first owned run makes its in-memory context durable.
   if (run.sessionId === sessionId && !contextOnDisk && workflowContext.sessionId === sessionId) {
     try {
@@ -1334,24 +958,33 @@ async function loadRuns($: EngineInterface): Promise<void> {
   }
 }
 
-async function removePath($: EngineInterface, flag: '-f' | '-rf', path: string, purpose = 'prune'): Promise<boolean> {
-  try {
-    const removed = await $.process.run(['rm', flag, path])
-    if (removed.exitCode === 0) return true
-    debug($, `could not ${purpose} ${path}: ${removed.stderr.trim() || `exit ${removed.exitCode}`}`)
-  } catch (error) {
-    debug($, `could not ${purpose} ${path}: ${message(error)}`)
-  }
-  return false
+// The folder a run works in: its root when it started in a worktree, otherwise the session's own folder (types.ts Run.root).
+function rootOf(run: Run): string {
+  return run.root ?? projectRoot
 }
 
-async function listIfPresent($: EngineInterface, dir: string): Promise<Awaited<ReturnType<EngineInterface['fs']['list']>>> {
-  try {
-    return (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
-  } catch (error) {
-    debug($, `could not list ${dir} for retention: ${message(error)}`)
-    return []
-  }
+// A run's worktree removed while the run was active (git worktree remove, ExitWorktree remove). Every spawn would get a
+// missing cwd and every check would reject with ENOENT, so a node stops with this one error instead, and attemptRecovery
+// skips it by the start: no retry can run anywhere until the worktree is back.
+const RUN_FOLDER_GONE = "The run's folder no longer exists: "
+
+async function missingRootError($: EngineInterface, run: Run): Promise<string | undefined> {
+  // A run without a root works in projectRoot, the folder the session started in, which stays.
+  if (run.root === undefined || await $.fs.exists(run.root)) return undefined
+  return `${RUN_FOLDER_GONE}${run.root}. Its git worktree was removed while the run was active. Recreate the worktree at that path (git worktree add) and retry the node, or cancel the run.`
+}
+
+// The folder an Edit or Write lands in: its run's for a node worker, the session's current one otherwise.
+async function editRoot($: EngineInterface, agentId: string | undefined): Promise<string> {
+  const owner = ownNodeOfAgent(agentId)
+  return owner ? rootOf(owner.run) : workingRoot($, projectRoot)
+}
+
+// The folder an edited file belongs to: the one the edit works in (a worktree), else the session's own, so a file of either is
+// found. A file under a folder's .claude/ (the plugin's store, the worktrees) is project content of neither, so it has no
+// folder: undefined.
+async function fileRoot($: EngineInterface, agentId: string | undefined, path: string): Promise<string | undefined> {
+  return [await editRoot($, agentId), projectRoot].find(root => root !== '' && path.startsWith(`${root}/`) && !path.startsWith(`${root}/.claude/`))
 }
 
 async function pruneArtifacts($: EngineInterface): Promise<void> {
@@ -1467,9 +1100,12 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   if (def.agent === 'fork') {
     return failToStart(run, id, 'Fork agents cannot enforce the Sonnet worker minimum; amend the node to use a non-fork agent type.', await $.clock.now())
   }
+  const gone = await missingRootError($, run)
+  if (gone) return failToStart(run, id, gone, await $.clock.now())
   const stale = await clearStaleNotes($, run, def)
   if (stale) return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${stale}`, await $.clock.now()), id)
   const target = spawnTarget({ ...def, category: node.routing?.category ?? def.category })
+  // Each dependency's stored output: its ## Output up to 4,000 characters, with the report path for the rest (buildNodePrompt).
   const upstream: UpstreamResult[] = def.dependsOn.flatMap(depId => {
     const dep = run.nodes.find(n => n.id === depId)
     if (!dep || dep.state !== 'completed') return []
@@ -1490,6 +1126,9 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
       description: `${run.name}: ${def.task_summary ?? def.label ?? def.id}`.slice(0, 80),
       subagentType: target.subagentType,
       model,
+      // Without a cwd the worker runs where the session is now, which is not the run's folder once the session moved, also
+      // for a run that started in the session's own folder.
+      cwd: rootOf(run),
     })
   } catch (error) {
     spawned = { deny: message(error) }
@@ -1498,10 +1137,10 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   const started = { kind: 'node.start', runId: run.runId, nodeId: id, attempt: node.attempt + 1, subagentType: target.subagentType, category: node.routing?.category ?? def.category, recovery: node.recovery, prompt } as const
   if (spawned.agentId) {
     agentRuns.set(spawned.agentId, run.runId)
-    await record($, { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { ...started, agentId: spawned.agentId, model: spawned.model ?? model })
     return markRunning(run, id, spawned.agentId, now, spawned.model)
   }
-  await record($, { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
 }
 
@@ -1523,7 +1162,7 @@ async function resumeProducer($: EngineInterface, run: Run, node: NodeRun, resum
     $.ui.log(`${run.name} › ${node.id}: the review fix did not reach agent ${resume.agentId} (${failure}); a new agent starts with the findings in its prompt`)
     return undefined
   }
-  await record($, { kind: 'node.start', runId: run.runId, nodeId: node.id, attempt: node.attempt + 1, agentId: resume.agentId, model: node.model, subagentType, category, recovery: node.recovery, prompt: text })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'node.start', runId: run.runId, nodeId: node.id, attempt: node.attempt + 1, agentId: resume.agentId, model: node.model, subagentType, category, recovery: node.recovery, prompt: text })
   return markRunning(run, node.id, resume.agentId, await $.clock.now(), node.model)
 }
 
@@ -1547,8 +1186,12 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
     let run = advance(current, await $.clock.now())
     if (run.handoff) run = offerHandoff(run, await $.clock.now())
     await persist($, run)
-    if (!run.handoff) {
-      for (const id of nextToStart(run, maxConcurrent)) {
+    const starts = run.handoff ? [] : nextToStart(run, maxConcurrent)
+    // While an account rate-limit window is at or above usage_hold_percent no node starts; running ones go on.
+    const held = starts.length > 0 ? usageHold(rateLimits, usageHoldPercent, await $.clock.now()) : undefined
+    if (held) run = await holdForUsage($, run, held)
+    else {
+      for (const id of starts) {
         run = await startNode($, run, id)
         await persist($, run)
       }
@@ -1564,26 +1207,121 @@ async function tick($: EngineInterface, runId: string): Promise<Run | undefined>
         if (rework.reworked) continue
       }
     }
-    // A run held for approval keeps its roots scheduled with nothing running: looping again would never end.
-    if (!run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
+    // A run held for approval or by the usage hold keeps its nodes scheduled with nothing running: looping again would never end.
+    if (!held && !run.handoff && !run.approval && run.nodes.some(node => node.state === 'scheduled') && !run.nodes.some(node => node.state === 'running')) continue
     if (!isSettled(run)) {
       if (settleToasts.delete(runId)) failureToasts.delete(runId)
     } else if (!settleToasts.has(runId)) {
       settleToasts.add(runId)
-      await record($, { kind: 'run.settle', runId, ...settleRecord(run) })
-      exportTrajectory($, runId)
-      const failed = run.nodes.filter(node => node.state === 'failed')
-      const toasted = failureToasts.get(runId)
-      if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
-        $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
-      }
-      if (!run.cancelReason) {
-        raiseNotify($, failed.length > 0 ? t.notifySettledFailed(run.name, failed.length) : t.notifySettledCompleted(run.name, run.nodes.length), failed.length === 0)
+      // An earlier process or the run's previous owner (attach adopts a settled run) already announced this settle; retry,
+      // the review-fix round, amend and automatic recovery reset the flag, so a settle after one still raises all of this.
+      if (!run.settledNotified) {
+        await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.settle', runId, ...settleRecord(run) })
+        exportTrajectory($, trajectory, runId)
+        const failed = run.nodes.filter(node => node.state === 'failed')
+        const toasted = failureToasts.get(runId)
+        if (failed.length > 0 && !run.cancelReason && !failed.every(node => toasted?.has(node.id))) {
+          $.ui.toast(t.toastSettledFailed(run.name, failed.length), { timeoutMs: ATTENTION_TOAST_MS })
+        }
+        // Not awaited: this runs in the serialized queue, and the terminal's answer must not hold up the next state change.
+        notifySettled($, run, await $.clock.now())
       }
     }
     announce($, run)
     return run
   }
+}
+
+// tick's branch while the usage hold keeps a scheduled node from starting. The first such block raises the hold's one toast. A
+// non-interactive session has nobody to wait for the window with, so it cancels the run once nothing in it runs; tick's settle
+// branch then announces that cancel as it announces any other.
+async function holdForUsage($: EngineInterface, run: Run, hold: UsageHold): Promise<Run> {
+  const now = await $.clock.now()
+  if (!usageToasted) {
+    usageToasted = true
+    $.ui.toast(t.toastUsageHold(hold.kind, hold.percentUsed, resetMinutes(hold, now)), { timeoutMs: ATTENTION_TOAST_MS })
+  }
+  if (interactive || run.nodes.some(node => node.state === 'running')) return run
+  const { run: cancelled } = cancelRun(run, usageLimitReason(hold), now)
+  await persist($, cancelled)
+  return cancelled
+}
+
+// The usage_hold field of a dag tool result: present for a run of this session whose scheduled nodes the hold keeps from starting.
+function usageHoldOf(run: Run, now: number): { usage_hold?: UsageHoldField } {
+  const hold = run.sessionId === sessionId && run.nodes.some(node => node.state === 'scheduled') ? usageHold(rateLimits, usageHoldPercent, now) : undefined
+  return hold ? { usage_hold: usageHoldField(hold) } : {}
+}
+
+// The session's first readings: the plain $.session.usage() call costs nothing. A failed or malformed answer leaves no
+// readings, so nothing is held until the first session.measure, and only the debug log hears of it.
+async function seedRateLimits($: EngineInterface): Promise<void> {
+  usageTimer?.timer.cancel()
+  usageTimer = undefined
+  usageHeld = false
+  usageToasted = false
+  rateLimits = []
+  try {
+    const { rateLimits: windows } = await $.session.usage()
+    if (!Array.isArray(windows)) throw new Error('the answer carries no rateLimits list')
+    rateLimits = windows
+  } catch (error) {
+    debug($, `could not read the account's rate-limit windows: ${message(error)}`)
+  }
+  await syncUsageHold($)
+}
+
+// Re-evaluates the hold after new readings or at its reset timer. A hold with a reset time keeps one timer for just past it,
+// replaced when the reset time moves; a hold that lifts cancels it and lets the next hold toast again. Returns true when a
+// hold lifted, so the caller resumes the runs it held.
+async function syncUsageHold($: EngineInterface): Promise<boolean> {
+  const now = await $.clock.now()
+  const hold = usageHold(rateLimits, usageHoldPercent, now)
+  const lifted = usageHeld && !hold
+  usageHeld = hold !== undefined
+  if (!hold) usageToasted = false
+  if (usageTimer && usageTimer.resetsAt !== hold?.resetsAt) {
+    usageTimer.timer.cancel()
+    usageTimer = undefined
+  }
+  const resetsAt = hold?.resetsAt
+  if (resetsAt !== undefined && !usageTimer) {
+    usageTimer = { resetsAt, timer: $.clock.after(Date.parse(resetsAt) - now + USAGE_RESET_GRACE_MS, () => recheckUsageHold($)) }
+  }
+  return lifted
+}
+
+// Re-evaluates the hold in the queue and, when it lifted, ticks every run of this session that has a scheduled node. The
+// session.measure hook and the reset timer do not wait for it: the queue may be spawning agents or asking Jev.
+function recheckUsageHold($: EngineInterface): void {
+  serialized(async () => {
+    if (!(await syncUsageHold($))) return
+    for (const run of [...runs.values()]) {
+      if (run.sessionId === sessionId && run.nodes.some(node => node.state === 'scheduled')) await tick($, run.runId)
+    }
+  }).catch(error => {
+    $.ui.log(`could not resume DAG runs after the usage hold: ${message(error)}`)
+  })
+}
+
+// One native notification for a run of this session that has just settled, under settle_notify (settle-notice.ts decides). The
+// caller guards it with settleToasts, so a settle raises it once. Whatever the host answers stays out of the run: an unsent or
+// rejected notification reaches the debug log, and for a completed run, which has no settle toast of its own (a failed run
+// raised toastSettledFailed), also a toast with the same text.
+function notifySettled($: EngineInterface, run: Run, now: number): void {
+  const notice = settleNotice(run, sessionId, settleNotify, now, t)
+  if (!notice) return
+  const fallbackToast = () => {
+    if (run.nodes.every(node => node.state === 'completed')) $.ui.toast(notice.text, { timeoutMs: ATTENTION_TOAST_MS })
+  }
+  $.ui.notify(notice.text, { title: notice.title }).then(sent => {
+    if (sent.isSent) return
+    debug($, `the notification that ${run.runId} settled was not sent: ${sent.reason}`)
+    fallbackToast()
+  }).catch(error => {
+    debug($, `could not raise the notification that ${run.runId} settled: ${message(error)}`)
+    fallbackToast()
+  })
 }
 
 // The host refuses $.prompt.submit from inside a command.run hook ("it would wait on the turn this hook is holding"), so
@@ -1627,18 +1365,6 @@ async function stopAgent($: EngineInterface, agentId: string): Promise<string | 
   } catch (error) {
     return message(error)
   }
-}
-
-type CompletionClaim = {
-  readonly run: Run
-  readonly node: NodeRun
-  readonly report: string | undefined
-}
-type CompletionResult = {
-  readonly outcome: ReturnType<typeof parseOutcome>
-  readonly verification?: NodeRun['verification']
-  // The verifier nodes a security lens's candidates expand into, built once the lens passed verification.
-  readonly expansion?: NodeDef[]
 }
 
 function claimCompletion(end: AgentEnd): CompletionClaim | undefined {
@@ -1758,10 +1484,10 @@ async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Ti
   // Its background work may still be running: stopped first, so a recovery attempt does not share the scope with it.
   const stopFailure = await stopAgent($, agentId)
   if (stopFailure) $.ui.log(`could not stop agent ${agentId} after its background wait: ${stopFailure}`)
-  const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, wait.answer) : undefined
+  const reportPath = wait.answer ? await writeReport($, claim.run.runId, claim.node.id, claim.node.attempt, wait.answer) : undefined
   const error = `The node agent ended its turn with background work pending and was not resumed within ${BACKGROUND_WAIT_MS / 60_000} minutes.`
   const result: CompletionResult = { outcome: { state: 'failed', error, ...(wait.answer ? { answer: wait.answer } : {}), ...(reportPath ? { reportPath } : {}) } }
-  await recordNodeEnd($, claim, result, { agentId, isAborted: false, ...(wait.answer ? { answer: wait.answer } : {}) })
+  await recordNodeEnd($, trajectory, trajectoryCalls($), claim, result, { agentId, isAborted: false, ...(wait.answer ? { answer: wait.answer } : {}) })
   await applyCompletion($, claim, result)
 }
 
@@ -1971,7 +1697,7 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   try {
     const answer = end.answer || report || (end.isAborted ? '' : await recoverReport($, end.agentId))
     const parsed = parseOutcome({ reason: end.reason, isAborted: end.isAborted, answer })
-    const reportPath = answer ? await writeReport($, run.runId, node.id, answer) : undefined
+    const reportPath = answer ? await writeReport($, run.runId, node.id, node.attempt, answer) : undefined
     let outcome = reportPath ? { ...parsed, reportPath } : parsed
     let verification: NodeRun['verification']
     let expansion: NodeDef[] | undefined
@@ -1985,7 +1711,7 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
           : detail
         outcome = { ...outcome, state: 'failed', error }
       } else if (securityLensOf(run.definition, node.id) !== undefined) {
-        const expanded = await lensExpansion($, run, node.id)
+        const expanded = await lensExpansion($, scan, run, node.id)
         if (expanded.ok) expansion = expanded.value
         else outcome = { ...outcome, state: 'failed', error: expanded.error.message }
       }
@@ -1994,47 +1720,8 @@ async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   } catch (error) {
     result = { outcome: { state: 'failed', error: `Completion processing failed: ${message(error)}` } }
   }
-  await recordNodeEnd($, claim, result, end)
+  await recordNodeEnd($, trajectory, trajectoryCalls($), claim, result, end)
   await serialized(() => applyCompletion($, claim, result))
-}
-
-// A security lens that passed its checks: read its candidates and build one verifier node per candidate, after creating the
-// lens's verifier folder, which review-security's folder check needs even when there are no candidates. Any problem fails
-// the lens with the reason, so recovery or a retry can redo it; nothing is spawned from a candidates block read in part.
-async function lensExpansion($: EngineInterface, run: Run, lensId: string): Promise<Result<NodeDef[]>> {
-  const review = run.definition.review
-  const lens = securityLensOf(run.definition, lensId)
-  if (!review?.security || !lens) return fail('invalid_expansion', `"${lensId}" is not a security lens of this run.`)
-  const notes = lensNotesFile(review, lens)
-  let text: string
-  try {
-    text = await $.fs.read(notes)
-  } catch (error) {
-    return fail('invalid_candidates', `could not read ${notes} (${message(error)}).`)
-  }
-  const candidates = parseCandidates(text, review.security)
-  if (!candidates.ok) return fail('invalid_candidates', `${notes}: ${candidates.error.message}`)
-  let all = candidates.value
-  // The Semgrep rules cite kisa and owasp rows. Their hits in this lens join the lens's candidates, and the lens notes record
-  // them, or the scan's failure, so review-security counts a verifier for each.
-  const scan = review.security.some(guide => guide === 'kisa' || guide === 'owasp') ? await changeHits($, run) : undefined
-  if (scan) {
-    const merged = scan.ok ? mergeCandidates(all, semgrepCandidates(scan.value, lens, review.security, await guideRows($))) : undefined
-    all = merged?.all ?? all
-    try {
-      await $.fs.write(notes, lensNotesWithSemgrep(text, merged?.added ?? [], scan.ok ? undefined : scan.error.message))
-    } catch (error) {
-      return fail('invalid_expansion', `could not record the Semgrep candidates in ${notes} (${message(error)}).`)
-    }
-  }
-  const folder = lensVerifyFolder(review, lens)
-  try {
-    const made = await $.process.run(['mkdir', '-p', folder])
-    if (made.exitCode !== 0) return fail('invalid_expansion', `could not create ${folder}: ${made.stderr.trim() || `exit ${made.exitCode}`}`)
-  } catch (error) {
-    return fail('invalid_expansion', `could not create ${folder}: ${message(error)}`)
-  }
-  return verifierNodes(run.definition, lensId, all)
 }
 
 async function applyCompletion($: EngineInterface, claim: CompletionClaim, result: CompletionResult): Promise<void> {
@@ -2083,7 +1770,16 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
 async function reviewerFindings($: EngineInterface, run: Run, nodeId: string): Promise<string> {
   const node = run.nodes.find(current => current.id === nodeId)
   const def = run.definition.nodes.find(current => current.id === nodeId)
-  const parts = [node?.error ?? '', node?.output ?? '']
+  // The whole Output from the report; the findings budget (rework.ts) may cut it, and the first line says where it all is.
+  let output = node?.output ?? ''
+  if (node?.reportPath) {
+    try {
+      output = extractOutput(await $.fs.read(node.reportPath), Number.POSITIVE_INFINITY)
+    } catch (error) {
+      debug($, `could not read the report of reviewer ${nodeId}; its stored output goes instead: ${message(error)}`)
+    }
+  }
+  const parts = [node?.reportPath ? `The reviewer's full report: ${node.reportPath}` : '', node?.error ?? '', output]
   for (const path of def ? generatedNotesFiles(run, def) : []) {
     try {
       parts.push(`From ${path}:\n${findingSections(await $.fs.read(path))}`)
@@ -2102,12 +1798,12 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
   for (const node of run.nodes) {
     if (node.state === 'failed' && verdictFailure(run, node.id)) findings.set(node.id, await reviewerFindings($, run, node.id))
   }
-  const plan = reworkPlan(run, findings, projectRoot, reviewLedger)
+  const plan = reworkPlan(run, findings, rootOf(run), reviewLedger)
   if (!plan) return undefined
   const now = await $.clock.now()
   if ('skip' in plan) {
     $.ui.log(`No automatic review fix for ${run.runId}: ${plan.skip}`)
-    await record($, { kind: 'rework', runId: run.runId, skip: plan.skip })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, skip: plan.skip })
     return { run: withReworkSkip(run, plan.skip, now), reworked: false }
   }
   const reworked = reworkRun(run, plan.producers, plan.note, plan.reviewers, now, reviewLedger ? plan.findings : undefined)
@@ -2116,7 +1812,7 @@ async function attemptRework($: EngineInterface, run: Run): Promise<{ run: Run; 
     return undefined
   }
   const round = reworked.value.reviewFix?.rounds
-  await record($, { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'rework', runId: run.runId, round, reviewers: plan.reviewers, producers: plan.producers, note: plan.note })
   $.ui.log(`Automatic review fix ${run.runId}: ${plan.reviewers.join(', ')} failed on a FAIL verdict; rerunning ${plan.producers.join(', ')} with the findings, then the reviewers`)
   // Before returning: tick starts the producers right after, and the copy must hold their files as the reviewers judged them.
   if (reviewLedger && round !== undefined) await recordBeforeFix($, reworked.value, round, plan.producers)
@@ -2130,17 +1826,17 @@ const LEDGER_FILES = 200
 
 type BeforeFix = { scopes: string[]; files: string[] }
 
-// One round's ledger folder, project-relative: git diff --no-index runs in the project root and names the before-state copies
-// by this path, and fixDiffText strips it from their headers.
+// One round's ledger folder, relative to the session's folder, which holds the run store: git diff --no-index names the
+// before-state copies by this path (by its absolute path for a run in a worktree), and fixDiffText strips it from their headers.
 function ledgerFolder(runId: string, round: number): string {
   return `${RUNS_SUBDIR}/${runId}/review-fix-${round}`
 }
 
-// The files in the given write scopes, tracked or new but not ignored, as project-relative paths.
-async function ledgerFiles($: EngineInterface, scopes: readonly string[]): Promise<string[]> {
+// The files in the given write scopes, tracked or new but not ignored, as paths relative to the run's root.
+async function ledgerFiles($: EngineInterface, scopes: readonly string[], root: string): Promise<string[]> {
   const files = new Set<string>()
   for (const scope of scopes) {
-    const listed = await $.process.run(['git', '-c', 'core.quotePath=false', 'ls-files', '-z', '-c', '-o', '--exclude-standard', '--', `:(literal)${scope}`], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+    const listed = await $.process.run(['git', '-c', 'core.quotePath=false', 'ls-files', '-z', '-c', '-o', '--exclude-standard', '--', `:(literal)${scope}`], { cwd: root, timeoutMs: GIT_READ_TIMEOUT_MS })
     if (listed.exitCode !== 0) throw new Error(`git ls-files ${scope} exited ${listed.exitCode}: ${listed.stderr.trim()}`)
     for (const path of listed.stdout.split('\0')) if (path !== '') files.add(path)
   }
@@ -2154,15 +1850,16 @@ async function ledgerFiles($: EngineInterface, scopes: readonly string[]): Promi
 // of the git listing itself drops the whole copy. A failure never stops the round.
 async function recordBeforeFix($: EngineInterface, run: Run, round: number, producers: readonly string[]): Promise<void> {
   const folder = `${projectRoot}/${ledgerFolder(run.runId, round)}`
+  const root = rootOf(run)
   const scopes = [...new Set(producers.flatMap(id => run.definition.nodes.find(def => def.id === id)?.writes ?? []))]
   try {
     const files: string[] = []
-    for (const path of (await ledgerFiles($, scopes)).slice(0, LEDGER_FILES)) {
+    for (const path of (await ledgerFiles($, scopes, root)).slice(0, LEDGER_FILES)) {
       // ls-files -c still lists a tracked file the producer deleted without git rm. It has no text to keep, and if the fix
       // brings it back, fixDiff shows it as added.
-      if (!(await $.fs.exists(`${projectRoot}/${path}`))) continue
+      if (!(await $.fs.exists(`${root}/${path}`))) continue
       try {
-        await $.fs.write(`${folder}/before/${path}`, await $.fs.read(`${projectRoot}/${path}`))
+        await $.fs.write(`${folder}/before/${path}`, await $.fs.read(`${root}/${path}`))
         files.push(path)
       } catch (error) {
         debug($, `review ledger: left ${path} out of the copy before review fix ${round} of ${run.runId}: ${message(error)}`)
@@ -2182,15 +1879,18 @@ function isBeforeFix(value: unknown): value is BeforeFix {
 
 // The fix's diff: each copied file against the same path now, and each file the scopes gained since, as git prints them, with
 // the copy's folder stripped from the headers. undefined when the copy was not recorded or before.json cannot be read.
-async function fixDiff($: EngineInterface, runId: string, round: number): Promise<string | undefined> {
+async function fixDiff($: EngineInterface, runId: string, round: number, root: string): Promise<string | undefined> {
   const folder = ledgerFolder(runId, round)
+  // git runs in the run's root. A run in a worktree keeps its copy in the session's store, so there the copy is named by its
+  // absolute path, which git prints without the leading slash.
+  const copies = root === projectRoot ? `${folder}/before` : `${projectRoot}/${folder}/before`
   let before: BeforeFix
   let current: string[]
   try {
     const parsed: unknown = JSON.parse(await $.fs.read(`${projectRoot}/${folder}/before.json`))
     if (!isBeforeFix(parsed)) throw new Error('before.json does not list scopes and files')
     before = parsed
-    current = await ledgerFiles($, before.scopes)
+    current = await ledgerFiles($, before.scopes, root)
   } catch (error) {
     debug($, `review ledger: no fix diff for ${runId} round ${round}: ${message(error)}`)
     return undefined
@@ -2202,16 +1902,18 @@ async function fixDiff($: EngineInterface, runId: string, round: number): Promis
     try {
       // The disk decides the after side: git still lists a tracked file the fix deleted without git rm, and git diff --no-index
       // on a missing path prints only an error.
-      const sides = [copied.has(path) ? `${folder}/before/${path}` : '/dev/null', (await $.fs.exists(`${projectRoot}/${path}`)) ? path : '/dev/null']
+      const sides = [copied.has(path) ? `${copies}/${path}` : '/dev/null', (await $.fs.exists(`${root}/${path}`)) ? path : '/dev/null']
       // git diff --no-index exits 0 when the two sides are equal and 1 when it printed a difference.
-      const diff = await $.process.run(['git', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
+      // quotePath off, as in every other git read here: an absolute copy path with non-ASCII letters would come back quoted
+      // and escaped, and fixDiffText could not strip it.
+      const diff = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-index', '--no-color', '--', ...sides], { cwd: root, timeoutMs: GIT_READ_TIMEOUT_MS })
       if (diff.exitCode === 1) parts.push(diff.stdout)
       else if (diff.exitCode !== 0) debug($, `review ledger: git diff of ${path} exited ${diff.exitCode}: ${diff.stderr.trim()}`)
     } catch (error) {
       debug($, `review ledger: could not diff ${path}: ${message(error)}`)
     }
   }
-  return fixDiffText(parts, `${folder}/before`)
+  return fixDiffText(parts, copies.replace(/^\//, ''))
 }
 
 // The ledger section a rerun review-spec or review-standards gets after a round that kept its findings; undefined for every
@@ -2220,7 +1922,7 @@ async function ledgerSection($: EngineInterface, run: Run, def: NodeDef): Promis
   const fix = run.reviewFix
   const last = fix?.history.at(-1)
   if (!reviewLedger || !isLedgerReviewer(def.id) || !fix || !last?.findings) return undefined
-  return ledgerBlock({ reviewerId: def.id, producers: last.producers, findings: last.findings, fixDiff: await fixDiff($, run.runId, fix.rounds) })
+  return ledgerBlock({ reviewerId: def.id, producers: last.producers, findings: last.findings, fixDiff: await fixDiff($, run.runId, fix.rounds, rootOf(run)) })
 }
 
 async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Promise<Run> {
@@ -2229,6 +1931,11 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
   // A defect of the check fails every attempt alike, so no Jev call and no retry: the main conversation amends the check.
   if (isCheckDefect(node.error)) {
     debug($, `no automatic recovery for ${run.runId}/${node.id}: ${CHECK_DEFECT}`)
+    return run
+  }
+  // The same holds while the run's worktree is gone: a retry would stop at the same error (missingRootError).
+  if (node.error?.startsWith(RUN_FOLDER_GONE)) {
+    debug($, `no automatic recovery for ${run.runId}/${node.id}: the run's folder is gone`)
     return run
   }
   // A FAIL verdict repeats on a retry: the work it judged has to change first (see verdictFailure).
@@ -2285,10 +1992,10 @@ function isCheckpointDir(path: string): boolean {
   return parts.length >= 2 && parts[parts.length - 2] === '.claude' && parts[parts.length - 1] === 'dag'
 }
 
-// A relative check path is joined to the project root without its `.` segments, so `.` is the project root itself.
-function resolveCheckPath(path: string): string {
+// A relative check path is joined to the run's root without its `.` segments, so `.` is the root itself.
+function resolveCheckPath(path: string, root: string): string {
   const parts = path.split('/').filter(part => part !== '' && part !== '.')
-  return parts.length ? `${projectRoot}/${parts.join('/')}` : projectRoot
+  return parts.length ? `${root}/${parts.join('/')}` : root
 }
 
 // Every regular file under dir, hidden and ignored ones included, as paths relative to dir in name order. A symbolic link
@@ -2348,9 +2055,9 @@ async function folderCheckResult($: EngineInterface, check: FileCheck, dir: stri
 }
 
 // A file check on a missing or unreadable path fails, absent included: a path that is not there proves nothing.
-async function fileCheckResult($: EngineInterface, check: FileCheck): Promise<CheckResult> {
+async function fileCheckResult($: EngineInterface, check: FileCheck, root: string): Promise<CheckResult> {
   if (!projectPath(check.path) && !readOnlyAbsolutePath(check.path)) return { outcome: 'unknown', detail: `Path not allowed: ${check.path}` }
-  const path = projectPath(check.path) ? resolveCheckPath(check.path) : check.path
+  const path = projectPath(check.path) ? resolveCheckPath(check.path, root) : check.path
   let kind: string
   try {
     kind = (await $.fs.stat(path)).kind
@@ -2380,10 +2087,11 @@ async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
   }
 }
 
-// A program that cannot start or runs past the limit makes $.process.run reject, which fails the check whatever expect says.
+// A program that cannot start or runs past its limit makes $.process.run reject, which fails the check whatever expect says.
+// The limit is the check's own timeoutMs, or the host's 30 s default without one (the parser keeps it within 1 s to 10 min).
 // The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
-async function commandCheckResult($: EngineInterface, check: CommandCheck): Promise<CheckResult> {
-  const result = await oneAtATime(JSON.stringify(check.argv), () => $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 }))
+async function commandCheckResult($: EngineInterface, check: CommandCheck, root: string): Promise<CheckResult> {
+  const result = await oneAtATime(JSON.stringify(check.argv), () => $.process.run(check.argv, { cwd: root, timeoutMs: check.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS }))
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
   const expectation = check.expect
   const truncated = (stream: 'stdout' | 'stderr') => expectation?.[stream] !== undefined && (stream === 'stdout' ? result.isStdoutTruncated : result.isStderrTruncated)
@@ -2391,17 +2099,20 @@ async function commandCheckResult($: EngineInterface, check: CommandCheck): Prom
   const problem = exitProblem(exitCode, expectation) ??
     truncated('stdout') ?? (expectation?.stdout ? textProblem(result.stdout, expectation.stdout, 'stdout') : undefined) ??
     truncated('stderr') ?? (expectation?.stderr ? textProblem(result.stderr, expectation.stderr, 'stderr') : undefined)
-  const header = `${JSON.stringify(check.argv)} exited ${result.exitCode}`
+  const excerpt = `${JSON.stringify(check.argv)} exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`
   const outcome = exitCode === undefined ? 'unknown'
     : exitProblem(exitCode, expectation) ? 'failed'
     : truncated('stdout') || truncated('stderr') ? 'unknown'
     : problem ? 'failed' : 'passed'
-  return { outcome, detail: commandDetail(problem ? `${problem}\n${header}` : header, `${result.stdout}\n${result.stderr}`), exitCode }
+  return { outcome, detail: commandDetail(problem ? `${problem}\n${excerpt}` : excerpt), exitCode }
 }
 
 async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<NonNullable<NodeRun['verification']>> {
   const checks = run.definition.nodes.find(def => def.id === node.id)?.verify
   if (!checks?.length) return { status: 'missing', evidence: [], error: 'No verification contract was declared; amend this node with verify checks.' }
+  // Checks run in the run's folder: without it they would fail on the missing cwd, each with its own process error.
+  const gone = await missingRootError($, run)
+  if (gone) return { status: 'failed', evidence: [], error: gone }
   const evidence: VerificationEvidence[] = []
   for (const check of checks) {
     let outcome: VerificationOutcome = 'unknown'
@@ -2410,11 +2121,11 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
     try {
       switch (check.kind) {
         case 'file': {
-          ({ outcome, detail } = await fileCheckResult($, check))
+          ({ outcome, detail } = await fileCheckResult($, check, rootOf(run)))
           break
         }
         case 'command': {
-          ({ outcome, detail, exitCode } = await commandCheckResult($, check))
+          ({ outcome, detail, exitCode } = await commandCheckResult($, check, rootOf(run)))
           break
         }
         default: {
@@ -2423,8 +2134,11 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
         }
       }
     } catch (error) {
+      const failure = message(error)
       outcome = check.kind === 'command' ? 'not_run' : 'unknown'
-      detail = `Verification could not run: ${message(error)}`
+      detail = `Verification could not run: ${failure}`
+      const advice = check.kind === 'command' ? timeoutAdvice(failure) : undefined
+      if (advice) detail += `\n${advice}`
     }
     const item = { check, passed: outcome === 'passed', outcome, detail, checkedAt: await $.clock.now(), ...(exitCode !== undefined ? { exitCode } : {}) }
     if (missingProgram(item)) item.outcome = 'not_run'
@@ -2442,121 +2156,27 @@ async function verifyNode($: EngineInterface, run: Run, node: NodeRun): Promise<
   }
 }
 
-async function writeReport($: EngineInterface, runId: string, nodeId: string, report: string): Promise<string | undefined> {
-  const dir = `${runsDir}/${runId}`
+function reportPathOf(runId: string, nodeId: string): string {
+  return `${runsDir}/${runId}/${nodeId}.md`
+}
+
+// The node's report, and a copy for its attempt (attemptReportPath) that the next attempt does not overwrite, so a retry can
+// read the attempt before it whole. The copy failing to write loses only that history: the report path still comes back.
+async function writeReport($: EngineInterface, runId: string, nodeId: string, attempt: number, report: string): Promise<string | undefined> {
   try {
-    await ensureDir($, dir)
-    const path = `${dir}/${nodeId}.md`
-    await $.fs.write(path, report.slice(0, REPORT_LIMIT))
+    await ensureDir($, `${runsDir}/${runId}`)
+    const path = reportPathOf(runId, nodeId)
+    const text = report.length <= REPORT_LIMIT ? report : `${report.slice(0, REPORT_LIMIT)}\n… (the answer went on for ${report.length - REPORT_LIMIT} more characters, past what one report file can hold)`
+    await $.fs.write(path, text)
+    try {
+      await $.fs.write(attemptReportPath(path, attempt), text)
+    } catch (error) {
+      debug($, `could not keep attempt ${attempt} of node ${nodeId}'s report: ${message(error)}`)
+    }
     return path
   } catch (error) {
     $.ui.log(`could not save the report of node ${nodeId}: ${message(error)}`)
     return undefined
-  }
-}
-
-async function recoverReport($: EngineInterface, agentId: string): Promise<string> {
-  const rows = await $.session.messages({ agentId })
-  if (!Array.isArray(rows)) {
-    $.ui.log(`cannot read the final report of agent ${agentId}: ${rows.deny}`)
-    return ''
-  }
-  return finalReport(rows as TranscriptRow[])
-}
-
-// A run's events go to a folder named for it; the main conversation's go to one named for the session.
-function trajectoryDir(runId?: string): string {
-  return `${projectRoot}/${TRAJECTORY_SUBDIR}/${runId ?? `session-${sessionId}`}`
-}
-
-// Queues one trajectory event. Nothing in a run waits on the write: one that fails is logged and the run goes on.
-async function record($: EngineInterface, input: TrajectoryInput): Promise<void> {
-  if (!trajectoryLog || !projectRoot) return
-  const event = { at: await $.clock.now(), sessionId, ...input }
-  const dir = trajectoryDir('runId' in input ? input.runId : undefined)
-  const path = `${dir}/${eventFileName(event.at, ++trajectorySeq, input.kind, 'nodeId' in input ? input.nodeId : undefined)}`
-  trajectoryWrites = trajectoryWrites.then(async () => {
-    await ensureDir($, dir)
-    await $.fs.write(path, trajectoryLine(event))
-  }).catch(error => debug($, `could not record the trajectory event ${input.kind}: ${message(error)}`))
-}
-
-// A settled run's events joined into one <run_id>.jsonl beside its folder, once the writes queued before it are done.
-function exportTrajectory($: EngineInterface, runId: string): void {
-  if (!trajectoryLog || !projectRoot) return
-  const dir = trajectoryDir(runId)
-  trajectoryWrites = trajectoryWrites.then(async () => {
-    const names = (await $.fs.list(dir)).filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl')).map(entry => entry.name).sort()
-    const lines: string[] = []
-    for (const name of names) lines.push(await $.fs.read(`${dir}/${name}`))
-    await $.fs.write(`${dir}.jsonl`, lines.join(''))
-  }).catch(error => debug($, `could not join the trajectory of ${runId}: ${message(error)}`))
-}
-
-const TRAJECTORY_NEW_FILES = 20
-
-// What a node's end leaves that a later attempt erases: the notes files its checks read outside the project, which
-// clearStaleNotes removes before a reviewer's next start, and, for a node that declares writes, their change against HEAD with
-// new files in full, which the next attempt overwrites.
-async function endSnapshot($: EngineInterface, run: Run, nodeId: string): Promise<{ notes: NotesFile[]; diff?: string }> {
-  const def = run.definition.nodes.find(current => current.id === nodeId)
-  const notes: NotesFile[] = []
-  const paths = new Set((def?.verify ?? []).flatMap(check => check.kind === 'file' && readOnlyAbsolutePath(check.path) ? [check.path] : []))
-  for (const path of paths) {
-    try {
-      if ((await $.fs.stat(path)).kind === 'file') notes.push({ path, text: await $.fs.read(path) })
-    } catch (error) {
-      debug($, `trajectory: could not read ${path}: ${message(error)}`)
-    }
-  }
-  const writes = (def?.writes ?? []).map(path => `:(literal)${path}`)
-  if (writes.length === 0) return { notes }
-  try {
-    const changed = await $.process.run(['git', '-c', 'core.quotePath=false', 'diff', '--no-color', 'HEAD', '--', ...writes], { cwd: projectRoot })
-    const untracked = await $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--', ...writes], { cwd: projectRoot })
-    if (changed.exitCode !== 0 || untracked.exitCode !== 0) return { notes }
-    const fresh = untracked.stdout.split('\0').filter(Boolean).slice(0, TRAJECTORY_NEW_FILES)
-    const added = await Promise.all(fresh.map(async path => `new file ${path}\n${await readOrEmpty($, `${projectRoot}/${path}`)}`))
-    return { notes, diff: [changed.stdout, ...added].filter(text => text !== '').join('\n') }
-  } catch (error) {
-    debug($, `trajectory: could not read the change of ${nodeId}: ${message(error)}`)
-    return { notes }
-  }
-}
-
-// The end of one node attempt: its outcome and checks, what it left (endSnapshot), its token counts, and its transcript.
-// Awaited before the completion is applied, because applying it can start the attempt that erases the notes.
-async function recordNodeEnd($: EngineInterface, claim: CompletionClaim, result: CompletionResult, end: AgentEnd): Promise<void> {
-  if (!trajectoryLog) return
-  const { run, node } = claim
-  const usage = agentUsage.get(end.agentId)
-  agentUsage.delete(end.agentId)
-  try {
-    const { notes, diff } = await endSnapshot($, run, node.id)
-    const { state, error, answer } = result.outcome
-    await record($, {
-      kind: 'node.end', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, reason: end.reason, isAborted: end.isAborted,
-      state, error, answer, verification: result.verification, expansion: result.expansion?.map(def => def.id), notes, diff, usage,
-    })
-    const rows = await $.session.messages({ agentId: end.agentId })
-    await record($, Array.isArray(rows)
-      ? { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: transcriptRows(rows) }
-      : { kind: 'node.transcript', runId: run.runId, nodeId: node.id, attempt: node.attempt, agentId: end.agentId, rows: [], error: rows.deny })
-  } catch (error) {
-    debug($, `could not record the end of ${run.runId}/${node.id} in its trajectory: ${message(error)}`)
-  }
-}
-
-// The main conversation's rows since the last turn it logged.
-async function recordMainTurn($: EngineInterface, turn: { turnId: string; reason: string; durationMs: number; usage?: Usage }): Promise<void> {
-  try {
-    const rows = await $.session.messages()
-    if (!Array.isArray(rows)) return
-    const fresh = rowsAfter(rows, mainRows)
-    mainRows = fresh.mark
-    await record($, { kind: 'main.turn', turnId: turn.turnId, reason: turn.reason, durationMs: turn.durationMs, usage: turn.usage, rows: transcriptRows(fresh.rows) })
-  } catch (error) {
-    debug($, `could not record the main turn in the trajectory: ${message(error)}`)
   }
 }
 
@@ -2567,10 +2187,12 @@ function planningWarning(): string[] {
 
 // The checks start runs before it creates anything, in start's order: parse, then the key, then verification. A key that already
 // holds this same definition comes back as `existing` and skips verification, as start's `reused` reply does. Start and a dry run share this.
-function screenDefinition(input: unknown): Result<{ definition: Definition; existing: Run | undefined }> {
+// root is the folder the run would work in: only a run of that folder is reused, so the same definition started again in a
+// worktree runs there instead of returning the run of the session's own folder.
+function screenDefinition(input: unknown, root: string): Result<{ definition: Definition; existing: Run | undefined }> {
   const parsed = parseDefinition(input)
   if (!parsed.ok) return parsed
-  const reusable = findReusable([...runs.values()], parsed.value)
+  const reusable = findReusable([...runs.values()].filter(run => rootOf(run) === root), parsed.value)
   if (!reusable.ok) return reusable
   if (reusable.value) return { ok: true, value: { definition: parsed.value, existing: reusable.value } }
   const problem = verificationProblem(parsed.value)
@@ -2586,13 +2208,13 @@ function screenDefinition(input: unknown): Result<{ definition: Definition; exis
 // definition goes through unjudged: the verify run reports a missing program anyway, only later.
 const PROGRAM_LOOKUP = 'while IFS= read -r p; do command -v "$p" >/dev/null 2>&1 || printf "%s\\n" "$p"; done'
 
-async function missingProgramProblem($: EngineInterface, definition: Definition): Promise<EngineError | undefined> {
+async function missingProgramProblem($: EngineInterface, definition: Definition, root: string): Promise<EngineError | undefined> {
   const uses = commandPrograms(definition)
   const names = [...new Set(uses.map(use => use.program))]
   if (names.length === 0) return undefined
   let missing: Set<string>
   try {
-    const result = await $.process.run(['sh', '-c', PROGRAM_LOOKUP], { cwd: projectRoot || undefined, stdin: `${names.join('\n')}\n`, timeoutMs: 5_000 })
+    const result = await $.process.run(['sh', '-c', PROGRAM_LOOKUP], { cwd: root || undefined, stdin: `${names.join('\n')}\n`, timeoutMs: 5_000 })
     if (result.exitCode !== 0) return undefined
     missing = new Set(result.stdout.split('\n').map(line => line.trim()).filter(name => names.includes(name)))
   } catch {
@@ -2605,13 +2227,14 @@ async function missingProgramProblem($: EngineInterface, definition: Definition)
 const ABSENT_READ_LIMIT = 1_000_000
 
 // Reads the files the definition's absent and long contains checks target so their current text can be judged. Folders, missing files and
-// files over 1 MB are left out silently; a read error only drops that file, it never fails the caller.
-async function absentWarnings($: EngineInterface, definition: Definition): Promise<string[]> {
+// files over 1 MB are left out silently; a read error only drops that file, it never fails the caller. Paths resolve against
+// root, the folder the run will work in (workingRoot).
+async function absentWarnings($: EngineInterface, definition: Definition, root: string): Promise<string[]> {
   const texts = new Map<string, string>()
   for (const path of fileCheckPaths(definition)) {
     try {
-      const stat = await $.fs.stat(`${projectRoot}/${path}`)
-      if (stat.kind === 'file' && stat.size <= ABSENT_READ_LIMIT) texts.set(path, await $.fs.read(`${projectRoot}/${path}`))
+      const stat = await $.fs.stat(`${root}/${path}`)
+      if (stat.kind === 'file' && stat.size <= ABSENT_READ_LIMIT) texts.set(path, await $.fs.read(`${root}/${path}`))
     } catch {
       // A missing or unreadable file has nothing to count; the warning is advisory.
     }
@@ -2621,12 +2244,13 @@ async function absentWarnings($: EngineInterface, definition: Definition): Promi
 
 // A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
 async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
-  const screened = screenDefinition(input)
+  const root = await workingRoot($, projectRoot)
+  const screened = screenDefinition(input, root)
   if (!screened.ok) return screened
-  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition)
+  const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition, root)
   if (missing) return { ok: false, error: missing }
   const preview = previewDefinition(screened.value.definition, { maxConcurrent })
-  const absent = await absentWarnings($, screened.value.definition)
+  const absent = await absentWarnings($, screened.value.definition, root)
   return { ok: true, value: { preview: { ...preview, warnings: [...preview.warnings, ...absent] }, existing: screened.value.existing } }
 }
 
@@ -2639,23 +2263,27 @@ function effectiveApproval(): StartApproval {
 // `approveHeld` is set when that person typed it in the composer: /dag run of the definition one of their runs holds for
 // approval is then their answer to it, and approves it the way /dag approve does. Every other reuse returns the run as is.
 async function startDefinition($: EngineInterface, input: unknown, by: 'model' | 'user', approveHeld = false): Promise<ToolReply> {
-  const screened = screenDefinition(input)
+  // The run keeps the folder the session works in now, so a run started in a worktree runs there to the end, even if the
+  // session moves on.
+  const root = await workingRoot($, projectRoot)
+  const screened = screenDefinition(input, root)
   if (!screened.ok) return err(screened.error)
   const { definition, existing } = screened.value
   if (existing?.rejected && by === 'model') return err(rejectedByUser(existing))
   if (existing && by === 'user' && approveHeld && existing.sessionId === sessionId && awaitingApproval(existing)) {
     await decideApproval($, 'approve', existing.runId)
-    return ok({ reused: true, approved: true, run_id: existing.runId, snapshot: snapshotOf(runs.get(existing.runId) ?? existing, 0) })
+    const approved = runs.get(existing.runId) ?? existing
+    return ok({ reused: true, approved: true, run_id: existing.runId, ...usageHoldOf(approved, await $.clock.now()), snapshot: snapshotOf(approved, 0) })
   }
-  if (existing) return ok({ reused: true, run_id: existing.runId, snapshot: snapshotOf(existing) })
-  const missing = await missingProgramProblem($, definition)
+  if (existing) return ok({ reused: true, run_id: existing.runId, ...usageHoldOf(existing, await $.clock.now()), snapshot: snapshotOf(existing) })
+  const missing = await missingProgramProblem($, definition, root)
   if (missing) return err(missing)
   const now = await $.clock.now()
   const runId = `dag_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-  const routed = await routeRun($, createRun(definition, { runId, sessionId, now }), definition.nodes.map(node => node.id))
+  const routed = await routeRun($, createRun(definition, { runId, sessionId, now, ...(root !== projectRoot ? { root } : {}) }), definition.nodes.map(node => node.id))
   const created = by === 'model' && interactive && effectiveApproval() === 'always' ? requestApproval(routed, await $.clock.now()) : routed
   runs.set(runId, created)
-  await record($, { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
+  await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.start', runId, by, key: created.key, name: created.name, goal: created.definition.goal, definition: created.definition })
   // Only the model's own start answers the turn's request; a /dag run the person typed is not part of that answer. The
   // enforcement check matters because only auto decides the surface, so a level changed mid-turn leaves an old 'board'.
   if (by === 'model' && enforcement === 'auto' && turnSurface === 'board') boardAnswerRuns.add(runId)
@@ -2669,11 +2297,12 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   await openPane($, false)
   const held = awaitingApproval(started)
   if (held) $.ui.toast(t.toastApproval(started.name), { timeoutMs: ATTENTION_TOAST_MS })
-  const warnings = [...lintDefinition(definition), ...await absentWarnings($, definition), ...planningWarning()]
+  const warnings = [...lintDefinition(definition), ...await absentWarnings($, definition, root), ...planningWarning()]
   return ok({
     reused: false,
     run_id: runId,
     ...(held ? { awaiting_approval: true } : {}),
+    ...usageHoldOf(started, await $.clock.now()),
     snapshot: snapshotOf(started, 0),
     warnings,
     note: held
@@ -2782,6 +2411,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   }
   if (input.action === 'start') return startRequest($, input)
   if (input.action === 'list') {
+    const listedAt = await $.clock.now()
     return ok({
       runs: [...runs.values()]
         .sort((a, b) => b.createdAt - a.createdAt)
@@ -2789,6 +2419,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
           run_id: r.runId, run_key: r.key, name: r.name, status: r.status, session_id: r.sessionId, owned: r.sessionId === sessionId,
           // status stays running for a held run, so this is what tells the model it has not started.
           ...(awaitingApproval(r) ? { awaiting_approval: true } : {}),
+          ...usageHoldOf(r, listedAt),
         })),
     })
   }
@@ -2796,14 +2427,17 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   if (!run) return err({ code: 'unknown_run', message: `No run "${String(input.run_id)}" in this project; use the list action to see runs.` })
   const now = await $.clock.now()
 
-  if (input.action === 'snapshot') return ok(snapshotOf(run))
+  if (input.action === 'snapshot') return ok({ ...snapshotOf(run), ...usageHoldOf(run, now) })
   if (input.action === 'wait') {
+    const usage = usageHoldOf(run, now)
     const note = isSettled(run)
       ? 'The run has settled.'
       : awaitingApproval(run)
         ? APPROVAL_NOTE
-        : 'wait cannot block inside Claude Code; the run is still active and you will receive a message when it settles.'
-    return ok({ ...snapshotOf(run), note })
+        : usage.usage_hold
+          ? `New nodes are paused until the ${usage.usage_hold.kind} rate-limit window (now ${usage.usage_hold.percent_used}%) drops below usage_hold_percent (${usageHoldPercent}%) or resets; running nodes continue. Do not poll; you will receive a message when the run settles.`
+          : 'wait cannot block inside Claude Code; the run is still active and you will receive a message when it settles.'
+    return ok({ ...snapshotOf(run), ...usage, note })
   }
   if (input.action === 'attach') {
     if (run.sessionId === sessionId) return ok(snapshotOf(run))
@@ -2857,20 +2491,20 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (by === 'user') delete retried.value.rejected
     const routed = await routeRun($, retried.value, retried.value.nodes.filter(node => node.state === 'pending' || node.state === 'scheduled').map(node => node.id))
     runs.set(run.runId, routed)
-    await record($, { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.retry', runId: run.runId, by, nodeIds, prompt: typeof input.prompt === 'string' ? input.prompt : undefined })
     return ok(snapshotOf((await tick($, run.runId)) ?? routed, 0))
   }
   if (input.action === 'amend') {
     const parsed = parseDefinition(input.definition)
     if (!parsed.ok) return err(parsed.error)
-    const problem = verificationProblem(parsed.value) ?? await missingProgramProblem($, parsed.value)
+    const problem = verificationProblem(parsed.value) ?? await missingProgramProblem($, parsed.value, rootOf(run))
     if (problem) return err(problem)
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
     dropQuestionWaits(run, routed)
     runs.set(run.runId, routed)
-    await record($, { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
+    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
     return ok({
       rerun: amended.value.rerun,
       snapshot: snapshotOf((await tick($, run.runId)) ?? routed, 0),
@@ -2910,183 +2544,13 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
   return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
 }
 
-function boardsPath(): string {
-  return `${projectRoot}/${BOARDS_SUBDIR}/${sessionId}.json`
-}
-
-// A missing file is a session without boards. A file that cannot be read or parsed is logged and left on disk: the
-// session starts without boards, and its first create writes the file again.
-async function loadBoards($: EngineInterface): Promise<void> {
-  boards = []
-  selectedBoardId = undefined
-  if (!projectRoot || !sessionId) return
-  const path = boardsPath()
-  try {
-    if (!(await $.fs.exists(path))) return
-    const parsed = parseBoardFile(await $.fs.read(path), sessionId)
-    if (parsed.ok) boards = parsed.value.boards
-    else $.ui.log(`could not load ${path}: ${parsed.error.message}`)
-  } catch (error) {
-    $.ui.log(`could not read ${path}: ${message(error)}`)
-  }
-}
-
-// Memory takes the new list only once the file holds it, so a failed write changes neither.
-async function saveBoards($: EngineInterface, next: Board[]): Promise<void> {
-  const file: BoardFile = { schemaVersion: 1, sessionId, boards: next }
-  await ensureDir($, `${projectRoot}/${BOARDS_SUBDIR}`)
-  await $.fs.write(boardsPath(), JSON.stringify(file, null, 2) + '\n')
-  boards = next
-}
-
-// An accepted handoff brings the source session's boards along: a block's lines were captured when it was drawn, so
-// copying is only the board list with each board's sessionId rewritten — parseBoardFile refuses a board that names
-// another session, and this session's own file would too. The Board section then shows the board changed last, as it does
-// anywhere else. A missing or unparsable source file is a no-op; a failure is logged and never fails the accept.
-async function inheritBoards($: EngineInterface, source: string): Promise<void> {
-  const path = `${projectRoot}/${BOARDS_SUBDIR}/${source}.json`
-  try {
-    if (!(await $.fs.exists(path))) return
-    const parsed = parseBoardFile(await $.fs.read(path), source)
-    if (!parsed.ok) {
-      $.ui.log(`could not inherit ${path}: ${parsed.error.message}`)
-      return
-    }
-    const held = new Set(boards.map(board => board.boardId))
-    const inherited = parsed.value.boards.filter(board => !held.has(board.boardId)).map(board => ({ ...board, sessionId }))
-    if (inherited.length === 0) return
-    await saveBoards($, [...boards, ...inherited])
-  } catch (error) {
-    $.ui.log(`could not inherit ${path}: ${message(error)}`)
-  }
-}
-
-// A final newline ends the last line; it does not start another.
-function textLines(text: string): string[] {
-  const lines = text.split(/\r?\n/)
-  if (lines.at(-1) === '') lines.pop()
-  return lines
-}
-
-// What git prints for a board quote, run from the project root like a verify command. A git that cannot start or runs past
-// GIT_READ_TIMEOUT_MS rejects, and that refuses the edit the same way a non-zero exit does, with git's own complaint.
-async function gitOutput($: EngineInterface, args: string[], at: string): Promise<Result<string>> {
-  const refused = (reason: string) => fail<string>('invalid_board_edit', `${at}: git ${args[0]} could not read it (${reason})`)
-  try {
-    const result = await $.process.run(['git', ...args], { cwd: projectRoot, timeoutMs: GIT_READ_TIMEOUT_MS })
-    return result.exitCode === 0 ? { ok: true, value: result.stdout } : refused(result.stderr.trim() || `exit ${result.exitCode}`)
-  } catch (error) {
-    return refused(message(error))
-  }
-}
-
-// Lines start..end (1-based) of a project file for a code_peek: the worktree file, or with a ref the file as git holds it at
-// that ref. The ./ makes git read the path from the project root, which may be a folder inside the repository; a bare
-// <ref>:<path> starts at the repository root. peeksNeeded merges a range several edits ask for, so a refusal names the path
-// and no edit index.
-async function readPeek($: EngineInterface, request: PeekRequest): Promise<Result<string[]>> {
-  const at = request.ref ? `code_peek ${request.path}@${request.ref}` : `code_peek ${request.path}`
-  let text: string
-  if (request.ref) {
-    const shown = await gitOutput($, ['show', `${request.ref}:./${request.path}`], at)
-    if (!shown.ok) return shown
-    text = shown.value
-  } else {
-    try {
-      text = await $.fs.read(`${projectRoot}/${request.path}`)
-    } catch (error) {
-      return fail('invalid_board_edit', `${at}: cannot read the file (${message(error)})`)
-    }
-  }
-  const lines = textLines(text)
-  if (request.end > lines.length) {
-    return fail('invalid_board_edit', `${at}: lines ${request.start}-${request.end} reach past the end of the file, which has ${lines.length} lines`)
-  }
-  return { ok: true, value: lines.slice(request.start - 1, request.end) }
-}
-
-// One artifact of one node for a trace block: output, answer and error are NodeRun fields of the run checkpoint, and verification
-// is the evidence file verifyNode persisted. tracesNeeded merges a target several edits ask for, so a refusal names the trace, not
-// an edit index. The run id is model input, so it must match the checkpoint naming before it reaches a path.
-async function readTrace($: EngineInterface, request: TraceRequest): Promise<Result<string[]>> {
-  const at = `trace ${request.run} ${request.node} ${request.part}`
-  if (!SAFE_RUN_DIR.test(request.run)) return fail('invalid_board_edit', `${at}: no run checkpoint has that name`)
-  const runPath = `${runsDir}/${request.run}.json`
-  if (!(await $.fs.exists(runPath))) return fail('invalid_board_edit', `${at}: no checkpoint at ${runPath}`)
-  let run: Run
-  try {
-    run = JSON.parse(await $.fs.read(runPath)) as Run
-  } catch (error) {
-    return fail('invalid_board_edit', `${at}: cannot read the run checkpoint (${message(error)})`)
-  }
-  // A board is session state, so it may quote only the session's own runs.
-  if (run.sessionId !== sessionId) return fail('invalid_board_edit', `${at}: the run belongs to another session`)
-  const node = run.nodes.find(candidate => candidate.id === request.node)
-  if (node === undefined) return fail('invalid_board_edit', `${at}: the run has no node ${request.node}`)
-  if (request.part === 'verification') {
-    const reportPath = node.verification?.reportPath
-    if (reportPath === undefined) return fail('invalid_board_edit', `${at}: the node ran no verification`)
-    let text: string
-    try {
-      text = await $.fs.read(reportPath)
-    } catch (error) {
-      return fail('invalid_board_edit', `${at}: cannot read the verification artifact (${message(error)})`)
-    }
-    return { ok: true, value: text.split(/\r?\n/) }
-  }
-  const text = request.part === 'output' ? node.output : request.part === 'answer' ? node.answer : node.error
-  if (text === undefined) return fail('invalid_board_edit', `${at}: the node recorded no ${request.part}`)
-  return { ok: true, value: text.split(/\r?\n/) }
-}
-
-// The lines of git diff <ref> [-- <path>] for a diff block; path is project-relative, as a pathspec from the project root is.
-// :(literal) makes git read the path as one file name, as the commit stage's checks do (stages.ts): a bare app/[id]/page.ts is
-// a pattern that also names app/i/page.ts, and a leading ":" is pathspec magic. --no-color and --no-ext-diff keep a plain
-// unified diff when the person's config sets color.ui=always or an external diff tool such as difftastic. An empty diff is no
-// read failure: the engine refuses it in the block's own words. diffsNeeded merges a diff several edits ask for, so a refusal
-// names the diff, not an edit index.
-async function readDiff($: EngineInterface, request: DiffRequest): Promise<Result<string[]>> {
-  const at = request.path ? `diff ${request.ref} ${request.path}` : `diff ${request.ref}`
-  const shown = await gitOutput($, ['diff', '--no-color', '--no-ext-diff', request.ref, ...(request.path ? ['--', `:(literal)${request.path}`] : [])], at)
-  return shown.ok ? { ok: true, value: textLines(shown.value) } : shown
-}
-
-async function editBoard($: EngineInterface, board: Board, edits: BoardEdit[]): Promise<ToolReply> {
-  const peeks = new Map<string, string[]>()
-  for (const request of peeksNeeded(board, edits)) {
-    const lines = await readPeek($, request)
-    if (!lines.ok) return err(lines.error)
-    peeks.set(peekKey(request), lines.value)
-  }
-  const traces = new Map<string, string[]>()
-  for (const request of tracesNeeded(board, edits)) {
-    const lines = await readTrace($, request)
-    if (!lines.ok) return err(lines.error)
-    traces.set(traceKey(request), lines.value)
-  }
-  const diffs = new Map<string, string[]>()
-  for (const request of diffsNeeded(board, edits)) {
-    const lines = await readDiff($, request)
-    if (!lines.ok) return err(lines.error)
-    diffs.set(diffKey(request), lines.value)
-  }
-  const boardIds = new Set(boards.map(candidate => candidate.boardId))
-  const applied = applyEdits(board, edits, { now: await $.clock.now(), peeks, traces, diffs, boardIds })
-  if (!applied.ok) return err(applied.error)
-  const edited = applied.value.board
-  await saveBoards($, boards.map(candidate => (candidate.boardId === edited.boardId ? edited : candidate)))
-  selectedBoardId = edited.boardId
-  $.ui.invalidate('ui.render')
-  return ok({ board_id: edited.boardId, blocks: edited.blocks.map(block => ({ id: block.id, type: block.type })), inserted: applied.value.inserted })
-}
-
 // The pane opens as for a run the model starts: without the keyboard, and not over the person's own close. The reply
 // says when the board is not on screen, so the model does not point the person at a pane they cannot see. While a run of
 // this session has not settled the pane stays on the DAG, which is what the person is watching, and a toast says the
 // board changed; the model tells them to press b.
 async function openBoard($: EngineInterface, board: Board): Promise<ToolReply> {
   const keepsDag = ownsUnsettledRun()
-  selectedBoardId = board.boardId
+  boards.selectedId = board.boardId
   if (!keepsDag) inspectorView = 'board'
   inspectorPage = 0
   selectedDecisionId = undefined
@@ -3099,91 +2563,23 @@ async function openBoard($: EngineInterface, board: Board): Promise<ToolReply> {
   return ok({ board_id: board.boardId, shown: true, section: 'dag', hint: 'A run is active, so the /dag pane stays on the DAG; tell the user to press b to see the board.' })
 }
 
-// The board changed last; a tie goes to the later one in the list.
-function latestBoard(candidates: readonly Board[]): Board | undefined {
-  return candidates.reduce<Board | undefined>((latest, board) => (latest === undefined || board.updatedAt >= latest.updatedAt ? board : latest), undefined)
+// The register.ts functions a board operation calls, bound to this $ (BoardCalls in host/boards.ts).
+function boardCalls($: EngineInterface): BoardCalls {
+  return { ensureDir: dir => ensureDir($, dir), openBoard: board => openBoard($, board) }
 }
 
-// The board the Board section shows: the selected one, else the one changed last. The same choice as shownIndex in
-// ui/board-model.ts, which that module does not export.
-function shownBoard(): Board | undefined {
-  return boards.find(board => board.boardId === selectedBoardId) ?? latestBoard(boards)
-}
-
-// The title the approval block points at: the board this session changed last.
-function latestBoardTitle(): string | undefined {
-  return latestBoard(boards)?.title
-}
-
-function newBoardId(now: number): string {
-  return `board_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-}
-
-// A block header pressed in the Board section puts the block's chip into the prompt box at the cursor, and the label is kept so
-// the user prompt that carries it gets the block's content (prompt.submit).
-async function citeBlock($: EngineInterface, blockId: string): Promise<void> {
-  const board = shownBoard()
-  const block = board?.blocks.find(candidate => candidate.id === blockId)
-  // The press raced a change of the shown board, which redraws the pane without that header.
-  if (!board || !block) return
-  const label = chipLabel(block)
-  const filled = await $.prompt.fill({ text: `${label} `, mode: 'insert', decorations: [{ start: 0, end: label.length, ...CHIP_PAINT }] })
-  if (!filled.isFilled) {
-    $.ui.toast(t.toastChipFailed(filled.refusal ?? 'unknown'), { timeoutMs: ATTENTION_TOAST_MS })
-    return
-  }
-  // Deleted first so a chip pressed again counts as the newest.
-  chips.delete(label)
-  chips.set(label, { boardId: board.boardId, blockId })
-  for (const oldest of chips.keys()) {
-    if (chips.size <= MAX_CHIPS) break
-    chips.delete(oldest)
-  }
-}
-
-// The context a user prompt gets for the chips it carries, from the boards as they are now; a chip whose board or block is gone
-// adds nothing.
-function chipContexts(text: string): string[] {
-  return citedChips(text, chips.keys()).flatMap(label => {
-    const chip = chips.get(label)
-    const board = boards.find(candidate => candidate.boardId === chip?.boardId)
-    const block = board?.blocks.find(candidate => candidate.id === chip?.blockId)
-    return board && block ? [chipContext(board, block)] : []
-  })
-}
-
-// The board tool (engine/board-spec.ts): the main conversation draws boards that the pane's Board section shows.
-async function handleBoardTool($: EngineInterface, input: ToolInput): Promise<ToolReply> {
-  if (input.action === 'list') {
-    return ok({ boards: boards.map(board => ({ board_id: board.boardId, title: board.title, blocks: board.blocks.length, updatedAt: board.updatedAt })) })
-  }
-  if (input.action === 'create') {
-    const now = await $.clock.now()
-    const boardId = newBoardId(now)
-    const created = newBoard({ boardId, sessionId, title: typeof input.title === 'string' ? input.title : '', now })
-    if (!created.ok) return err(created.error)
-    await saveBoards($, [...boards, created.value])
-    selectedBoardId = boardId
-    $.ui.invalidate('ui.render')
-    return ok({ board_id: boardId })
-  }
-  if (input.action !== 'edit' && input.action !== 'get' && input.action !== 'open' && input.action !== 'export') {
-    return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
-  }
-  const board = boards.find(candidate => candidate.boardId === input.board_id)
-  if (!board) return err({ code: 'unknown_board', message: `No board "${String(input.board_id)}" in this session; use the list action to see boards.` })
-  if (input.action === 'get') return ok(boardForModel(board))
-  if (input.action === 'open') return openBoard($, board)
-  if (input.action === 'export') return ok({ board_id: board.boardId, markdown: boardToMarkdown(board) })
-  const edits = parseEdits(input.edits)
-  return edits.ok ? editBoard($, board, edits.value) : err(edits.error)
+// The register.ts function a trajectory write calls, bound to this $ (TrajectoryCalls in host/trajectory.ts).
+function trajectoryCalls($: EngineInterface): TrajectoryCalls {
+  return { ensureDir: dir => ensureDir($, dir) }
 }
 
 async function notifyHandoff($: EngineInterface, run: Run): Promise<void> {
   if (!run.handoff) return
+  // A worktree run keeps working in its worktree after /dag accept; the target session may stand in another folder.
+  const worktree = run.root === undefined ? '' : ` The run works in ${run.root}.`
   const sent = await $.session.send({
     to: { sessionId: run.handoff.to },
-    text: `[dag-handoff] Run ${run.runId} is ready for manual acceptance in ${projectRoot}. Use /dag accept ${run.runId} or the Sessions pane. Do not accept or start work automatically.`,
+    text: `[dag-handoff] Run ${run.runId} is ready for manual acceptance in ${projectRoot}.${worktree} Use /dag accept ${run.runId} or the Sessions pane. Do not accept or start work automatically.`,
   })
   if (!sent.isDelivered) $.ui.log(`Handoff remains available in Sessions; notification was not delivered: ${sent.reason ?? 'unknown reason'}`)
 }
@@ -3239,7 +2635,7 @@ async function handoffAction($: EngineInterface, operation: 'request' | 'accept'
         $.ui.log(warning)
         warnings.push(warning)
       }
-      await inheritBoards($, run.sessionId)
+      await inheritBoards($, boards, boardCalls($), run.sessionId)
     }
     if (operation === 'request') {
       if (result.value.handoff?.offeredAt !== undefined) await notifyHandoff($, result.value)
@@ -3331,28 +2727,28 @@ async function commandFilePath($: EngineInterface, given: string): Promise<strin
 // `fromComposer` is whether the person typed the command in the prompt, the only origin that may approve a held run.
 async function runCommand($: EngineInterface, args: string, fromComposer = false): Promise<{ text?: string }> {
   const [verb = 'open', ...rest] = splitArgs(args)
-  if (verb === 'learn') return { text: await startLearning($, true, fromComposer) }
+  if (verb === 'learn') return { text: await startLearning($, learning, true, fromComposer) }
   if (verb === 'learning') {
     const action = rest[0] ?? 'status'
     if (action === 'on' || action === 'off') {
       if (!fromComposer) return { text: USER_ONLY }
-      learningEnabled = action === 'on'
-      if (learningEnabled && !learningRoot) await initializeLearning($)
-      return { text: `Session learning: ${learningEnabled ? 'on' : 'off'}` }
+      learning.enabled = action === 'on'
+      if (learning.enabled && !learning.root) await initializeLearning($, learning)
+      return { text: `Session learning: ${learning.enabled ? 'on' : 'off'}` }
     }
-    if (!learningRoot) return { text: 'Session learning is off or unavailable.' }
+    if (!learning.root) return { text: 'Session learning is off or unavailable.' }
     if (action === 'prune') {
       if (!fromComposer) return { text: USER_ONLY }
       const now = await $.clock.now()
-      await updateLearningLibrary($, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learningMinOpportunities, maxSkills: learningMaxSkills, now }))
-      await pruneLearningData($)
+      await updateLearningLibrary($, learning, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learning.minOpportunities, maxSkills: learning.maxSkills, now }))
+      await pruneLearningData($, learning)
     } else if (action !== 'status') return { text: 'Usage: /dag learning [status|on|off|prune]' }
-    learningLibrary = await readLearningLibrary($)
+    learning.library = await readLearningLibrary($, learning)
     // The model can run status too, so it lists only skills this project may use and leaves bodies in their SKILL.md.
-    const skills = learningLibrary.skills
+    const skills = learning.library.skills
       .filter(skill => skill.scope === 'global' || skill.projectRoot === projectRoot)
       .map(({ body, ...skill }) => skill)
-    return { text: JSON.stringify({ enabled: learningEnabled, running: learningSession.batch?.agentId, pendingEvents: learningSession.events.filter(event => Number(event.id.split(':').at(-1)) > learningSession.learnedThrough).length, root: learningRoot, usage: learningLibrary.usage, maxDailyRuns: learningDailyLimit, maxInputChars: learningMaxInputChars, retentionDays: learningRetentionDays, skills }, null, 2) }
+    return { text: JSON.stringify({ enabled: learning.enabled, running: learning.session.batch?.agentId, pendingEvents: learning.session.events.filter(event => Number(event.id.split(':').at(-1)) > learning.session.learnedThrough).length, root: learning.root, usage: learning.library.usage, maxDailyRuns: learning.dailyLimit, maxInputChars: learning.maxInputChars, retentionDays: learning.retentionDays, skills }, null, 2) }
   }
   if (verb === 'inspect') {
     const choice = rest[0]
@@ -3585,6 +2981,9 @@ function headlessAskNote(tool: string, why: string): string {
   return `${tool} needs approval that this non-interactive session cannot ask for (${why}); allow it up front with --allowedTools ${tool} or a --permission-mode that covers it`
 }
 
+// Fallback for a node agent with no stream activity. On 2.1.306 it never reads a transcript: in 3 headless trials all
+// 12 node agents, including those started after the first wave, streamed through turn.step from their first turn
+// (eval/baselines/stream-events-2.1.306.md). Kept for hosts from the 2.1.299 minimum that were not measured.
 async function pollTranscripts($: EngineInterface): Promise<void> {
   for (const run of runs.values()) {
     if (run.sessionId !== sessionId) continue
@@ -3702,18 +3101,18 @@ async function inspectorAction($: EngineInterface, action: string): Promise<void
   if (action === 'page:prev') inspectorPage = Math.max(0, inspectorPage - 1)
   else if (action === 'page:next') inspectorPage += 1
   else if (action === 'board:prev' || action === 'board:next') {
-    selectedBoardId = adjacentBoardId(boards, selectedBoardId, action === 'board:next' ? 1 : -1)
+    boards.selectedId = adjacentBoardId(boards.list, boards.selectedId, action === 'board:next' ? 1 : -1)
     inspectorPage = 0
   } else if (action.startsWith('board:goto:')) {
     // A board_ref button names a board of this session; a stale or forged id selects nothing.
     const target = action.slice('board:goto:'.length)
-    if (boards.some(candidate => candidate.boardId === target)) {
-      selectedBoardId = target
+    if (boards.list.some(candidate => candidate.boardId === target)) {
+      boards.selectedId = target
       inspectorPage = 0
     }
   } else if (action === 'decision:back') selectedDecisionId = undefined
   else if (action.startsWith('decision:')) selectedDecisionId = action.slice('decision:'.length)
-  else if (action.startsWith('chip:')) await citeBlock($, action.slice('chip:'.length))
+  else if (action.startsWith('chip:')) await citeBlock($, boards, action.slice('chip:'.length))
   else {
     let reply: { text: string } | undefined
     if (action.startsWith('handoff-cancel:')) {
@@ -3810,7 +3209,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
   })
   if (inspectorView !== 'dag') {
     const inspection = inspectorView === 'board'
-      ? buildBoardView({ boards, selectedBoardId, columns: inspectorColumns, language, page: inspectorPage })
+      ? buildBoardView({ boards: boards.list, selectedBoardId: boards.selectedId, columns: inspectorColumns, language, page: inspectorPage })
       : buildInspector({
         view: inspectorView, columns: inspectorColumns, language,
         decisions: decisionRecords, context: workflowContext, contextPath: contextPath(),
@@ -3876,7 +3275,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     })
   }
 
-  const model = buildPane(shown, view, now, { activity, waiting: waitingTools(), t, taskCount: countTasks(agents, dagAgents) })
+  const model = buildPane(shown, view, now, { activity, waiting: waitingTools(), t, taskCount: countTasks(agents, dagAgents), usageHold: usageHold(rateLimits, usageHoldPercent, now), sessionId })
   if (model.empty || !model.graph) {
     return Box({ flexDirection: 'column', children: [sectionTabs, gap(), ...model.header.map(line), gap(), Text({ dimColor: true, children: [model.empty ?? ''] }), ...footer] })
   }
@@ -3897,7 +3296,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
   const approval = run.sessionId === sessionId && awaitingApproval(run)
     ? [
         line([{ text: t.approvalWaiting, color: ACCENT, bold: true }]),
-        ...approvalPreview(previewDefinition(run.definition, { maxConcurrent }), e.props.bodyColumns, t, latestBoardTitle()).map(line),
+        ...approvalPreview(previewDefinition(run.definition, { maxConcurrent }), e.props.bodyColumns, t, latestBoardTitle(boards)).map(line),
         Box({
           flexDirection: 'row',
           columnGap: 2,
@@ -3982,27 +3381,34 @@ export function register(on: On, options: PluginOptions) {
   if (options.node_messages === 'full') nodeMessages = 'full'
   if (ENFORCEMENTS.includes(options.enforcement as Enforcement)) enforcement = options.enforcement as Enforcement
   if (START_APPROVALS.includes(options.start_approval as StartApproval)) startApproval = options.start_approval as StartApproval
+  if (SETTLE_NOTIFIES.includes(options.settle_notify as SettleNotify)) settleNotify = options.settle_notify as SettleNotify
+  usageHoldPercent = parseHoldPercent(options.usage_hold_percent)
   if (Array.isArray(options.main_allowed_tools)) extraAllowed = new Set(options.main_allowed_tools)
-  antiSlopScan = options.anti_slop_scan !== false
-  if (Array.isArray(options.anti_slop_skip)) antiSlopSkip = new Set(options.anti_slop_skip)
-  secureScan = options.secure_scan !== false
-  trajectoryLog = options.trajectory_log === true
+  scan.antiSlopScan = options.anti_slop_scan !== false
+  if (Array.isArray(options.anti_slop_skip)) scan.antiSlopSkip = new Set(options.anti_slop_skip)
+  scan.secureScan = options.secure_scan !== false
+  trajectory.enabled = options.trajectory_log === true
+  const trajectoryDays = options.trajectory_retention_days
+  if (typeof trajectoryDays === 'number' && Number.isInteger(trajectoryDays) && trajectoryDays >= 0 && trajectoryDays <= 3650) trajectory.retentionDays = trajectoryDays
+  const trajectoryMb = options.trajectory_max_mb
+  if (typeof trajectoryMb === 'number' && Number.isInteger(trajectoryMb) && trajectoryMb >= 0 && trajectoryMb <= 102_400) trajectory.maxMb = trajectoryMb
   reviewLedger = options.review_ledger !== false
-  jevPermissionScope = options.jev_permission_scope === 'dag' ? 'dag' : 'all'
-  learningEnabled = options.session_learning !== false
+  const permissionScope = options.jev_permission_scope
+  jevPermissionScope = permissionScope === 'all' || permissionScope === 'off' ? permissionScope : 'dag'
+  learning.enabled = options.session_learning !== false
   for (const [key, set] of [
-    ['learning_interval', (value: number) => { learningInterval = value }],
-    ['learning_min_opportunities', (value: number) => { learningMinOpportunities = value }],
-    ['learning_max_skills', (value: number) => { learningMaxSkills = value }],
-    ['learning_max_daily_runs', (value: number) => { learningDailyLimit = value }],
+    ['learning_interval', (value: number) => { learning.interval = value }],
+    ['learning_min_opportunities', (value: number) => { learning.minOpportunities = value }],
+    ['learning_max_skills', (value: number) => { learning.maxSkills = value }],
+    ['learning_max_daily_runs', (value: number) => { learning.dailyLimit = value }],
   ] as const) {
     const value = options[key]
     if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 1000) set(value)
   }
   const maxInput = options.learning_max_input_chars
-  if (typeof maxInput === 'number' && Number.isInteger(maxInput) && maxInput >= 16_000 && maxInput <= 120_000) learningMaxInputChars = maxInput
+  if (typeof maxInput === 'number' && Number.isInteger(maxInput) && maxInput >= 16_000 && maxInput <= 120_000) learning.maxInputChars = maxInput
   const learningDays = options.learning_retention_days
-  if (typeof learningDays === 'number' && Number.isInteger(learningDays) && learningDays >= 0 && learningDays <= 3650) learningRetentionDays = learningDays
+  if (typeof learningDays === 'number' && Number.isInteger(learningDays) && learningDays >= 0 && learningDays <= 3650) learning.retentionDays = learningDays
 
   on('session.start', async ($, e, next) => {
     for (const pending of pendingJevCalls.values()) pending.controller.abort()
@@ -4014,13 +3420,10 @@ export function register(on: On, options: PluginOptions) {
     repeatEpoch++
     repeatSuspended = false
     interactive = e.isInteractive
-    paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop'
+    paneSurface = e.surface === null || e.surface === 'terminal' || e.surface === 'desktop' || e.surface === 'vscode'
     sessionClosed = false
     keepAliveQueued = false
-    repositoryAllows = undefined
-    semgrepFound = undefined
-    guideRowsRead = undefined
-    changeScans.clear()
+    resetScan(scan)
     // A new process: the conversation it serves (a resume) has not been told this process's state yet.
     forgetDelivered()
     await restorePlanningLoaded($)
@@ -4035,6 +3438,8 @@ export function register(on: On, options: PluginOptions) {
         : 'Jev inactive: TYPESAFE_API_KEY is not set; keeping existing decisions')
     }
     sessionId = await $.session.id()
+    // Before loadRuns and recoverRuns, so the first tick of a resumed run already sees the account's usage.
+    await seedRateLimits($)
     await $.tool.register({ name: 'dag', description: TOOL_DESCRIPTION, inputSchema: INPUT_SCHEMA })
     await $.tool.register({ name: 'board', description: BOARD_TOOL_DESCRIPTION, inputSchema: BOARD_INPUT_SCHEMA })
     try {
@@ -4043,11 +3448,16 @@ export function register(on: On, options: PluginOptions) {
       $.ui.log(`could not load DAG checkpoints: ${message(error)}`)
     }
     // After loadRuns, which sets projectRoot.
-    await loadBoards($)
+    await loadBoards($, boards)
     try {
       await pruneArtifacts($)
     } catch (error) {
       $.ui.log(`could not prune expired DAG artifacts: ${message(error)}`)
+    }
+    try {
+      await pruneTrajectories($, trajectory)
+    } catch (error) {
+      $.ui.log(`could not prune old trajectories: ${message(error)}`)
     }
     try {
       await loadMetadata($)
@@ -4055,21 +3465,11 @@ export function register(on: On, options: PluginOptions) {
       $.ui.log(`could not restore workflow context: ${message(error)}`)
     }
     await restorePlanningFromContext($)
-    agentUsage.clear()
-    mainRows = undefined
-    if (trajectoryLog) {
-      // A resumed conversation's earlier rows were logged by the process that saw them.
-      try {
-        const rows = await $.session.messages()
-        if (Array.isArray(rows)) mainRows = rowsAfter(rows, undefined).mark
-      } catch (error) {
-        debug($, `could not mark where the main conversation's trajectory starts: ${message(error)}`)
-      }
-    }
+    await startTrajectory($, trajectory)
     try {
-      await initializeLearning($)
+      await initializeLearning($, learning)
     } catch (error) {
-      learningRoot = ''
+      learning.root = ''
       $.ui.log(`could not initialize session learning: ${message(error)}`)
     }
     try {
@@ -4140,14 +3540,14 @@ export function register(on: On, options: PluginOptions) {
     // A cleared or switched conversation holds no block yet; prompt.context records one again if it re-renders.
     if (e.source === 'clear' || previous !== sessionId) forgetDelivered()
     if (previous && previous !== sessionId) {
-      if (learningRoot) {
+      if (learning.root) {
         try {
-          await saveLearningSession($, previous)
-          learningSession = emptyLearningSession()
-          learningTurnRequested = false
-          await initializeLearning($)
+          await saveLearningSession($, learning, previous)
+          learning.session = emptyLearningSession()
+          learning.turnRequested = false
+          await initializeLearning($, learning)
         } catch (error) {
-          learningRoot = ''
+          learning.root = ''
           $.ui.log(`could not switch session learning: ${message(error)}`)
         }
       }
@@ -4158,7 +3558,7 @@ export function register(on: On, options: PluginOptions) {
       })
       await loadMetadata($)
       // A board belongs to the conversation that drew it, and its file is checked against that session id.
-      await serialized(() => loadBoards($))
+      await serialized(() => loadBoards($, boards))
       if (e.source !== 'clear') await restorePlanningFromContext($)
       if (e.source === 'clear' && workflowContext.requests.length === 0) {
         workflowContext = { ...previousContext, sessionId, updatedAt: await $.clock.now() }
@@ -4171,6 +3571,13 @@ export function register(on: On, options: PluginOptions) {
     return next(e)
   })
 
+  // Every reading replaces the last; a hold that no longer applies resumes the runs it held.
+  on('session.measure', async ($, e, next) => {
+    rateLimits = e.rateLimits
+    recheckUsageHold($)
+    return next(e)
+  })
+
   on('session.end', async ($, e, next) => {
     for (const pending of pendingJevCalls.values()) pending.controller.abort()
     pendingJevCalls.clear()
@@ -4178,7 +3585,7 @@ export function register(on: On, options: PluginOptions) {
     repeatEpoch++
     sessionClosed = true
     try {
-      if (learningRoot) await saveLearningSession($)
+      if (learning.root) await saveLearningSession($, learning)
     } catch (error) {
       $.ui.log(`could not save session learning at exit: ${message(error)}`)
     }
@@ -4253,10 +3660,10 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('skill.prompt', async ($, e, next) => {
-    if (learningRoot) {
+    if (learning.root) {
       const id = e.skill.split(':').at(-1)
-      const managed = learningLibrary.skills.find(skill => skill.id === id)
-      if (managed && !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) {
+      const managed = learning.library.skills.find(skill => skill.id === id)
+      if (managed && !eligibleSkills(learning.library, projectRoot).some(skill => skill.id === id)) {
         return { text: 'This learned skill is archived or belongs to another project; do not apply it here.' }
       }
     }
@@ -4269,9 +3676,21 @@ export function register(on: On, options: PluginOptions) {
   // the person typed inside no longer matches and stays plain, which is also how prompt.submit will read it.
   on('prompt.edit', async ($, e, next) => {
     const box = await next(e)
-    if (chips.size === 0) return box
-    const painted = chipSpans(box.text, chips.keys()).map(span => ({ ...span, ...CHIP_PAINT }))
+    if (boards.chips.size === 0) return box
+    const painted = chipSpans(box.text, boards.chips.keys()).map(span => ({ ...span, ...CHIP_PAINT }))
     return painted.length === 0 ? box : { ...box, decorations: [...(box.decorations ?? []), ...painted] }
+  })
+
+  // The typeahead asks for every word the person types, so this spawns no process and stays out of serialized(): the run ids
+  // come from the runs map in memory and the definition files from a $.fs.list walk reused for 10 s. The hook's budget
+  // (HookBudget.ms, 10 s) counts only its own code, never its $ calls. A word anywhere but the first argument of a /dag
+  // subcommand that takes a file or a run passes the rows beneath through untouched.
+  on('prompt.autocomplete', async ($, e, next) => {
+    const below = await next(e)
+    const want = autocompleteWant(e)
+    if (want === undefined) return below
+    const rows = autocompleteRows(e, want === 'files' ? await definitionPaths($, definitionFiles) : [], want === 'runs' ? [...runs.values()] : [])
+    return rows.length === 0 ? below : { suggestions: [...below.suggestions, ...rows] }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -4310,36 +3729,36 @@ export function register(on: On, options: PluginOptions) {
     // note state the model has not received yet; a plugin's prompt never gets it, and the plugin's own carry the news.
     // It counts as received only once the prompt entered: a hook beneath that drops it delivers nothing.
     const context = [...(e.context ?? []), ...(enforcement === 'off' ? [] : [protocolFor(enforcement, interactive, turnMode, turnSurface)])]
-    if (learningEnabled && learningRoot && userOrigin && next.origin.plugin === 'engine') {
+    if (learning.enabled && learning.root && userOrigin && next.origin.plugin === 'engine') {
       try {
         const now = await $.clock.now()
-        await updateLearningLibrary($, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learningMinOpportunities, maxSkills: learningMaxSkills, now }))
-        const catalog = learningCatalog(learningLibrary, projectRoot, learnedSkillsDir)
-        if (eligibleSkills(learningLibrary, projectRoot).length) context.push(catalog)
+        await updateLearningLibrary($, learning, library => archiveUnusedSkills(library, { projectRoot, minOpportunities: learning.minOpportunities, maxSkills: learning.maxSkills, now }))
+        const catalog = learningCatalog(learning.library, projectRoot, learning.skillsDir)
+        if (eligibleSkills(learning.library, projectRoot).length) context.push(catalog)
       } catch (error) {
         $.ui.log(`could not load learned skills: ${message(error)}`)
       }
     }
     if (userOrigin) {
-      context.push(...chipContexts(e.text))
-      chips.clear()
+      context.push(...chipContexts(boards, e.text))
+      boards.chips.clear()
     }
     const block = userOrigin && contextUnseen(delivered, contextSlices(workflowContext, [...runs.values()])) ? restoration() : undefined
     if (block) context.push(block.text)
     const result = await next({ ...e, context })
     if (block && result.drop === undefined) block.received()
     if (result.drop === undefined && userOrigin && next.origin.plugin === 'engine' && e.text.trim()) {
-      learningTurnRequested = true
+      learning.turnRequested = true
       try {
-        await collectLearning($, 'user', e.text)
+        await collectLearning($, learning, 'user', e.text)
       } catch (error) {
         $.ui.log(`could not collect session learning for this prompt: ${message(error)}`)
       }
-      if (learningEnabled && learningRoot) {
+      if (learning.enabled && learning.root) {
         try {
           const now = await $.clock.now()
-          await updateLearningLibrary($, library => recordSkillOpportunity(library, projectRoot, now))
-          await saveLearningSession($)
+          await updateLearningLibrary($, learning, library => recordSkillOpportunity(library, projectRoot, now))
+          await saveLearningSession($, learning)
         } catch (error) {
           $.ui.log(`could not record learned-skill exposure: ${message(error)}`)
         }
@@ -4351,14 +3770,14 @@ export function register(on: On, options: PluginOptions) {
   on('agent.spawn', async ($, e, next) => {
     // A resume (an answered node question, a SendMessage) may only be refused: a changed prompt is ignored and reported.
     if (e.resume) return next(e)
-    if (e.parentAgentId && learningAgents.has(e.parentAgentId)) return { deny: 'Session learning returns proposals without spawning agents.' }
-    if (learningSpawning && e.name === learningSpawnName) {
+    if (e.parentAgentId && learning.agents.has(e.parentAgentId)) return { deny: 'Session learning returns proposals without spawning agents.' }
+    if (learning.spawning && e.name === learning.spawnName) {
       const result = await next({ ...e, background: true })
-      if (result.agentId) learningAgents.add(result.agentId)
+      if (result.agentId) learning.agents.add(result.agentId)
       return result
     }
-    if (e.workflow || !learningEnabled || !learningRoot || eligibleSkills(learningLibrary, projectRoot).length === 0) return next(e)
-    return next({ ...e, prompt: `${e.prompt}\n\n${learningCatalog(learningLibrary, projectRoot, learnedSkillsDir)}` })
+    if (e.workflow || !learning.enabled || !learning.root || eligibleSkills(learning.library, projectRoot).length === 0) return next(e)
+    return next({ ...e, prompt: `${e.prompt}\n\n${learningCatalog(learning.library, projectRoot, learning.skillsDir)}` })
   })
 
   on('classic.PermissionRequest', async ($, e, next) => {
@@ -4379,12 +3798,16 @@ export function register(on: On, options: PluginOptions) {
       if (disagreement) debug($, disagreement)
     }
     const decided = await next(e)
+    // Only the model's own main-conversation call went through the main-loop gate: a subagent's call, a plugin's call
+    // (origin) and a $.tool.check query (no tool_use_id) did not, and a main_allowed_tools Bash skips the judge.
+    if (e.tool === 'Bash' && !e.agentId && e.tool_use_id && e.isReadOnly !== true && next.origin.plugin === 'engine'
+      && gatesMainLoop(enforcement, turnMode) && !extraAllowed.has('Bash')) await recordHostReadOnlyGap($, e.input, decided.decision)
     if (decided.decision !== 'ask') return decided
     const call = e.tool_use_id ? openCalls.get(e.tool_use_id) : undefined
     // The host sets agentId on a real call in a subagent loop; openCalls only knows calls whose tool.call reached this plugin.
     const worker = ownNodeOfAgent(e.agentId ?? call?.agentId)
     // The answer stays with the person: mark the node worker that will wait for it.
-    const asked = async (why: string) => {
+    const asked = async (why: string, verdict = decided) => {
       if (call) {
         try {
           await markWaiting($, call.agentId, e.tool, e.tool_use_id)
@@ -4395,9 +3818,26 @@ export function register(on: On, options: PluginOptions) {
       if (!interactive && worker && noteAsk(worker.run.runId, worker.nodeId, worker.attempt, e.tool)) {
         $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
       }
-      return decided
+      return verdict
     }
     if (PERSON_TOOLS.has(e.tool)) return asked('Jev not asked: the host keeps the dialog of a tool that asks the person')
+    // An external node's effects reach beyond the project files, so only the person may approve its asks: no Jev, and no
+    // classifier's allow either (the verdict below is a person's ask on 2.1.304-2.1.307, see its comment).
+    if (worker?.run.definition.nodes.find(def => def.id === worker.nodeId)?.external) {
+      const note = `Run ${worker.run.runId}, node ${worker.nodeId} is external: the person decides, Jev not asked`
+      await persistDecisions($, [decisionRecord({
+        at: await $.clock.now(), kind: 'permission', subject: e.tool, proposed: 'ask', selected: 'ask',
+        source: 'rule', outcome: 'existing-decision', latencyMs: 0, stateHash: hash(note),
+        runId: worker.run.runId, nodeId: worker.nodeId, note,
+      }, {}, 0)])
+      // decider is what makes this ask person-only on Claude Code 2.1.304-2.1.306. 2.1.307 removed it from ToolCheckResult
+      // and treats every ask a hook rewords as a person's, so there the engine drops the field; the assertion lets one source typecheck on both.
+      return asked(`Jev not asked: node ${worker.nodeId} is external and the person decides`, {
+        decision: 'ask', decider: 'person',
+        reason: `Node ${worker.nodeId} is marked external, so its effects outside the project files need the person's approval`,
+      } as typeof decided)
+    }
+    if (jevPermissionScope === 'off') return asked('Jev not asked: jev_permission_scope is off')
     const context = e.tool_use_id ? toolContexts.get(e.tool_use_id) : undefined
     if (jevPermissionScope === 'dag' && context?.task === undefined) return asked('Jev not asked: jev_permission_scope is dag and the call carries no node task')
     const request = permissionRequest(e.tool, e.input, context ?? { request: userRequest, projectRoot })
@@ -4422,11 +3862,11 @@ export function register(on: On, options: PluginOptions) {
 
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
-    if (agentId && learningAgents.has(agentId)) return { deny: 'Return learning proposal JSON using the supplied evidence. Learning agents cannot call tools.' }
-    if (learningRoot && e.tool === 'Skill') {
+    if (agentId && learning.agents.has(agentId)) return { deny: 'Return learning proposal JSON using the supplied evidence. Learning agents cannot call tools.' }
+    if (learning.root && e.tool === 'Skill') {
       const id = e.skill.split(':').at(-1)
-      const managed = learningLibrary.skills.find(skill => skill.id === id)
-      if (managed && !eligibleSkills(learningLibrary, projectRoot).some(skill => skill.id === id)) {
+      const managed = learning.library.skills.find(skill => skill.id === id)
+      if (managed && !eligibleSkills(learning.library, projectRoot).some(skill => skill.id === id)) {
         return { deny: 'This learned skill is archived or belongs to another project.' }
       }
     }
@@ -4469,9 +3909,9 @@ export function register(on: On, options: PluginOptions) {
             if (reply.result !== null && typeof reply.result === 'object' && 'backgroundTaskId' in reply.result) repeatSuspended = true
           }
         }
-        await collectLearning($, 'tool', JSON.stringify({ input: boundInput(e), outcome: boundInput(reply) }), agentId)
+        await collectLearning($, learning, 'tool', JSON.stringify({ input: boundInput(e), outcome: boundInput(reply) }), agentId)
         try {
-          await observeLearnedSkill($, e.tool, e as Readonly<Record<string, unknown>>)
+          await observeLearnedSkill($, learning, e.tool, e as Readonly<Record<string, unknown>>)
         } catch (error) {
           $.ui.log(`could not record learned-skill use: ${message(error)}`)
         }
@@ -4485,7 +3925,8 @@ export function register(on: On, options: PluginOptions) {
     const node = owner?.run.nodes.find(current => current.id === owner.nodeId)
     const context: JevContext = {
       request: userRequest,
-      projectRoot,
+      // A worker of a run in a worktree works there; from the session's own folder its files would all sit under .claude/.
+      projectRoot: owner ? rootOf(owner.run) : projectRoot,
       ...(owner ? { goal: owner.run.definition.goal ?? owner.run.name } : {}),
       ...(def ? { task: node?.promptOverride ?? def.prompt } : {}),
     }
@@ -4552,10 +3993,10 @@ export function register(on: On, options: PluginOptions) {
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) repeatedChecks.delete(e.agentId)
-    if (e.agentId && learningAgents.has(e.agentId)) {
+    if (e.agentId && learning.agents.has(e.agentId)) {
       const agentId = e.agentId
       try {
-        await serialized(() => finishLearning($, { agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }))
+        await serialized(() => finishLearning($, learning, { agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }))
       } catch (error) {
         $.ui.log(`session learning did not save proposals: ${message(error)}`)
       }
@@ -4563,11 +4004,11 @@ export function register(on: On, options: PluginOptions) {
       const result = await next(e)
       return { ...result, text: '' }
     }
-    if (learningEnabled && learningRoot) {
+    if (learning.enabled && learning.root) {
       try {
         await serialized(async () => {
-          await collectLearning($, 'assistant', `${e.reason}: ${e.answer ?? ''}`, e.agentId)
-          await saveLearningSession($)
+          await collectLearning($, learning, 'assistant', `${e.reason}: ${e.answer ?? ''}`, e.agentId)
+          await saveLearningSession($, learning)
         })
       } catch (error) {
         $.ui.log(`could not persist session learning; continuing turn completion: ${message(error)}`)
@@ -4576,8 +4017,8 @@ export function register(on: On, options: PluginOptions) {
     if (e.agentId) seenAgent($, e.agentId, 'turn.complete')
     if (e.agentId) activity.delete(e.agentId)
     if (e.agentId) clearWaiting($, e.agentId)
-    if (trajectoryLog && e.agentId && agentRuns.has(e.agentId) && e.usage) agentUsage.set(e.agentId, addUsage(agentUsage.get(e.agentId), e.usage) ?? e.usage)
-    if (trajectoryLog && !e.agentId) await recordMainTurn($, e)
+    if (trajectory.enabled && e.agentId && agentRuns.has(e.agentId) && e.usage) trajectory.agentUsage.set(e.agentId, addUsage(trajectory.agentUsage.get(e.agentId), e.usage) ?? e.usage)
+    if (trajectory.enabled && !e.agentId) await recordMainTurn($, trajectory, trajectoryCalls($), e)
     if (e.agentId && agentRuns.has(e.agentId)) {
       const end: AgentEnd = { agentId: e.agentId, reason: e.reason, isAborted: e.isAborted, answer: e.answer }
       try {
@@ -4599,13 +4040,13 @@ export function register(on: On, options: PluginOptions) {
       }
     }
     if (!e.agentId && !interactive && hasActiveRun()) await holdUntilSettled($, next.signal)
-    if (learningEnabled && learningRoot && !sessionClosed) {
+    if (learning.enabled && learning.root && !sessionClosed) {
       try {
-        const flush = !e.agentId && learningTurnRequested && !e.isAborted && e.reason === 'answer'
-        if (flush || learningSession.toolsSinceLearn >= learningInterval) {
-          const alreadyRunning = learningSession.batch !== undefined
-          await serialized(() => startLearning($, flush))
-          if (flush && !alreadyRunning) learningTurnRequested = false
+        const flush = !e.agentId && learning.turnRequested && !e.isAborted && e.reason === 'answer'
+        if (flush || learning.session.toolsSinceLearn >= learning.interval) {
+          const alreadyRunning = learning.session.batch !== undefined
+          await serialized(() => startLearning($, learning, flush))
+          if (flush && !alreadyRunning) learning.turnRequested = false
         }
       } catch (error) {
         $.ui.log(`could not start session learning: ${message(error)}`)
@@ -4623,7 +4064,7 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('tool.call', { tool: 'mcp__dag-workflow__board' }, async ($, e) => {
-    return serialized(() => handleBoardTool($, e))
+    return serialized(() => handleBoardTool($, boards, boardCalls($), e))
   }).catch(async ($, e, next) => {
     return err({ code: `hook_${next.error.kind}`, message: `The board tool failed: ${next.error.message}` })
   })
@@ -4709,17 +4150,20 @@ export function register(on: On, options: PluginOptions) {
   // the time the scan does, so a scan that throws returns the tool's answer untouched.
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
     if (e.tool !== 'Edit' && e.tool !== 'Write') return next(e)
-    if (RULE_FILES.some(name => e.file_path === `${projectRoot}/${name}`)) repositoryAllows = undefined
-    if (!antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
+    // An edit of a rule file drops its folder's cached allow list, whichever folder that is (the session's or a worktree's).
+    const slash = e.file_path.lastIndexOf('/')
+    if (RULE_FILES.includes(e.file_path.slice(slash + 1))) scan.repositoryAllows.delete(e.file_path.slice(0, slash))
+    if (!scan.antiSlopScan || familiesOf(e.file_path).length === 0) return next(e)
     const request = userRequest
     const before = await readOrEmpty($, e.file_path)
     const reply = await next(e)
     if (reply.deny !== undefined || reply.isError) return reply
     try {
       const after = e.tool === 'Write' ? e.content : await readOrEmpty($, e.file_path)
-      const hits = scanSlop(e.file_path, before, after, await slopSkips($), request)
+      const root = await fileRoot($, e.agentId, e.file_path)
+      const hits = scanSlop(e.file_path, before, after, await slopSkips($, scan, root), request)
       if (hits.length === 0) return reply
-      const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
+      const shown = root === undefined ? e.file_path : e.file_path.slice(root.length + 1)
       return { ...reply, context: [...(reply.context ?? []), slopNote(shown, hits)] }
     } catch (error) {
       debug($, `anti-slop scan skipped ${e.file_path}: ${message(error)}`)
@@ -4727,23 +4171,37 @@ export function register(on: On, options: PluginOptions) {
     }
   })
 
+  // A Bash call that stops processes by name or pattern (engine/kill-guard.ts) is refused before it runs while this session's
+  // run has not settled, whoever makes it: a node worker, a subagent a worker or the main conversation started, or the main
+  // conversation itself. Then other nodes' servers and test runs are live on this machine. Node workers exist only during a
+  // run, and outside one the main conversation answers to the person, who sees the command.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (e.tool !== 'Bash' || !ownsUnsettledRun()) return next(e)
+    const form = killByName(e.command)
+    return form === undefined ? next(e) : { deny: killRefusal(form) }
+  })
+
   // The secure-coding Semgrep rules (engine/semgrep.ts) on what an Edit or Write adds, in the main conversation or a node
   // worker. Unlike the anti-slop scan this one runs before the tool: a block rule (a hard-coded secret) refuses the call
   // before the value reaches the file, and the other hits come back as context once the call is answered. A scan that
   // cannot run lets the call through.
   on('tool.call', { tool: /^(?:Edit|Write)$/ }, async ($, e, next) => {
-    if ((e.tool !== 'Edit' && e.tool !== 'Write') || !secureScan || !semgrepTarget(e.file_path)) return next(e)
+    if ((e.tool !== 'Edit' && e.tool !== 'Write') || !scan.secureScan || !semgrepTarget(e.file_path)) return next(e)
     let hits: SemgrepHit[] = []
+    let root: string | undefined
     try {
-      const before = await readOrEmpty($, e.file_path)
-      const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
-      if (after !== undefined) hits = await scanEdit($, e.file_path, before, after)
+      root = await fileRoot($, e.agentId, e.file_path)
+      if (root !== undefined) {
+        const before = await readOrEmpty($, e.file_path)
+        const after = e.tool === 'Write' ? e.content : applyEdit(before, e.old_string, e.new_string, e.replace_all === true)
+        if (after !== undefined) hits = await scanEdit($, scan, e.file_path, before, after, root)
+      }
     } catch (error) {
       debug($, `secure-coding scan skipped ${e.file_path}: ${message(error)}`)
     }
     if (hits.length === 0) return next(e)
-    const shown = projectRoot && e.file_path.startsWith(`${projectRoot}/`) ? e.file_path.slice(projectRoot.length + 1) : e.file_path
-    const { kisa } = await guideRows($)
+    const shown = root === undefined ? e.file_path : e.file_path.slice(root.length + 1)
+    const { kisa } = await guideRows($, scan)
     const blocking = hits.filter(hit => hit.tier === 'block')
     if (blocking.length > 0) return { deny: semgrepRefusal(shown, blocking, kisa) }
     const reply = await next(e)
@@ -4759,8 +4217,8 @@ export function register(on: On, options: PluginOptions) {
     handbacks.set(agentId, typeof sent === 'string' ? sent : '')
     const owner = nodeOfAgent(agentId)
     if (nodeMessages === 'full' || !owner) return next(e)
-    const excerpt = typeof sent === 'string' ? extractOutput(sent) : ''
-    return next({ ...e, message: nodeMessage(owner.run, owner.nodeId, excerpt) } as typeof e)
+    const excerpt = typeof sent === 'string' ? extractOutput(sent, Number.POSITIVE_INFINITY) : ''
+    return next({ ...e, message: nodeMessage(owner.run, owner.nodeId, excerpt, reportPathOf(owner.run.runId, owner.nodeId)) } as typeof e)
   })
 
   on('ui.message', async ($, e, next) => {

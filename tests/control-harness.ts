@@ -1,5 +1,5 @@
 import { mock, type Engine, type Plugin } from 'claude-code/testing'
-import type { AgentInfo, EventOf, On } from 'claude-code'
+import type { AgentInfo, EventOf, On, SessionRateLimit } from 'claude-code'
 import type { Run } from '../hooks/engine/types.ts'
 import type { JevRequest } from '../hooks/engine/jev.ts'
 import type { Enforcement } from '../hooks/engine/policy.ts'
@@ -19,11 +19,17 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const reads: string[] = []
   const readOnce = new Map<string, string>()
   const writeErrors = new Map<string, string>()
+  // Paths in writeErrors whose failing write leaves the first half of its text behind, as a host that dies mid-write does.
+  const tornWrites = new Set<string>()
+  // Destination -> stderr of a failing `mv`; the source stays where it was, as with a full disk.
+  const moveErrors = new Map<string, string>()
   const logs: string[] = []
   const logOptions: ({ to?: string } | undefined)[] = []
   const stats: string[] = []
   const statuses: (string | undefined)[] = []
   const toasts: { text: string; timeoutMs?: number }[] = []
+  // Every $.ui.notify the plugin raised, in order.
+  const notifications: { text: string; title: string | undefined }[] = []
   const notices: { toolUseId: string; text: string | undefined }[] = []
   const sends: EventOf['session.send'][] = []
   const prompts: string[] = []
@@ -31,14 +37,24 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   const submits: { text: string; context: readonly string[]; origin: string }[] = []
   const locks = new Set<string>()
   const lockMtimes = new Map<string, number>()
+  // The size and the change time fs.list answers for a file; a file without an entry is 1 byte, changed at 0.
+  const fileMeta = new Map<string, { size?: number; mtimeMs?: number }>()
   // permission: the Jev answer to a permission question; unset, the question gets the generic 'trivial' answer.
   // git: what a git call prints, keyed by its argv after 'git' joined with spaces ('show HEAD~1:./src/a.ts',
   // 'diff --no-color --no-ext-diff main -- :(literal)src/b.ts'); a call whose key is absent exits 128 as git does for an unknown
   // ref or path.
-  const control = { sessionId: 'source', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>() }
+  // notify: how the host answers $.ui.notify: 'sent' on a channel, 'unsent' with no terminal to show it, 'rejected' as a hook's
+  // deny or a failed write does.
+  // root: what $.session.root() answers, the folder the session works in now (a worktree after EnterWorktree); session.cwd
+  // and session.start stay at /work, the folder the session started in.
+  // rateLimits: the account's rate-limit windows $.session.usage() answers; empty, as off a subscription, unless a test sets them.
+  const control = { sessionId: 'source', root: '/work', notify: 'sent' as 'sent' | 'unsent' | 'rejected', exitCode: 0, recovery: 'implementation', confidence: 0.99, httpStatus: 200, transportError: false, permission: undefined as { choice: string; confidence: number } | undefined, liveAgents: [] as AgentInfo[], beforeSpawn: undefined as (() => Promise<void>) | undefined, git: new Map<string, string>(), rateLimits: [] as SessionRateLimit[] }
   on('session.start', () => ({ cwd: '/work' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: control.rateLimits } }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
   on('session.id', () => ({ value: control.sessionId }))
   on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', () => ({ value: control.root }))
   on('env.get', ($, e) => ({ value: e.name === 'TYPESAFE_API_KEY' ? KEY : e.name === 'HOME' ? options.home : undefined }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => { store.set(e.key, e.value); return { value: undefined } })
@@ -65,19 +81,26 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
         : { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     let exitCode = e.argv[0] === 'check-control' ? control.exitCode : 0
+    let stderr = ''
     const path = e.argv.at(-1)
     if (e.argv[0] === 'sleep') return { deny: 'No wall-clock waits in tests' }
-    if (options.home && e.argv[0] === 'mkdir' && e.argv.includes('-p') && path?.startsWith(options.home + '/')) locks.add(path)
-    if (options.home && e.argv[0] === 'mv') {
+    // Learning folders: the home ones, and a project's learned skills in its .claude/dag store.
+    if (options.home && e.argv[0] === 'mkdir' && e.argv.includes('-p')
+      && (path?.startsWith(options.home + '/') || path?.startsWith(ROOT + '/'))) locks.add(path)
+    if (e.argv[0] === 'mv') {
       const source = e.argv.at(-2)
       const destination = e.argv.at(-1)
       const text = source ? files.get(source) : undefined
-      if (source && destination && text !== undefined) {
+      const moveError = destination ? moveErrors.get(destination) : undefined
+      if (moveError !== undefined) {
+        exitCode = 1
+        stderr = moveError
+      } else if (source && destination && text !== undefined) {
         files.set(destination, text)
         files.delete(source)
       } else exitCode = 1
     }
-    if (options.home && e.argv[0] === 'rm' && path) {
+    if (e.argv[0] === 'rm' && path) {
       files.delete(path)
       if (e.argv.includes('-rf')) {
         for (const file of files.keys()) if (file.startsWith(path + '/')) files.delete(file)
@@ -91,14 +114,14 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     if (e.argv[0] === 'rmdir' && path) {
       exitCode = locks.delete(path) ? 0 : 1
     }
-    return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.list', ($, e) => {
     const prefix = e.path.replace(/\/$/, '') + '/'
     const names = new Set([...files.keys()].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length).split('/')[0]))
     return { value: [...names].filter((name): name is string => name !== undefined).map(name => ({
       name, kind: files.has(prefix + name) ? 'file' as const : 'dir' as const,
-      size: 1, mtimeMs: 0, isLink: false,
+      size: fileMeta.get(prefix + name)?.size ?? 1, mtimeMs: fileMeta.get(prefix + name)?.mtimeMs ?? 0, isLink: false,
     })) }
   })
   on('fs.exists', ($, e) => {
@@ -124,8 +147,13 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
     return { value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } }
   })
   on('fs.write', ($, e) => {
-    const error = writeErrors.get(e.path) ?? writeErrors.get(e.path.replace(/\.[a-f0-9]+\.\d+\.tmp$/, ''))
-    if (error !== undefined) throw new Error(error)
+    // A temp file written for an atomic replace fails with the path it replaces.
+    const target = e.path.replace(/\.[a-f0-9]+\.\d+\.tmp$/, '')
+    const error = writeErrors.get(e.path) ?? writeErrors.get(target)
+    if (error !== undefined) {
+      if (tornWrites.has(e.path) || tornWrites.has(target)) files.set(e.path, e.text.slice(0, Math.floor(e.text.length / 2)))
+      throw new Error(error)
+    }
     files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -144,6 +172,11 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   on('ui.log', ($, e) => { logs.push(e.text); logOptions.push('to' in e ? { to: e.to } : undefined); return { value: undefined } })
   on('ui.status', ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.toast', ($, e) => { toasts.push({ text: e.text, ...(e.timeoutMs === undefined ? {} : { timeoutMs: e.timeoutMs }) }); return { value: undefined } })
+  on('ui.notify', ($, e) => {
+    notifications.push({ text: e.text, title: e.title })
+    if (control.notify === 'rejected') throw new Error('the terminal refused the notification')
+    return { value: control.notify === 'sent' ? { isSent: true, channel: 'kitty' } : { isSent: false, reason: 'no-surface' } }
+  })
   on('ui.notice', ($, e) => { notices.push({ toolUseId: e.tool_use_id, text: e.text }); return { value: undefined } })
   on('prompt.submit', ($, e) => {
     prompts.push(e.text)
@@ -155,7 +188,7 @@ export function harness(on: On, options: { home?: string; now?: number } = {}) {
   on('tool.call', () => ({ result: 'stopped' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PermissionRequest', () => ({}))
-  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, logs, logOptions, stats, statuses, toasts, notices, sends, prompts, submits, locks, lockMtimes, control }
+  return { clock, files, store, spawns, completedTurns, processes, requests, reads, readOnce, writeErrors, tornWrites, moveErrors, logs, logOptions, stats, statuses, toasts, notifications, notices, sends, prompts, submits, locks, lockMtimes, fileMeta, control }
 }
 
 // The manifest's default enforcement is auto, which asks Jev about every user prompt. These suites were written for

@@ -1,0 +1,182 @@
+# Node worktree isolation, step 1: the building blocks, not wired into the run yet.
+# Why: plan "dag-workflow 실행 계획: worktree 격리 · Workflows 공존" (2026-10-23). Nodes that write files share one working
+# tree today, so flows chain lanes that could run in parallel (p12, p16, p22) and a failed node leaves its edits behind.
+# Step 0 (eval/baselines/worktree-spike-2.1.308.md, commit 402034f) chose approach B: the plugin snapshots the main working
+# tree (uncommitted and untracked files included) into a detached worktree under .claude/worktrees/, runs the node there,
+# and merges its change back per file with `git merge-file`; host isolation starts at HEAD and was ruled out.
+# Decisions for this run:
+# - The git recipe lives in hooks/engine/ behind an injected `run` function shaped like $.process.run, so the plugin's
+#   tests drive it with a fake and scripts/worktree-check.ts drives the same code against real git in a temp repo. p25
+#   builds the real `run` around $ in register.ts and wires spawn, verify, apply and clean-up.
+# - The node_isolation option moves to p25: an option that changes nothing would only confuse. README and docs wait too.
+#
+# PREREQUISITE: `git status --short` prints nothing (this file aside), and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p24-worktree-modules.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. The generated commit node commits after both reviews pass; nothing
+# is pushed.
+#
+# Run plan (components -> waves):
+#   wave 1: isolation-decisions (pure decisions)
+#   wave 2: worktree-recipe (git steps; imports the decisions, so it waits for them and reads their Output)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: standard for isolation-decisions (one pure module and its tests, a judgment call on the decision table);
+# hard for worktree-recipe (git plumbing that must stay binary-safe, atomic and away from the person's index, with a
+# real-git check script; owns several files as one slice, so its lint warning is expected).
+
+key: improve-p24-worktree-modules-1
+name: Node worktree recipe (not wired)
+goal: >
+  hooks/engine/isolation.ts decides which nodes would be isolated, names their worktrees and decides per changed file how
+  a node's change merges back; hooks/engine/worktree.ts snapshots the main working tree (uncommitted and untracked files
+  included, the person's index untouched) into a detached worktree under .claude/worktrees/, computes a node's tree, and
+  merges it back with git merge-file only when every changed file merges cleanly, through an injected run function shaped
+  like $.process.run; scripts/worktree-check.ts proves the recipe against real git and scripts/ci.sh runs it; nothing in
+  hooks/register.ts calls the new code yet; claude plugin test, tsc and claude plugin validate pass; the change is
+  committed after both reviews pass (not pushed).
+review:
+  request: |
+    p24 진행
+    Plan step p24 (node worktree isolation, modules only), approach B as chosen by the step-0 spike (eval/baselines/worktree-spike-2.1.308.md). hooks/engine/isolation.ts (pure): which nodes isolate under a mode off, writes or all; the worktree folder name for a run, node and attempt under .claude/worktrees/; the per-file merge decision from the base, current and node versions (none, take, delete, merge, conflict); the merge-conflict error text. hooks/engine/worktree.ts: with an injected run(argv, { cwd, env, stdin }) returning { exitCode, stdout, stderr, isStdoutTruncated }, it snapshots the main working tree through a temporary index file (never the person's index), creates a detached worktree from the snapshot and links dependency folders into it, computes the node's tree, applies the node's change to the main tree with git merge-file per file and writes nothing unless every file is clean, removes a worktree, and lists the plugin's worktrees. No file content passes through stdout. scripts/worktree-check.ts runs the recipe against real git in a temporary repository and prints `worktree check: all passed` as its last line only when every scenario holds; scripts/ci.sh runs it.
+    Out of scope: hooks/register.ts gains no call to the new code; plugin.json gains no node_isolation key; README.md and docs/reference.md stay unchanged; nothing is pushed.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - tests/AGENTS.md
+commit:
+  - message: |
+      feat(isolation): add the node worktree recipe, not wired into runs yet
+
+      hooks/engine/isolation.ts decides which nodes would run in their own worktree, names
+      the worktree and decides per file how a node's change merges back. hooks/engine/
+      worktree.ts snapshots the main working tree through a temporary index (uncommitted and
+      untracked files included, the person's index untouched) into a detached worktree under
+      .claude/worktrees/, and merges the node's change back with git merge-file only when
+      every changed file is clean. It runs git through an injected function shaped like
+      $.process.run; scripts/worktree-check.ts runs the same code against real git, and CI
+      runs that check. The run does not use any of it yet.
+    paths:
+      - hooks/engine/isolation.ts
+      - hooks/engine/worktree.ts
+      - hooks/engine/rework.ts
+      - tests
+      - scripts
+      - flows/improvement/p24-worktree-modules.yaml
+nodes:
+  - id: isolation-decisions
+    label: Pure decisions for node isolation
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/isolation.ts
+      - hooks/engine/rework.ts
+      - tests/isolation.test.ts
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: file
+        path: hooks/engine/isolation.ts
+        contains: "export function fileAction("
+      - kind: file
+        path: tests/isolation.test.ts
+        contains: "fileAction"
+    prompt: |
+      TASK: Write hooks/engine/isolation.ts, the pure decisions for running DAG nodes in their own git worktrees, with tests.
+
+      CONTEXT:
+      - This repo is a Claude Code plugin (TypeScript run by the host, no npm dependencies, imports carry `.ts`). hooks/engine/ holds pure functions: never import or call `$`, never read a clock (AGENTS.md, hooks/engine/AGENTS.md). Style: no semicolons, single quotes, 2-space indent; comments give the why.
+      - Node definitions: `NodeDef` in hooks/engine/types.ts (`id`, `label`, `task_summary`, `writes?: string[]`, `external?: boolean`, ...).
+      - hooks/engine/rework.ts has a private `externalWord(def)` that finds words such as push, deploy, commit or merge in a node's id, label or summary. Export it unchanged (add `export` and nothing else) so isolation.ts can reuse it.
+      - Later runs wire this in: the plugin will snapshot the main working tree, run an isolated node in a detached worktree at `.claude/worktrees/<name>`, and merge the node's change back file by file. Measured on Claude Code 2.1.308: worktrees inside the project under .claude/worktrees/ raise no permission prompts; outside the project they do.
+
+      REQUIRED exports of hooks/engine/isolation.ts:
+      1. `export type NodeIsolation = 'off' | 'writes' | 'all'` and `export function parseNodeIsolation(value: unknown): NodeIsolation` ('off' for anything but 'writes' or 'all').
+      2. `export function isolatedNode(def: NodeDef, mode: NodeIsolation): boolean`. off: false. writes: true only when `def.writes` has at least one entry. all: true unless `def.writes` is an empty array. In every mode false when `def.external` is true or `externalWord(def)` finds a word.
+      3. `export const WORKTREES_DIR = '.claude/worktrees'`, `export const WORKTREE_PREFIX = 'dag-'` and `export function worktreeName(runId: string, nodeId: string, attempt: number): string` returning `dag-<runId>-<nodeId>-<attempt>` with every character outside [A-Za-z0-9._-] replaced by '-', at most 100 characters, and `export function isNodeWorktree(name: string): boolean` (starts with the prefix).
+      4. `export const LINKED_DEFAULT = ['node_modules', '.venv']`: dependency folders the recipe links into a worktree instead of copying.
+      5. `export type FileAction = 'none' | 'take' | 'delete' | 'merge' | 'conflict'` and `export function fileAction(v: { base?: string; current?: string; node?: string }): FileAction`, where each value is a blob or content hash and undefined means the file is absent in that version (base = the snapshot the node started from, current = the main tree now, node = the node's result). Rules in order: node equals base -> none; current equals node -> none; current equals base -> delete when node is undefined, else take; base undefined (added by the node) -> conflict; node undefined (deleted by the node) -> conflict; current undefined (deleted in the main tree meanwhile) -> conflict; otherwise -> merge.
+      6. `export function mergeConflictError(paths: readonly string[]): string` returning `merge-conflict: ` followed by up to 10 paths joined with ', ' and ` and <n> more` when there are more.
+
+      Tests in tests/isolation.test.ts (import `{ expect, test } from 'claude-code/testing'`, as tests/usage.test.ts does): every fileAction rule, including the order (for example base undefined but current equals node gives none); isolatedNode for each mode with writes undefined, [] and ['src'], external true, and an id such as `deploy-site`; worktreeName sanitizing a slash and a space and capping length; parseNodeIsolation for 'writes', 'all', 'off', 'x' and 3.
+
+      SCOPE: write hooks/engine/isolation.ts and tests/isolation.test.ts; in hooks/engine/rework.ts only add `export` to `externalWord`. Do not touch hooks/register.ts, .claude-plugin/plugin.json or any doc. Do not commit, push, install or reload.
+
+      VERIFY: `command claude plugin test .` passes in full and `bunx -p typescript@5 tsc -p . --noEmit` prints nothing (the runtime reruns both).
+
+      STOP WHEN: the tests pass and both checks pass.
+
+      In ## Output give every export with its exact signature and the decision table as implemented; the next node imports them.
+
+  - id: worktree-recipe
+    label: Git recipe for node worktrees, with a real-git check
+    category: hard
+    dependsOn:
+      - isolation-decisions
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/worktree.ts
+      - tests/worktree.test.ts
+      - scripts/worktree-check.ts
+      - scripts/ci.sh
+    verify:
+      - kind: command
+        argv: [bun, scripts/worktree-check.ts]
+        timeoutMs: 120000
+        expect:
+          stdout:
+            lastLine: "worktree check: all passed"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 240000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: scripts/ci.sh
+        contains: "scripts/worktree-check.ts"
+      - kind: file
+        path: hooks/register.ts
+        absent: "engine/worktree.ts"
+    prompt: |
+      TASK: Write hooks/engine/worktree.ts, the git recipe that gives a DAG node its own snapshot worktree and merges its change back, with unit tests and a real-git check script.
+
+      CONTEXT:
+      - The previous node wrote hooks/engine/isolation.ts; its Output (pasted below) lists `fileAction`, `mergeConflictError`, `worktreeName`, `WORKTREES_DIR`, `WORKTREE_PREFIX`, `isNodeWorktree` and `LINKED_DEFAULT`. Import them; do not change that file.
+      - hooks/engine/ never imports or calls `$` and never reads a clock (AGENTS.md). So every git or file command goes through an injected function: `export type GitRun = (argv: readonly string[], init: { cwd: string; env?: Record<string, string>; stdin?: string }) => Promise<{ exitCode: number; stdout: string; stderr: string; isStdoutTruncated?: boolean }>`. It matches the host's `$.process.run(argv, { cwd, env, stdin, timeoutMs })`, which returns `{ exitCode, stdout, stderr, isStdoutTruncated, isStderrTruncated }` (.claude-plugin/types/claude-code/index.d.ts). A later run builds the real one in hooks/register.ts.
+      - Facts measured on 2026-10-23 with git on macOS (eval/baselines/worktree-spike-2.1.308.md; read it):
+        a. Snapshot recipe that keeps the person's index untouched: with env `GIT_INDEX_FILE=<temp index>`: `git read-tree HEAD`, `git add -A`, then `git rm --cached -r -q --ignore-unmatch -- .claude/worktrees <linked folders>`, `git write-tree`, then `git -c user.name=dag-workflow -c user.email=dag-workflow@localhost commit-tree <tree> -p HEAD -m "dag snapshot"`. The `-c` identity keeps it working where no git identity is set.
+        b. `git add -A -- . ':(exclude)node_modules'` FAILS ("paths are ignored by one of your .gitignore files") when the excluded folder is ignored; never use exclude pathspecs, remove from the temp index instead.
+        c. A symlink named node_modules is not ignored by the pattern `node_modules/`; drop linked folders from the node's tree by name.
+        d. `git worktree add --detach <path> <commit>` and `git worktree remove --force <path>` cost 38 and 18 ms in this repo.
+        e. Plain `git apply` refuses sibling edits two lines apart and `git apply --3way` needs the index to match the working tree; `git merge-file` merges edits separated by one unchanged line and reports adjacent or same-line edits as conflicts (exit code = number of conflicts).
+        f. `$.process.run` output can be truncated (`isStdoutTruncated`), so file content must never travel through stdout: copy files with `cp`, materialize a blob with `git unpack-file <blob>` (writes `.merge_file_XXXXXX` in the cwd and prints its name) or an equivalent that writes a file, and merge in place with `git merge-file <current-copy> <base-file> <node-file>`.
+
+      REQUIRED exports of hooks/engine/worktree.ts (async functions taking `run: GitRun` first; names may differ if you keep these roles, and report them):
+      1. `snapshot(run, root, linked)` -> `{ commit, tree }` of the main working tree at `root`: tracked, modified and untracked files, without .claude/worktrees or the linked folders. The temp index file lives under the repository's git dir (`git rev-parse --git-path ...`) and is removed afterwards. The person's index (`git ls-files -s` and `git diff --cached`) is unchanged.
+      2. `createWorktree(run, root, name, commit, linked)` -> the absolute path `<root>/.claude/worktrees/<name>`: a detached worktree at `commit`, with each linked folder that exists in `root` symlinked into it.
+      3. `nodeTree(run, worktree, linked)` -> the tree of the worktree's current files made the same way (temp index under the worktree's git path), linked folders dropped.
+      4. `applyNode(run, root, worktree, baseTree, nodeTree)` -> `{ applied: string[] }` or `{ conflicts: string[] }`. List changed paths with `git diff --name-only --no-renames -z <baseTree> <nodeTree>`. For each path get the base and node blob ids (`git rev-parse <tree>:<path>`, absent when it fails) and the current file's id (`git hash-object <root>/<path>` when the file exists). Decide with `fileAction`. For merge: a binary file (detect with `git diff --numstat`, which prints `-` for binary) is a conflict; otherwise merge a copy of the current file with the base blob and the node file using git merge-file in a temp folder under the git dir. FIRST decide every file (merged copies ready), and only when no file conflicts write them all: copy taken and merged files into `root` with `cp`, delete with `rm -f`, creating parent folders for new files. On any conflict write nothing to `root`. Clean the temp folder in both cases.
+      5. `removeWorktree(run, root, path)` (`git worktree remove --force`, then `git worktree prune`) and `listWorktrees(run, root)` -> absolute paths from `git worktree list --porcelain` whose folder name passes `isNodeWorktree`.
+      6. A failed git command (exitCode not 0, or truncated stdout where the code parses stdout) throws an Error naming the command and the first stderr line.
+
+      TESTS:
+      - tests/worktree.test.ts (`claude-code/testing`, a fake `GitRun` that records argv and answers from a table): the snapshot passes GIT_INDEX_FILE on every index command and never runs a git command without it that would write the real index; applyNode writes nothing when one of two files conflicts; a truncated stdout throws.
+      - scripts/worktree-check.ts, run with `bun scripts/worktree-check.ts` (Bun is available; use `Bun.spawn`/`Bun.spawnSync` or node:child_process for the real GitRun, `os.tmpdir()` for a fresh repo with `-c` identity, and remove it at the end). It imports hooks/engine/worktree.ts and checks, printing one `PASS <scenario>` or `FAIL <scenario>: <why>` line each: (1) the snapshot holds a modified tracked file and an untracked file, and the index is unchanged; (2) two sibling worktrees from one snapshot edit lines 10 and 12 of one 300-line file and both apply; (3) a sibling editing the same line as an applied one gets conflicts naming the file, and a second clean file in that same node is NOT written; (4) a node that adds one file and deletes another applies both; (5) a binary file changed only by the node is taken byte for byte; (6) a node_modules folder (gitignored) is linked into the worktree, is absent from the node tree, and the snapshot does not fail; (7) a leftover nested worktree under .claude/worktrees/ is not in the snapshot; (8) removeWorktree leaves `git worktree list` without it. The last line is `worktree check: all passed` only when every scenario passed; otherwise exit 1.
+      - scripts/ci.sh: add a step `worktree check` running `bun scripts/worktree-check.ts` after the flow definitions step, in the same style as the other steps.
+
+      SCOPE: write hooks/engine/worktree.ts, tests/worktree.test.ts, scripts/worktree-check.ts and the one step in scripts/ci.sh. Do not touch hooks/register.ts, hooks/engine/isolation.ts, .claude-plugin/plugin.json or any doc. Do not commit, push, install or reload.
+
+      VERIFY: `bun scripts/worktree-check.ts` ends with `worktree check: all passed`, `command claude plugin test .` passes, tsc prints nothing, `command claude plugin validate .` passes (the runtime reruns all four).
+
+      STOP WHEN: every check passes.
+
+      In ## Output give: each export with its signature, the git commands each one runs, the PASS lines of the check script, the last line of the test run, and any git behaviour you found that differs from the facts above.

@@ -135,6 +135,20 @@ test('a Write that adds a hard-coded secret is refused before it lands, and the 
   expect(h.processes.some(run => run.argv.join(' ') === `rm -rf ${SCRATCH}`)).toBe(true)
 })
 
+test('a session working in a worktree under .claude/ still scans its edits, by the path inside the worktree', { plugins: [SEMGREP] }, async ($, on) => {
+  const h = harness(on)
+  h.control.root = '/work/.claude/worktrees/x'
+  await boot($, 'off')
+  const reply = await $.tool.call({ tool: 'Write', file_path: '/work/.claude/worktrees/x/src/config.py', content: `import os\nDB_PASSWORD = "${SECRET}"\n` })
+  expect(reply.deny).toContain('src/config.py:2 kisa 2-6 하드코드된 중요정보 [kisa-2-6-hardcoded-secret]')
+  expect(scans(h)).toEqual([{ cwd: SCRATCH, targets: ['src/config.py'] }])
+  // A file of the folder the session started in is still scanned; that folder's own .claude/ stays out.
+  const main = await $.tool.call({ tool: 'Write', file_path: '/work/src/settings.py', content: `DB_PASSWORD = "${SECRET}"\n` })
+  expect(main.deny).toContain('src/settings.py:1 kisa 2-6')
+  const own = await $.tool.call({ tool: 'Write', file_path: '/work/.claude/notes/config.py', content: `DB_PASSWORD = "${SECRET}"\n` })
+  expect(own.deny).toBeUndefined()
+})
+
 test('an Edit whose new line matches a warning rule lands and gets the hit back; an old hit in the file is not repeated', { plugins: [SEMGREP] }, async ($, on) => {
   const h = harness(on)
   await boot($, 'off')

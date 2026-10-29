@@ -88,10 +88,17 @@ const SHELL_CLOSERS: ReadonlySet<string> = new Set(['done', 'fi'])
 // `command NAME ...` only skips aliases and functions (AGENTS.md tells everyone to type `command claude`), so it is
 // skipped like a leader and NAME is still checked. `command -v`/`-p` stay put as the head, which is not on the list.
 const COMMAND_BUILTIN = 'command'
+// A `NAME=value` word before a command is skipped only for variables that change how output looks. Any other one
+// can change what runs (LD_PRELOAD, PATH, GIT_PAGER), and a bare `PATH=./bin;` still holds for the next segment.
+// Lowercase names are refused too: in zsh `path=(/x $path)` changes PATH, `functions[ls]=x` redefines ls and
+// `precmd_functions` runs code, and `a=-delete; find . $a` carries a flag past the checks below.
+const DISPLAY_ENV = /^(?:LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|CLICOLOR|COLUMNS|TERM|LC_[A-Za-z0-9_]*)=/
+// `NAME+=value` and `NAME[i]=value` assign too; left alone, a head like `PATH+=:/x/ls` would be read as the command `ls`.
+const ENV_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]=]*\])?\+?=/
 
 function isLeaderToken(tokens: readonly string[]): boolean {
   const [first = ''] = tokens
-  if (SHELL_LEADERS.has(first) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return true
+  if (SHELL_LEADERS.has(first) || DISPLAY_ENV.test(first)) return true
   return first === COMMAND_BUILTIN && !(tokens[1] ?? '').startsWith('-')
 }
 const VERSION_FLAGS: ReadonlySet<string> = new Set(['--version', '-V', '--help', '-h'])
@@ -230,19 +237,93 @@ function splitSegments(command: string): string[] {
   return segments.map(s => s.trim()).filter(Boolean)
 }
 
+// Global options that only pick the repository or the pager. Every other one can make git run a program (-c and
+// --config-env set core.pager and friends, --exec-path swaps git's helpers, --paginate starts the pager).
+const GIT_GLOBAL_WITH_VALUE: ReadonlySet<string> = new Set(['-C', '--git-dir', '--work-tree'])
+const GIT_GLOBAL_PLAIN: ReadonlySet<string> = new Set([
+  '--no-pager', '-P', '--no-optional-locks', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs',
+])
+const GIT_GLOBAL_INLINE = /^--(?:git-dir|work-tree)=/
+
+function optionName(arg: string): string {
+  const eq = arg.indexOf('=')
+  return eq < 0 ? arg : arg.slice(0, eq)
+}
+
+// getopt_long parsers take any unambiguous prefix of a long option (`sort --out=f` writes f, `file --comp` compiles),
+// so a prefix of a named option counts as that option. A bare `--` ends the options and is not one.
+function hasLongOption(args: readonly string[], ...names: string[]): boolean {
+  return args.some(arg => {
+    const given = optionName(arg)
+    return given.length > 2 && given.startsWith('--') && names.some(name => `--${name}`.startsWith(given))
+  })
+}
+
+// A short flag hides in a cluster (`sort -uo f`, `file -bC`) and may carry its value inline (`sort -ofile`), so every
+// letter after a single dash counts. A value that happens to contain the letter (`sort -to`) is refused too; spacing it avoids that.
+function hasShortFlag(args: readonly string[], letters: string): boolean {
+  return args.some(arg => /^-[^-]/.test(arg) && [...arg.slice(1)].some(letter => letters.includes(letter)))
+}
+
+// `uniq [OPTION]... [INPUT [OUTPUT]]`: the second operand is a file uniq writes. -f, -s and -w take the next word as their value.
+function uniqOperands(args: readonly string[]): number {
+  let operands = 0
+  const rest = args.values()
+  for (const arg of rest) {
+    if (arg === '--') {
+      operands += [...rest].length
+      break
+    }
+    if (arg === '-' || !arg.startsWith('-')) operands++
+    else if (/^-[A-Za-z]*[fsw]$|^--(?:skip-fields|skip-chars|check-chars)$/.test(arg)) rest.next()
+  }
+  return operands
+}
+
 function gitVerdict(args: string[]): string | undefined {
   let i = 0
-  while (args[i]?.startsWith('-')) {
-    const flag = args[i]
-    i += flag === '-C' || flag === '-c' || flag === '--git-dir' || flag === '--work-tree' ? 2 : 1
+  let flag = args[i]
+  while (flag?.startsWith('-')) {
+    if (GIT_GLOBAL_WITH_VALUE.has(flag)) i += 2
+    else if (GIT_GLOBAL_PLAIN.has(flag) || GIT_GLOBAL_INLINE.test(flag)) i += 1
+    else return `git global option ${optionName(flag)} is not on the read-only list`
+    flag = args[i]
   }
   const sub = args[i]
   if (!sub || !GIT_READ_ONLY.has(sub)) return `git ${sub ?? ''} is not a read-only git command`.trim()
   const rest = args.slice(i + 1)
+  if (hasLongOption(rest, 'output')) return 'git --output writes a file'
+  if (hasLongOption(rest, 'ext-diff')) return 'git --ext-diff can run a program'
+  if (sub === 'grep' && (hasShortFlag(rest, 'O') || hasLongOption(rest, 'open-files-in-pager'))) return 'git grep -O can run a program'
   if (sub === 'branch' && rest.some(a => !a.startsWith('-') || GIT_BRANCH_WRITERS.test(a))) return 'git branch with a name or a write flag changes branches'
   if (sub === 'tag' && rest.some(a => a !== '-l' && a !== '--list' && !a.startsWith('--sort') && !a.startsWith('-n'))) return 'git tag with arguments creates or deletes tags'
   if (sub === 'remote' && rest.some(a => a !== '-v' && a !== '--verbose' && a !== 'show' && a !== 'get-url')) return 'git remote with arguments changes remotes'
   return undefined
+}
+
+// Flags of the listed commands that write a file or run a program, so the command name alone does not make a call read-only.
+function flagProblem(name: string, args: string[]): string | undefined {
+  switch (name) {
+    case 'find':
+      return args.some(a => FIND_WRITERS.has(a)) ? 'find with -exec/-delete can change files' : undefined
+    case 'fd':
+      return hasShortFlag(args, 'xX') || hasLongOption(args, 'exec', 'exec-batch') ? 'fd with -x/-X/--exec can run programs' : undefined
+    case 'rg':
+      return hasLongOption(args, 'pre', 'hostname-bin') ? 'rg --pre/--hostname-bin can run a program' : undefined
+    case 'tree':
+      return hasShortFlag(args, 'oR') ? 'tree -o/-R writes files' : undefined
+    case 'file':
+      return hasShortFlag(args, 'C') || hasLongOption(args, 'compile') ? 'file -C writes a magic.mgc file' : undefined
+    case 'sort':
+      if (hasShortFlag(args, 'o') || hasLongOption(args, 'output')) return 'sort -o writes a file'
+      return hasLongOption(args, 'compress-program') ? 'sort --compress-program can run a program' : undefined
+    case 'uniq':
+      return uniqOperands(args) >= 2 ? 'uniq with an output file writes it' : undefined
+    case 'date':
+      return args.some(a => a === '-s' || a.startsWith('--set')) ? 'date -s changes the clock' : undefined
+    default:
+      return undefined
+  }
 }
 
 export function readOnlyBashProblem(command: string): string | undefined {
@@ -256,6 +337,8 @@ export function readOnlyBashProblem(command: string): string | undefined {
     while (tokens.length > 0 && isLeaderToken(tokens)) tokens.shift()
     const head = tokens[0]
     if (!head) continue
+    const assigned = ENV_ASSIGNMENT.exec(head)?.[1]
+    if (assigned) return `${assigned}= is refused here: a shell variable can change what runs (PATH, LD_PRELOAD, GIT_*, and in zsh also path or functions) or carry a flag past these checks; write the value into the command instead`
     if (SHELL_CLOSERS.has(head) && tokens.length === 1) continue
     if (head === 'for') {
       if (tokens.length >= 3 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[1] as string) && tokens[2] === 'in') continue
@@ -279,9 +362,8 @@ export function readOnlyBashProblem(command: string): string | undefined {
       continue
     }
     if (!READ_ONLY_COMMANDS.has(name)) return `${name} is not on the read-only command list`
-    if (name === 'find' && args.some(a => FIND_WRITERS.has(a))) return 'find with -exec/-delete can change files'
-    if (name === 'sort' && args.some(a => a === '-o' || a.startsWith('--output'))) return 'sort -o writes a file'
-    if (name === 'date' && args.some(a => a === '-s' || a.startsWith('--set'))) return 'date -s changes the clock'
+    const problem = flagProblem(name, args)
+    if (problem) return problem
   }
   return undefined
 }
@@ -303,17 +385,15 @@ const DISAGREEMENT_TEXT_LIMIT = 80
 
 // Observation only: where the host's `isReadOnly` (the tool's own word) and the plugin's read-only judgment of a main-conversation call differ.
 // Covers Bash and tools outside the main-loop list; returns the debug text, or undefined when they agree or the plugin makes no read-only judgment.
+// A Bash call the plugin holds read-only and the host does not gives no line: register.ts recordHostReadOnlyGap already
+// records that case as a decision of kind readonly.
 export function readOnlyDisagreement(tool: string, input: Readonly<Record<string, unknown>>, hostReadOnly: boolean, extraAllowed: ReadonlySet<string>): string | undefined {
   let plugin: string
   if (tool === 'Bash') {
+    if (!hostReadOnly) return undefined
     const problem = readOnlyBashProblem(typeof input.command === 'string' ? input.command : '')
-    if (problem === undefined) {
-      if (hostReadOnly) return undefined
-      plugin = 'read-only'
-    } else {
-      if (!hostReadOnly) return undefined
-      plugin = `refused: ${problem.slice(0, DISAGREEMENT_TEXT_LIMIT)}`
-    }
+    if (problem === undefined) return undefined
+    plugin = `refused: ${problem.slice(0, DISAGREEMENT_TEXT_LIMIT)}`
   } else {
     if (MAIN_LOOP_TOOLS.has(tool) || extraAllowed.has(tool) || !hostReadOnly) return undefined
     const verdict = mainLoopVerdict(tool, input, extraAllowed)

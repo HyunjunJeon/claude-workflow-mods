@@ -30,7 +30,7 @@ const WITHOUT_HINT = [
   '    c broke',
   '',
   'TREAT EVERY NODE COMPLETION CLAIM AS FALSE UNTIL YOU PROVE IT: check the real files, test output or command results each node was responsible for before you report success.',
-  'Call dag with {"action":"snapshot","run_id":"dag_unit"} for every node\'s output; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.',
+  'Each node\'s full report above holds its whole output; the excerpts here are cut where they say so. Call dag with {"action":"snapshot","run_id":"dag_unit"} for the current states; use "retry" or "amend" to recover failed or wrong nodes, or start a follow-up run.',
 ].join('\n')
 
 test('a settle message without approval tools reads exactly as before, with an empty map or nodes missing from it', () => {
@@ -105,4 +105,79 @@ test('the board lines come after the node results, whose approval hints stay', (
   expect(message).toContain(HINT('Write'))
   expect(message).toContain('the user wants the answer on a board')
   expect(message.indexOf('the user wants the answer on a board')).toBeLessThan(message.indexOf('TREAT EVERY NODE COMPLETION CLAIM AS FALSE'))
+})
+
+// Node a's Output holds two rulings after 4,800 characters, one of them as a bold bullet: past both the 1,200-character excerpt
+// and the 4,000 characters an upstream prompt carries.
+function ruled(answerA: string): Run {
+  const parsed = parseDefinition({ key: 'ruled', name: 'Ruled', nodes: [{ id: 'a', prompt: 'A' }, { id: 'b', prompt: 'B' }] })
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  let run = createRun(parsed.value, { runId: 'dag_ruled', sessionId: 's', now: 1 })
+  for (const id of ['a', 'b']) run = markRunning(run, id, `agent-${id}`, 2)
+  run = markFinished(run, 'a', { state: 'completed', answer: answerA }, 3)
+  return markFinished(run, 'b', { state: 'completed', answer: '## Output\nwrote b\nRuling: no cache - the spec names none - slower repeat runs\nDAG_NODE_STATUS: completed' }, 3)
+}
+
+const RULED_A = [
+  '## Output',
+  `wrote a\n${'filler line\n'.repeat(400)}`,
+  'Ruling: kept parse() as it is - two other nodes call it - a caller would break',
+  '- **Ruling:** UTF-8 only - the request names no encoding - Latin-1 files fail to load',
+  'Rulings are listed above.',
+  'DAG_NODE_STATUS: completed',
+].join('\n')
+
+test('the rulings of every node are listed after the node results, even past the stored output', () => {
+  expect((ruled(RULED_A).nodes[0]?.output ?? '').includes('Ruling:')).toBe(false)
+  const lines = settleMessage(ruled(RULED_A), 'dag').split('\n')
+  const start = lines.indexOf('Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:')
+  expect(start > lines.findIndex(line => line.startsWith('- b:'))).toBe(true)
+  expect(lines.slice(start + 1, start + 4)).toEqual([
+    '- a: kept parse() as it is - two other nodes call it - a caller would break',
+    '- a: UTF-8 only - the request names no encoding - Latin-1 files fail to load',
+    '- b: no cache - the spec names none - slower repeat runs',
+  ])
+  expect(lines[start + 4]).toBe('')
+})
+
+test('a long list of rulings is capped and says how many were left out', () => {
+  const many = ['## Output', ...Array.from({ length: 25 }, (_, index) => `Ruling: choice ${index} - why - cost`)].join('\n')
+  const message = settleMessage(ruled(many), 'dag')
+  expect(message).toContain('- a: choice 19 - why - cost')
+  expect(message).not.toContain('- a: choice 20 - why - cost')
+  expect(message).toContain('(6 more rulings are in the node reports.)')
+})
+
+test('the rulings block stops at its character budget', () => {
+  const twelve = ['## Output', ...Array.from({ length: 12 }, (_, index) => `Ruling: ${String(index).padStart(2, '0')}${'x'.repeat(293)}`)].join('\n')
+  const lines = settleMessage(ruled(twelve), 'dag').split('\n')
+  const block = lines.slice(lines.indexOf('Decisions the nodes made on their own (Ruling lines). Pass them on to the person in your report:') + 1)
+  const shown = block.filter(line => line.startsWith('- a: '))
+  expect(shown.length).toBe(10)
+  expect(shown.every(line => line.length === 300)).toBe(true)
+  expect(lines).toContain('(3 more rulings are in the node reports.)')
+})
+
+test('when the stored answer lost its Output heading to the length cut, no ruling comes from the reasoning before it', () => {
+  // About 29,600 characters: the stored answer keeps the first 8,000 and the last 12,000, and the heading sits near 9,550.
+  // Known gap (run.ts fullOutput): a ruling at the end of an Output over 12,000 characters is not found either.
+  const answer = `Ruling: <decision> - <why> - <cost if wrong> is the template\n${'n'.repeat(9_500)}\n## Output\nwrote a\n${'o'.repeat(20_000)}\nRuling: real one - x - y\nDAG_NODE_STATUS: completed`
+  const run = ruled(answer)
+  expect(run.nodes[0]?.answer?.includes('## Output')).toBe(false)
+  expect(settleMessage(run, 'dag')).not.toContain('is the template')
+})
+
+test('a report without an Output heading keeps its rulings past 4,000 characters', () => {
+  const message = settleMessage(ruled(`did stuff\n${'w'.repeat(6_000)}\nRuling: chose Y - the spec is silent - Z breaks\nDAG_NODE_STATUS: completed`), 'dag')
+  expect(message).toContain('- a: chose Y - the spec is silent - Z breaks')
+})
+
+test('a cut report without an Output heading keeps the rulings at its start', () => {
+  const message = settleMessage(ruled(`Ruling: early real ruling - x - y\n${'w'.repeat(30_000)}\nDAG_NODE_STATUS: completed`), 'dag')
+  expect(message).toContain('- a: early real ruling - x - y')
+})
+
+test('a quoted cut marker in a short report does not hide the rulings before it', () => {
+  const message = settleMessage(ruled('Ruling: chose X - y - z\nquoted status:\n… (512 characters omitted)\nmore\nDAG_NODE_STATUS: completed'), 'dag')
+  expect(message).toContain('- a: chose X - y - z')
 })

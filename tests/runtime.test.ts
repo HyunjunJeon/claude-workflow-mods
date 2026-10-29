@@ -53,6 +53,15 @@ function harness(on: any, seed: Record<string, string> = {}, now = 1_000, agents
   on('process.run', ($: any, e: any) => {
     ran.push(e.argv)
     if (e.argv[0] === 'sleep') return { deny: 'sleep is not available in tests' }
+    // persist swaps a checkpoint in with `mv -f <temp> <path>` and removes a failed temp file with `rm -f`.
+    if (e.argv[0] === 'mv') {
+      const text = files.get(e.argv.at(-2))
+      if (text !== undefined) {
+        files.set(e.argv.at(-1), text)
+        files.delete(e.argv.at(-2))
+      }
+    }
+    if (e.argv[0] === 'rm') files.delete(e.argv.at(-1))
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('fs.list', ($: any, e: any) => {
@@ -193,9 +202,9 @@ test('a fan-in DAG runs in waves, checkpoints every change and announces when it
   expect(checkpoint(h, runId)).toMatchObject({ status: 'completed', settledNotified: true })
 })
 
-test('a surface without the DAG pane gets text progress instead of ui.open', async ($, on) => {
+test('a mobile session, which draws no DAG pane, gets text progress instead of ui.open', async ($, on) => {
   const h = harness(on)
-  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.session.start({ surface: 'mobile', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
 
   const started = await callDag($, { action: 'start', definition: FAN_IN })
@@ -208,6 +217,22 @@ test('a surface without the DAG pane gets text progress instead of ui.open', asy
   await callDag($, { action: 'wait', run_id: started.value.run_id })
   expect(h.opened.length).toBe(0)
   expect(h.submitted.at(-1)).toContain('settled: completed')
+})
+
+test('a vscode session gets the DAG pane, so a finished node sends no text progress', async ($, on) => {
+  const h = harness(on)
+  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
+
+  const started = await callDag($, { action: 'start', definition: FAN_IN })
+  expect(h.opened[0]).toMatchObject({ id: 'dag', title: 'DAG' })
+  await finishAgent($, h, 'agent-1', 'wrote a.txt\nDAG_NODE_STATUS: completed')
+  expect(h.submitted.length).toBe(0)
+  await finishAgent($, h, 'agent-2', 'wrote b.txt')
+  await finishAgent($, h, 'agent-3', 'merged\nDAG_NODE_STATUS: completed')
+  await callDag($, { action: 'wait', run_id: started.value.run_id })
+  expect(h.submitted.length).toBe(1)
+  expect(h.submitted[0]).toContain('settled: completed')
 })
 
 test('a failed node skips its dependents, settles as failed, and retry runs it again', async ($, on) => {
@@ -390,6 +415,8 @@ test('a node hand-back reaches the main session as a short note and still decide
   expect(h.delivered[0]).toContain(`Node "a" of DAG run "chain" (${runId}) finished; 1/2 nodes have finished.`)
   expect(h.delivered[0]).toContain('input.csv was missing')
   expect(h.delivered[0]).not.toContain('a very long report body')
+  // The note says where the whole report is: the main session gets only this excerpt.
+  expect(h.delivered[0]).toContain(`keeps its full report at ${RUNS}/${runId}/a.md`)
 
   await finishAgent($, h, 'agent-1', '')
   const snap = (await callDag($, { action: 'snapshot', run_id: runId })).value
@@ -673,7 +700,7 @@ test('the DAG pane opens with a run, draws its layers, and remembers folded node
   expect(h.opened[0]).toMatchObject({ id: 'dag', title: 'DAG' })
   expect(h.opened[0]?.focus).toBe(undefined)
 
-  for (const surface of ['terminal', 'desktop'] as const) {
+  for (const surface of ['terminal', 'desktop', 'vscode'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
     expect(await ui.find({ type: 'Text', text: 'Fan in' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '  a → c' })).toBeDefined()

@@ -126,9 +126,9 @@
     "jev_permission_scope": {
       "type": "string",
       "title": "Jev permission scope",
-      "description": "all: Jev resolves every uncertain tool permission; dag: limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged",
-      "options": ["all", "dag"],
-      "default": "all"
+      "description": "dag (default): limits Jev permission decisions to tool calls made by DAG node workers, leaving the main conversation's prompts unchanged; all: Jev resolves every uncertain tool permission, including the main conversation's, and sends the tool input to Jev; off: Jev decides no permission, every ask stays with the host's dialog and no tool input is sent to Jev. In every scope an ask from a node marked external: true goes to the person and never to Jev",
+      "options": ["off", "dag", "all"],
+      "default": "dag"
     },
     "enforcement": {
       "type": "string",
@@ -143,6 +143,13 @@
       "description": "always: a run the model starts in an interactive session waits until you approve it in the /dag pane or with /dag approve; off: runs start at once",
       "options": ["off", "always"],
       "default": "off"
+    },
+    "settle_notify": {
+      "type": "string",
+      "title": "Notify when a run settles",
+      "description": "Raise one native notification when a run of this session finishes completed or failed (never for a cancelled run). long: only runs that took at least 120 s from start to settle; always: every settled run; off: none",
+      "options": ["off", "long", "always"],
+      "default": "long"
     },
     "anti_slop_scan": {
       "type": "boolean",
@@ -159,8 +166,24 @@
     "trajectory_log": {
       "type": "boolean",
       "title": "Trajectory log",
-      "description": "Record every run's trajectory under .claude/dag/trajectories/ for comparing runs: each node attempt's exact prompt, model, answer, verification, reviewer notes, change against HEAD, token counts and tool-call transcript, each review-fix round's findings, and the main conversation's turns. Secrets are masked and long text is cut. Each settled run is also joined into <run_id>.jsonl. Not pruned by retention_days",
+      "description": "Record every run's trajectory under .claude/dag/trajectories/ for comparing runs: each node attempt's exact prompt, model, answer, verification, reviewer notes, change against HEAD, token counts and tool-call transcript, each review-fix round's findings, and the main conversation's turns. Secrets are masked and long text is cut. Each settled run is also joined into <run_id>.jsonl. Startup removes old and excess trajectories by trajectory_retention_days and trajectory_max_mb, whether or not the log is on; retention_days does not apply to them",
       "default": false
+    },
+    "trajectory_retention_days": {
+      "type": "number",
+      "title": "Trajectory retention (days)",
+      "description": "At startup, remove the trajectory (folder and joined .jsonl) of a settled run, or of another session's main conversation, whose newest file is older than this many days; the current session and runs that have not settled are kept. 0 keeps everything",
+      "default": 90,
+      "min": 0,
+      "max": 3650
+    },
+    "trajectory_max_mb": {
+      "type": "number",
+      "title": "Trajectory size cap (MB)",
+      "description": "At startup, when .claude/dag/trajectories/ holds more than this many megabytes, remove settled runs' trajectories (and other sessions' main conversations), the one with the oldest newest file first, until it fits or only the current session and unsettled runs are left. A folder of more than 2000 files is skipped. 0 means no cap",
+      "default": 1024,
+      "min": 0,
+      "max": 102400
     },
     "review_ledger": {
       "type": "boolean",
@@ -196,6 +219,14 @@
       "default": 8,
       "min": 1,
       "max": 32
+    },
+    "usage_hold_percent": {
+      "type": "number",
+      "title": "Hold new nodes at usage (%)",
+      "description": "New nodes wait while any account rate-limit window (five_hour, seven_day, spend_limit) is at or above this percent; running nodes continue, and the hold lifts when the window drops below it or resets. A non-interactive session cancels a held run once nothing in it runs. 0 turns the hold off",
+      "default": 90,
+      "min": 0,
+      "max": 100
     },
     "node_messages": {
       "type": "string",

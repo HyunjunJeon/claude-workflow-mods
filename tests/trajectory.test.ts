@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 import { defaultNotesFolder } from '../hooks/engine/stages.ts'
 import { addUsage, cut, eventFileName, rowsAfter, sanitize, TRAJECTORY_EVENT_CHARS, trajectoryLine, transcriptRows, type TrajectoryEvent, type TranscriptRow } from '../hooks/engine/trajectory.ts'
+import { createRun } from '../hooks/engine/run.ts'
 import { boot, finish, harness, ROOT, start } from './control-harness.ts'
 
 // The trajectory log (trajectory_log): the pure line, row and usage helpers, and what a run with a review-fix round and the
@@ -186,4 +187,107 @@ test('with trajectory_log on, each main turn logs the main conversation\'s rows 
     ] }),
     expect.objectContaining({ kind: 'main.turn', turnId: 'main-2', rows: [{ role: 'assistant', text: 'done' }] }),
   ])
+})
+
+// Startup prunes .claude/dag/trajectories by trajectory_retention_days and trajectory_max_mb, whether or not trajectory_log is on.
+
+const DAY = 86_400_000
+const MB = 1024 * 1024
+
+// One entry on disk: an event file in the entry's folder and, when `joined` is given, the joined file beside it, each listed
+// with the size and change time the host would report.
+function seedTrajectory(h: ReturnType<typeof harness>, name: string, mtimeMs: number, sizes: { event?: number; joined?: number } = {}) {
+  const event = `${TRAJECTORIES}/${name}/0000000000001-000001-run.start.jsonl`
+  h.files.set(event, '{}\n')
+  h.fileMeta.set(event, { size: sizes.event ?? 1, mtimeMs })
+  if (sizes.joined === undefined) return
+  const joined = `${TRAJECTORIES}/${name}.jsonl`
+  h.files.set(joined, '{}\n')
+  h.fileMeta.set(joined, { size: sizes.joined, mtimeMs })
+}
+
+// What is left under the trajectories folder, by the name of the folder or file in it.
+function trajectoryNames(h: ReturnType<typeof harness>): string[] {
+  return [...new Set([...h.files.keys()].filter(path => path.startsWith(`${TRAJECTORIES}/`)).map(path => path.slice(TRAJECTORIES.length + 1).split('/')[0] ?? ''))].sort()
+}
+
+test('startup removes a settled run\'s trajectory and its joined file once it is older than 90 days, and keeps a fresh one, the current session\'s, an unsettled run\'s and a folder the plugin did not write', async ($, on) => {
+  const now = 200 * DAY
+  const h = harness(on, { now })
+  seedTrajectory(h, 'dag_old', DAY, { joined: 5 })
+  seedTrajectory(h, 'dag_fresh', now - DAY, { joined: 5 })
+  seedTrajectory(h, 'session-gone', DAY)
+  seedTrajectory(h, 'session-source', DAY)
+  seedTrajectory(h, 'dag_busy', DAY)
+  seedTrajectory(h, 'my notes', DAY)
+  const busy = createRun({ key: 'busy', name: 'busy', nodes: [{ id: 'a', prompt: 'A', dependsOn: [] }] }, { runId: 'dag_busy', sessionId: 'peer', now })
+  h.files.set(`${ROOT}/runs/dag_busy.json`, JSON.stringify(busy))
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_busy', 'dag_fresh', 'dag_fresh.jsonl', 'my notes', 'session-source'])
+  expect(h.logs).toContain('dag-workflow: pruned trajectories dag_old, session-gone')
+})
+
+test('trajectory_retention_days sets the age after which a settled run\'s trajectory goes', { options: { trajectory_retention_days: 5 } }, async ($, on) => {
+  const now = 200 * DAY
+  const h = harness(on, { now })
+  seedTrajectory(h, 'dag_ten', now - 10 * DAY)
+  seedTrajectory(h, 'dag_two', now - 2 * DAY)
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_two'])
+})
+
+test('trajectory_max_mb removes the oldest settled trajectories, joined file included in each one\'s size, until the rest fits', { options: { trajectory_max_mb: 1 } }, async ($, on) => {
+  const now = 200 * DAY
+  const h = harness(on, { now })
+  seedTrajectory(h, 'dag_a', now - 3 * DAY, { event: 100_000, joined: 500_000 })
+  seedTrajectory(h, 'dag_b', now - 2 * DAY, { event: 500_000 })
+  seedTrajectory(h, 'dag_c', now - DAY, { event: 400_000 })
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_b', 'dag_c'])
+})
+
+test('with both trajectory settings at 0 startup removes nothing, however old and large', { options: { trajectory_retention_days: 0, trajectory_max_mb: 0 } }, async ($, on) => {
+  const h = harness(on, { now: 5_000 * DAY })
+  seedTrajectory(h, 'dag_old', DAY, { event: 4_096 * MB, joined: 4_096 * MB })
+  seedTrajectory(h, 'session-gone', DAY, { event: 4_096 * MB })
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_old', 'dag_old.jsonl', 'session-gone'])
+})
+
+test('a fractional trajectory_retention_days is refused and the 90 day default stays', { options: { trajectory_retention_days: 0.5 } }, async ($, on) => {
+  const now = 200 * DAY
+  const h = harness(on, { now })
+  seedTrajectory(h, 'dag_two', now - 2 * DAY)
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_two'])
+})
+
+test('a fractional trajectory_max_mb is refused and the 1024 MB default stays', { options: { trajectory_max_mb: 0.5 } }, async ($, on) => {
+  const now = 200 * DAY
+  const h = harness(on, { now })
+  seedTrajectory(h, 'dag_mid', now - DAY, { event: 600_000 })
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_mid'])
+})
+
+test('by default the trajectories are capped at 1024 MB', async ($, on) => {
+  const now = 200 * DAY
+  const h = harness(on, { now })
+  seedTrajectory(h, 'dag_big', now - 2 * DAY, { event: 2_048 * MB })
+  seedTrajectory(h, 'dag_small', now - DAY, { event: 1_000 * MB })
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_small'])
+})
+
+test('startup skips a trajectory folder of more than 2000 files, logs it and removes the rest', async ($, on) => {
+  const h = harness(on, { now: 200 * DAY })
+  seedTrajectory(h, 'dag_old', DAY)
+  for (let i = 0; i < 2_001; i++) {
+    const path = `${TRAJECTORIES}/dag_huge/${String(i).padStart(13, '0')}-000001-run.start.jsonl`
+    h.files.set(path, '{}\n')
+    h.fileMeta.set(path, { mtimeMs: DAY })
+  }
+  await boot($)
+  expect(trajectoryNames(h)).toEqual(['dag_huge'])
+  expect(h.logs.filter(line => line.includes('dag_huge'))).toEqual(['dag-workflow: skipped trajectory dag_huge: it holds more than 2000 files'])
 })

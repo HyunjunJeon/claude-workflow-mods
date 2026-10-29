@@ -20,6 +20,7 @@ export type TextField = (typeof TEXT_FIELDS)[number]
 // What a text must satisfy; every given field must hold. contains: the text includes it. absent: it does not.
 // matches: RegExp source compiled with the m flag, kept as a string so the definition hashes and persists it.
 // lastLine: the last line after trailing whitespace is removed equals it. equals: the whole text after trailing whitespace is removed equals it.
+// Both ignore the expected value's own trailing whitespace too.
 export type TextExpect = { [Field in TextField]?: string }
 
 // path is project-relative, or absolute for a read-only check outside the project (never inside .claude/dag).
@@ -32,7 +33,8 @@ export type CommandExpect = {
   stderr?: TextExpect
 }
 
-export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandExpect }
+// timeoutMs is the check's time limit in milliseconds; absent, the runtime uses DEFAULT_COMMAND_TIMEOUT_MS (verification.ts).
+export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandExpect; timeoutMs?: number }
 
 export type VerificationCheck = FileCheck | CommandCheck
 
@@ -135,6 +137,17 @@ export type NodeRun = {
   question?: NodeQuestion
   // Every answered question, oldest first. Retry, recovery and rework keep them; an amend that changes the node drops them.
   clarifications?: Clarification[]
+  // Read from the whole answer when the node finished. answer and output are cut to keep the checkpoint small (the host
+  // reads a file back only up to 4 MiB), so what later steps need from the part they lose is kept here; the report file at
+  // reportPath holds the whole text.
+  whole?: {
+    // Characters in the whole ## Output section; output holds at most UPSTREAM_OUTPUT_CHARS of them.
+    outputChars: number
+    // Every Ruling line of the Output, uncut.
+    rulings: string[]
+    // A failed report's Next and Tried and failed fields (attemptNote), for the next attempt's prompt.
+    attemptNote?: string
+  }
   routing?: {
     // rule: a final audit proposed or routed as trivial runs on standard.
     readonly source: 'jev' | 'definition' | 'rule'
@@ -168,6 +181,10 @@ export type Run = {
   definition: Definition
   definitionHash: string
   nodes: NodeRun[]
+  // The folder the run works in when the session worked elsewhere than where it started (a git worktree after
+  // EnterWorktree): nodes spawn there and checks, git reads and diffs run there. Absent means the session's own folder,
+  // where this record is stored.
+  root?: string
   cancelReason?: string
   settledNotified?: boolean
   handoff?: {

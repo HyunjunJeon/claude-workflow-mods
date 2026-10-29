@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  appendLearningEvent, applyLearningProposals, archiveUnusedSkills, buildLearningPrompt, eligibleSkills,
-  emptyLearningSession, emptyLibrary, learningCatalog, parseLearningLibrary,
+  appendLearningEvent, applyLearningProposals, archiveUnusedSkills, archivedSkillPath, buildLearningPrompt, eligibleSkills,
+  emptyLearningSession, emptyLibrary, learnedSkillPath, learningCatalog, parseLearningLibrary,
   parseLearningProposals, parseLearningSession, parseLearningTransaction, prepareLearningBatch,
   recordSkillOpportunity, recordSkillUse, reserveLearningUsage,
   renderLearnedSkill, type LearnedSkill, type LearningEvent, type LearningLibrary,
@@ -434,4 +434,62 @@ test('a maximum-length complete skill body remains editable when the input budge
   expect(prepared.editableIds).toEqual([existing.id])
   const input = JSON.parse(prepared.prompt.split('\n').at(-1) ?? '')
   expect(input.existing[0].body).toBe(existing.body)
+})
+
+test('library accepts a project location, keeps entries without one, and refuses any other location', () => {
+  const input = library(skill(), skill({ id: 'dag-learned-local', location: 'project' }))
+  expect(value(parseLearningLibrary(JSON.stringify(input)))).toEqual(input)
+  expect(value(parseLearningTransaction(JSON.stringify({ schemaVersion: 1, before: library(), after: input }))).after).toEqual(input)
+  for (const location of ['global', 'home', null, '']) {
+    expect(parseLearningLibrary(JSON.stringify({ schemaVersion: 1, skills: [{ ...skill(), location }] })).ok).toBe(false)
+  }
+})
+
+test('a new proposal is stored as a project skill in its project whatever scope it proposed', () => {
+  for (const scope of ['global', 'project'] as const) {
+    const learned = value(applyLearningProposals(emptyLibrary(), [proposal({ scope })], context)).skills[0]
+    expect([learned?.scope, learned?.location, learned?.projectRoot]).toEqual(['project', 'project', root])
+  }
+})
+
+test('an update keeps the existing skill scope, project and location, and adds none to a legacy skill', () => {
+  const legacyGlobal = skill({ scope: 'global', projectRoot: '/origin' })
+  const updatedGlobal = value(applyLearningProposals(library(legacyGlobal), [proposal({ scope: 'global' })], context)).skills[0]
+  expect([updatedGlobal?.scope, updatedGlobal?.projectRoot, updatedGlobal?.body]).toEqual(['global', '/origin', proposal().body])
+  expect(updatedGlobal ? Object.hasOwn(updatedGlobal, 'location') : true).toBe(false)
+  const updatedLegacy = value(applyLearningProposals(library(skill()), [proposal()], context)).skills[0]
+  expect(updatedLegacy ? Object.hasOwn(updatedLegacy, 'location') : true).toBe(false)
+  const updatedLocal = value(applyLearningProposals(library(skill({ location: 'project' })), [proposal()], context)).skills[0]
+  expect([updatedLocal?.scope, updatedLocal?.location, updatedLocal?.body]).toEqual(['project', 'project', proposal().body])
+})
+
+test('catalog paths point legacy skills at the home folder and project skills at the project store', () => {
+  const input = library(skill(), skill({ id: 'dag-learned-global', scope: 'global', projectRoot: '/other' }),
+    skill({ id: 'dag-learned-local', location: 'project' }))
+  const paths = JSON.parse(learningCatalog(input, root, '/home/me/.claude/skills')).skills.map((entry: { path: string }) => entry.path)
+  expect(paths).toEqual([
+    '/home/me/.claude/skills/dag-learned-signals/SKILL.md',
+    '/home/me/.claude/skills/dag-learned-global/SKILL.md',
+    '/project/.claude/dag/skills/dag-learned-local/SKILL.md',
+  ])
+})
+
+test('the learner is told that new skills are project scope and an update repeats the existing scope', () => {
+  const prompt = buildLearningPrompt(events, [])
+  expect(prompt.includes('Use project scope unless the technique applies across projects.')).toBe(false)
+  expect(prompt.includes('A new skill is always stored as project scope, so give every new ID "scope":"project"; an update repeats the existing skill\'s scope.')).toBe(true)
+  expect(prompt.includes('Never learn secrets. Keep personal details and project facts out of global skills.')).toBe(true)
+})
+
+test('skill paths keep a skill without location in the home folders and put a project skill in its project store', () => {
+  const home = { skills: '/home/me/.claude/skills/', learning: '/home/me/.claude/dag-workflow/learning' }
+  expect([learnedSkillPath(skill(), home.skills), archivedSkillPath(skill(), home.learning)]).toEqual([
+    '/home/me/.claude/skills/dag-learned-signals/SKILL.md',
+    '/home/me/.claude/dag-workflow/learning/archive/dag-learned-signals/SKILL.md',
+  ])
+  const local = skill({ location: 'project' })
+  expect([learnedSkillPath(local, home.skills), archivedSkillPath(local, home.learning)]).toEqual([
+    '/project/.claude/dag/skills/dag-learned-signals/SKILL.md',
+    '/project/.claude/dag/learning-archive/dag-learned-signals/SKILL.md',
+  ])
 })

@@ -66,8 +66,9 @@ export type Strings = {
   toastVerificationFailed: (run: string, node: string) => string
   toastHandoff: string
   toastSettledFailed: (run: string, failed: number) => string
-  notifySettledCompleted: (run: string, nodes: number) => string
-  notifySettledFailed: (run: string, failed: number) => string
+  // The native notification a settled run raises (settle-notice.ts): its result and node counts, nothing to click.
+  notifySettledCompleted: (run: string, done: number, total: number) => string
+  notifySettledFailed: (run: string, failed: number, done: number, total: number) => string
   notifyRecoveryStopped: (run: string, node: string) => string
   toastPaneWaiting: (reason: string) => string
   toastApproval: (run: string) => string
@@ -76,6 +77,10 @@ export type Strings = {
   toastChipFailed: (reason: string) => string
   approvalWaiting: string
   awaitingApproval: string
+  // The one toast a usage hold raises when it first keeps a node from starting; `minutes` until its window resets, when known.
+  toastUsageHold: (kind: string, percent: number, minutes?: number) => string
+  // The run header's state while the usage hold keeps the run's scheduled nodes from starting.
+  usagePaused: (kind: string, percent: number) => string
   previewSummary: (nodes: number, waves: number, widest: number, maxConcurrent: number) => string
   previewWave: (index: number, entries: string) => string
   previewConflicts: (entries: string) => string
@@ -179,8 +184,8 @@ const EN: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: node ${node} failed verification`,
   toastHandoff: 'A DAG run was offered to this session. Open /dag sessions to accept it.',
   toastSettledFailed: (run, failed) => `DAG ${run} settled with ${failed} failed node(s)`,
-  notifySettledCompleted: (run, nodes) => `${run}: completed, ${nodes} node${nodes === 1 ? '' : 's'}`,
-  notifySettledFailed: (run, failed) => `${run}: ${failed} node${failed === 1 ? '' : 's'} failed`,
+  notifySettledCompleted: (run, done, total) => `DAG ${run} completed ${done}/${total}`,
+  notifySettledFailed: (run, failed, done, total) => `DAG ${run} failed: ${failed} failed node(s), ${done}/${total} completed`,
   notifyRecoveryStopped: (run, node) => `${run} › ${node}: automatic recovery stopped, the node still fails`,
   runDeferred: 'The run starts when the current turn ends.',
   toastApproval: run => `DAG ${run} waits for your approval · approve it in the /dag pane or with /dag approve`,
@@ -188,6 +193,8 @@ const EN: Strings = {
   toastChipFailed: reason => `Could not put the block into the prompt (${reason})`,
   approvalWaiting: 'Waiting for your approval: no node starts until you approve this run.',
   awaitingApproval: EN_AWAITING,
+  toastUsageHold: (kind, percent, minutes) => `DAG paused new nodes: ${kind} at ${percent}%${minutes === undefined ? '' : `, resets in ${minutes} min`}`,
+  usagePaused: (kind, percent) => `paused at usage limit: ${kind} ${percent}%`,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `${nodes} node${nodes === 1 ? '' : 's'}, ${waves} wave${waves === 1 ? '' : 's'}, widest wave ${widest} (max concurrent ${maxConcurrent})`,
   previewWave: (index, entries) => `wave ${index}: ${entries}`,
   previewConflicts: entries => `write conflicts: ${entries}`,
@@ -288,8 +295,8 @@ const KO: Strings = {
   toastVerificationFailed: (run, node) => `DAG ${run}: 노드 ${node} 검증 실패`,
   toastHandoff: '이 세션에 DAG 실행이 넘어왔습니다. /dag sessions에서 수락하세요.',
   toastSettledFailed: (run, failed) => `DAG ${run} 종료: 실패 노드 ${failed}개`,
-  notifySettledCompleted: (run, nodes) => `${run}: 완료, 노드 ${nodes}개`,
-  notifySettledFailed: (run, failed) => `${run}: 노드 ${failed}개 실패`,
+  notifySettledCompleted: (run, done, total) => `DAG ${run} 완료 ${done}/${total}`,
+  notifySettledFailed: (run, failed, done, total) => `DAG ${run} 실패: 실패 노드 ${failed}개, ${done}/${total} 완료`,
   notifyRecoveryStopped: (run, node) => `${run} › ${node}: 자동 복구를 멈췄습니다, 노드가 여전히 실패 상태입니다`,
   runDeferred: '현재 턴이 끝나면 실행이 시작됩니다.',
   toastApproval: run => `DAG ${run} 실행이 승인을 기다립니다 · /dag 패널이나 /dag approve로 승인하세요`,
@@ -297,6 +304,8 @@ const KO: Strings = {
   toastChipFailed: reason => `블록을 프롬프트에 넣지 못했습니다 (${reason})`,
   approvalWaiting: '승인 대기 중: 이 실행을 승인하기 전에는 어떤 노드도 시작하지 않습니다.',
   awaitingApproval: KO_AWAITING,
+  toastUsageHold: (kind, percent, minutes) => `DAG 새 노드 시작 대기: ${kind} ${percent}% 사용${minutes === undefined ? '' : `, ${minutes}분 뒤 초기화`}`,
+  usagePaused: (kind, percent) => `한도 대기: ${kind} ${percent}%`,
   previewSummary: (nodes, waves, widest, maxConcurrent) => `노드 ${nodes}개, 웨이브 ${waves}개, 가장 넓은 웨이브 ${widest} (동시 실행 한도 ${maxConcurrent})`,
   previewWave: (index, entries) => `웨이브 ${index}: ${entries}`,
   previewConflicts: entries => `쓰기 충돌: ${entries}`,

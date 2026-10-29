@@ -168,3 +168,61 @@ test('a pattern the repository allows in AGENTS.md is not reported, and editing 
   const reported = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'a', new_string: 'function handle(input: any) {}' })
   expect(reported.context).toEqual([expect.stringContaining('top-type')])
 })
+
+// A session that entered a worktree keeps editing files under it; the scan finds the folder each file belongs to.
+const WORKTREE = '/work/.claude/worktrees/x'
+const WORKTREE_FILE = `${WORKTREE}/src/a.ts`
+const HANDLE = 'function handle(input: any) {}'
+
+test('an allow line in the worktree\'s own AGENTS.md applies to the worktree files and not to the session folder\'s', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  await boot($, 'off')
+  h.files.set(`${WORKTREE}/AGENTS.md`, 'anti-slop allow: top-type\n')
+  h.readOnce.set(WORKTREE_FILE, 'a\n')
+  h.files.set(WORKTREE_FILE, `${HANDLE}\n`)
+  const inWorktree = await $.tool.call({ tool: 'Edit', file_path: WORKTREE_FILE, old_string: 'a', new_string: HANDLE })
+  expect(inWorktree.context).toBeUndefined()
+  h.readOnce.set('/work/src/b.ts', 'a\n')
+  h.files.set('/work/src/b.ts', `${HANDLE}\n`)
+  const inSession = await $.tool.call({ tool: 'Edit', file_path: '/work/src/b.ts', old_string: 'a', new_string: HANDLE })
+  expect(inSession.context).toEqual([expect.stringContaining('top-type')])
+})
+
+test('an allow line in the session folder\'s AGENTS.md still applies to a worktree file', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  await boot($, 'off')
+  h.files.set('/work/AGENTS.md', 'anti-slop allow: top-type\n')
+  h.readOnce.set(WORKTREE_FILE, 'a\n')
+  h.files.set(WORKTREE_FILE, `${HANDLE}\n`)
+  const reply = await $.tool.call({ tool: 'Edit', file_path: WORKTREE_FILE, old_string: 'a', new_string: HANDLE })
+  expect(reply.context).toBeUndefined()
+})
+
+test('the note for a worktree file shows the path inside the worktree', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  await boot($, 'off')
+  h.readOnce.set(WORKTREE_FILE, 'a\n')
+  h.files.set(WORKTREE_FILE, `${HANDLE}\n`)
+  const reply = await $.tool.call({ tool: 'Edit', file_path: WORKTREE_FILE, old_string: 'a', new_string: HANDLE })
+  expect(reply.context).toEqual([expect.stringContaining('- src/a.ts:1 top-type')])
+  expect(reply.context?.[0]).not.toContain('.claude/worktrees')
+})
+
+test('editing the worktree\'s AGENTS.md is read again for the next worktree edit', async ($, on) => {
+  const h = harness(on)
+  h.control.root = WORKTREE
+  await boot($, 'off')
+  h.files.set(`${WORKTREE}/AGENTS.md`, 'anti-slop allow: top-type\n')
+  h.readOnce.set(WORKTREE_FILE, 'a\n')
+  h.files.set(WORKTREE_FILE, `${HANDLE}\n`)
+  const allowed = await $.tool.call({ tool: 'Edit', file_path: WORKTREE_FILE, old_string: 'a', new_string: HANDLE })
+  expect(allowed.context).toBeUndefined()
+  h.files.set(`${WORKTREE}/AGENTS.md`, '# no exceptions\n')
+  await $.tool.call({ tool: 'Write', file_path: `${WORKTREE}/AGENTS.md`, content: '# no exceptions\n' })
+  h.readOnce.set(WORKTREE_FILE, 'a\n')
+  const reported = await $.tool.call({ tool: 'Edit', file_path: WORKTREE_FILE, old_string: 'a', new_string: HANDLE })
+  expect(reported.context).toEqual([expect.stringContaining('top-type')])
+})

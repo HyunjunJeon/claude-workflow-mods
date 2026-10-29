@@ -1,0 +1,246 @@
+# Batch 2 rest: let the read-only judge accept lowercase shell variables, record where the host's isReadOnly disagrees
+# with the judge (shadow only), and give the opt-in trajectory log its own retention and size cap.
+# Why:
+# - b9cfcaa made readOnlyBashProblem refuse every NAME=value head, which closed `PATH=/x; ls` and `LD_PRELOAD=... ls` but
+#   also refused `d=/tmp/x; tail -1 $d/f` in the main conversation on 2026-10-22. Lowercase names are almost never exported
+#   or read by tools (the *_proxy variables are the exception), while PATH, LD_*, DYLD_*, GIT_*, IFS and other exported
+#   names are uppercase. Probe on 2026-10-22: 4 of 4 lowercase cases refused, 9 of 9 dangerous cases refused.
+# - Claude Code 2.1.304 added e.isReadOnly to tool.check ("set when the tool call is read-only"; the typings: "Absent also
+#   means the tool cannot say: a careful hook reads it as a write"). The judge's breadth against the host's is unknown, so
+#   the agreed plan logs disagreements first and turns nothing on.
+# - trajectory_log (opt-in) writes .claude/dag/trajectories/ and its description says "Not pruned by retention_days"; the
+#   outside review asked for its own retention and a size cap.
+#
+# PREREQUISITE: `git status --short` prints nothing, and no other session edits this checkout (another session committed
+# 8208bfa and aeff2d0 on 2026-10-22; check `git log -3` first).
+# Run it with:  /dag run flows/improvement/p16-judge-shadow-trajectory.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. No commit node: the user commits after reading the reviews.
+#
+# Run plan (components -> waves):
+#   wave 1: judge-assign, docs
+#   wave 2: readonly-shadow (after judge-assign)
+#   wave 3: trajectory-retention (after readonly-shadow)
+#   then:   review-spec, review-standards (generated)
+# The three code nodes run as a chain: each gates on the full suite (now with timeoutMs), and a sibling's red-first test
+# would turn that gate red; readonly-shadow and trajectory-retention also share hooks/register.ts. No edge carries data.
+# docs gets every contract pasted and edits only docs/reference.md, which no code node touches.
+# Categories: standard for the three code nodes (each a small vertical slice with a judgment on rules, records or pruning
+# safety); writing for docs. readonly-shadow and trajectory-retention are vertical slices (one record kind across the host,
+# the parser and the inspector labels; one knob pair across the manifest, the planner and the host), so their "one
+# producer owns 3 files" warnings are expected.
+#
+# Run history (2026-10-22):
+# - dag_mvj4j93m_dmzinu (this key) settled failed. readonly-shadow and trajectory-retention passed and were kept. Its
+#   judge-assign attempt 1 found the lowercase premise false in zsh, the host shell here (`path=(/x $path)` changes
+#   PATH, `functions[ls]=x` redefines ls, *_functions hooks run code) and that a variable can carry a flag past the flag
+#   checks (`a=-delete; find . $a`); the review-fix round then reverted it to this file's rule while docs described
+#   attempt 1, so both reviews failed on docs/reference.md:114.
+# - The user withdrew the lowercase allowance. dag_mvj70noe_x51e20 (key improve-p16-judge-shadow-trajectory-2, inline
+#   definition) restored the committed rule (only locale/display prefixes) with a reason that says to write the value
+#   into the command, rewrote docs/reference.md:114 to match, and gave the 7 tests that hit or neared 5 s on the first
+#   GitHub CI run (39730229599) a 30 s limit; Spec and Standards verdicts PASS.
+# This file's judge-assign node describes the withdrawn rule; do not rerun it as written.
+
+key: improve-p16-judge-shadow-trajectory-1
+name: Judge assignments, isReadOnly shadow, trajectory retention
+goal: >
+  The read-only Bash judge accepts NAME=value for lowercase names other than the *_proxy variables while still refusing
+  uppercase and proxy names; in the main conversation a Bash call the judge allowed but the host did not mark isReadOnly is
+  recorded as a `readonly` decision without changing any verdict; trajectory_retention_days (default 90) and
+  trajectory_max_mb (default 1024) prune settled runs' trajectories; tests, docs/reference.md and plugin.json match, and
+  claude plugin test, tsc and claude plugin validate pass.
+review:
+  request: |
+    커밋, push 후 판정기 보완 또는 남은 묶음 2 작업(isReadOnly 그림자 게이트, trajectory 보존 기간)
+    Agreed details (2026-10-22): (1) judge: a NAME=value token, as a standalone segment or as a command prefix, is accepted when NAME is all lowercase letters, digits and underscores and is not one of http_proxy, https_proxy, ftp_proxy, all_proxy, no_proxy, or when it is on the existing locale/display list; every other NAME=value stays refused, and the refusal reason says a lowercase shell variable is accepted. (2) isReadOnly shadow: when the main-conversation gate is active and a Bash call reaches tool.check without e.agentId and with e.isReadOnly not true, the plugin appends a decision record of kind readonly with the masked command (at most 200 characters) and returns the host's verdict unchanged; nothing is refused because of it, and a failure to record is only logged. (3) trajectory_retention_days, 0 to 3650, default 90, 0 keeps everything: at startup the trajectory folder and joined file of a settled run whose newest trajectory file is older than that many days are deleted. trajectory_max_mb, 0 to 102400, default 1024, 0 means no cap: after the age pass, while the trajectories folder holds more than the cap, the settled run whose newest file is oldest is deleted first. Neither pass deletes the current session's trajectory or one of a run that is not settled.
+    Out of scope: refusing calls on isReadOnly (a later step after the shadow log is read) and changing retention_days; this run leaves its changes uncommitted for the user.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - hooks/ui/AGENTS.md
+    - tests/AGENTS.md
+nodes:
+  - id: judge-assign
+    label: Accept lowercase shell variables in the read-only judge
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/policy.ts
+      - tests/policy.test.ts
+    verify:
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - "import { readOnlyBashProblem as p } from './hooks/engine/policy.ts'; const allow = ['d=/tmp/x; tail -1 $d/f', 'out=hooks; ls $out', 'n=3; head -n $n README.md', 'f=a.txt g=b.txt; diff $f $g', 'LC_ALL=C sort a', 'ls -la']; const refuse = ['D=/tmp/x; ls', 'PATH=/x; ls', 'PATH+=:/x; ls', 'LD_PRELOAD=/x ls', 'http_proxy=x git log', 'HTTPS_PROXY=x git log', 'GIT_PAGER=sh git log', 'x=$(rm a); ls', 'd=/tmp/x; $d']; const blocked = allow.filter(c => p(c) !== undefined); const leaks = refuse.filter(c => p(c) === undefined); console.log(JSON.stringify({ blocked, leaks })); process.exit(blocked.length + leaks.length > 0 ? 1 : 0)"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 180000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+    prompt: |
+      TASK: Make readOnlyBashProblem in hooks/engine/policy.ts accept NAME=value for lowercase shell variables while it keeps refusing every other assignment.
+
+      CONTEXT:
+      - policy.ts: `DISPLAY_ENV` (near line 93) lists the locale/display names a leading NAME=value may use (LANG, LANGUAGE, TZ, NO_COLOR, FORCE_COLOR, CLICOLOR, COLUMNS, TERM, LC_*); `ENV_ASSIGNMENT` (near line 95) matches `NAME=`, `NAME+=` and `NAME[i]=`; `isLeaderToken` (near line 97) skips an allowed assignment; readOnlyBashProblem refuses any other assignment head (near line 338) with 'NAME= is an environment prefix that can change what runs (LD_PRELOAD, PATH, GIT_*)'. Commit b9cfcaa added this because `PATH+=:/x/ls; ls` and `LD_PRELOAD=... ls` passed.
+      - Measured 2026-10-22: these are refused today and must pass: `d=/tmp/x; tail -1 $d/f`, `out=hooks; ls $out`, `n=3; head -n $n README.md`, `f=a.txt g=b.txt; diff $f $g`.
+      - Why lowercase is safe: an assignment changes what a later command does only through a shell-special variable (PATH, IFS, CDPATH, BASH_ENV, ...) or a variable already exported to child processes (LD_*, DYLD_*, GIT_*, PAGER, RIPGREP_CONFIG_PATH, ...); those are uppercase. The lowercase exception is the proxy family (http_proxy, https_proxy, ftp_proxy, all_proxy, no_proxy), which git and other tools read.
+
+      REQUIRED:
+      1. A NAME=value token (any of the three ENV_ASSIGNMENT forms), whether it stands alone in a segment or prefixes a command, is accepted when NAME matches /^[a-z_][a-z0-9_]*$/ and is not one of http_proxy, https_proxy, ftp_proxy, all_proxy, no_proxy, or when DISPLAY_ENV accepts it today. Everything else stays refused; change the reason to say that only locale/display variables and lowercase shell variables are accepted, for example 'NAME= can change what runs (PATH, LD_PRELOAD, GIT_*); only locale/display variables and lowercase shell variables are accepted'.
+      2. The value side keeps every existing check: command and process substitution are still refused anywhere, and a later segment whose head is a variable (`$d`) is still refused because it is not a listed command.
+      3. Tests in tests/policy.test.ts (claude-code/testing), red first: the four commands above pass; `D=/tmp/x; ls`, `PATH=/x; ls`, `PATH+=:/x; ls`, `LD_PRELOAD=/x ls`, `http_proxy=x git log`, `HTTPS_PROXY=x git log`, `GIT_PAGER=sh git log`, `x=$(rm a); ls` and `d=/tmp/x; $d` are refused; keep every existing case, and update an existing assertion only where it pinned the old reason text.
+
+      SCOPE: edit only hooks/engine/policy.ts and tests/policy.test.ts. A docs node edits docs/reference.md at the same time; later nodes of this run edit hooks/register.ts and other files. Keep hooks/engine pure.
+
+      VERIFY: the runtime runs a `bun -e` probe over the commands above, `claude plugin test .` and tsc. Run `command claude plugin test .` and `bunx -p typescript@5 tsc -p . --noEmit` yourself first.
+
+      STOP WHEN: the probe passes and the suite and tsc pass.
+
+      In ## Output give: the rule as implemented (function and line), the new reason text, the new test names, and the last line of the test run.
+
+  - id: readonly-shadow
+    label: Record where the host's isReadOnly disagrees with the judge
+    category: standard
+    dependsOn:
+      - judge-assign
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - hooks/engine/decisions.ts
+      - hooks/ui/inspector-model.ts
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 180000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: file
+        path: hooks/engine/decisions.ts
+        contains: "'readonly'"
+      - kind: file
+        path: hooks/register.ts
+        contains: "isReadOnly"
+      - kind: file
+        path: hooks/ui/inspector-model.ts
+        contains: "읽기 전용"
+    prompt: |
+      TASK: In the main conversation, record a `readonly` decision whenever a Bash call that the plugin's read-only judge let through reaches tool.check without the host's isReadOnly, and change no verdict.
+
+      CONTEXT:
+      - Claude Code 2.1.304 added `isReadOnly?: true` to ToolCheckInput (.claude-plugin/types/claude-code/index.d.ts): "present only when the tool's own isReadOnly holds this input read-only ... Absent also means the tool cannot say: a careful hook reads it as a write." tool.check fires after the tool.call hooks and before the mode settles an ask, so a Bash call that reaches tool.check in the main conversation under an active gate already passed the plugin's judge (the tool.call gate uses mainLoopVerdict / readOnlyBashProblem in hooks/engine/policy.ts; `gatesMainLoop(enforcement, turnMode)` says whether the gate is active).
+      - hooks/register.ts: the tool.check hook (search `on('tool.check'`) starts with `const decided = await next(e)` and returns early unless the decision is `ask`; it records Jev permission decisions with `persistDecisions($, [decisionRecord({...})])`.
+      - hooks/engine/decisions.ts: `kind: 'routing' | 'permission' | 'recovery' | 'mode' | 'surface'` (near line 12) with the parser that reads the decisions file; hooks/ui/inspector-model.ts labels the kinds in English (near line 131) and Korean (near line 213). AGENTS.md: a UI string changes in both EN and KO.
+      - Secrets: the plugin masks secrets in stored text (see how other records and trajectory lines call the masking helper); use the same helper.
+
+      REQUIRED:
+      1. Add the decision kind `readonly` (EN label 'read-only', KO label '읽기 전용') everywhere kinds are listed or parsed.
+      2. In the tool.check hook, before the early return: when `e.agentId` is absent, `e.tool === 'Bash'`, the main-conversation gate is active, and `e.isReadOnly !== true`, persist one decision record of kind `readonly` whose subject is 'Bash', proposed is 'allow' (the plugin's judge), selected is the host's `decided.decision`, and whose note holds the masked command cut to 200 characters. Never change `decided`; a failure to record is logged with debug and swallowed. Record nothing when isReadOnly is true, for subagent calls, for other tools, or when the gate is off.
+      3. Tests (claude-code/testing, tests/control-harness.ts, mock clock): under an active gate a main-conversation Bash tool.check without isReadOnly records one `readonly` decision with the masked, cut command and returns the same verdict; with isReadOnly true, from a node worker (agentId set), for a Read call and with the gate off it records none; a decisions file holding a `readonly` record parses. If the testing kit cannot raise tool.check with isReadOnly, say how you drove it.
+
+      SCOPE: edit only hooks/register.ts (the tool.check hook and what it needs), hooks/engine/decisions.ts, hooks/ui/inspector-model.ts and files under tests/. The previous node changed hooks/engine/policy.ts and tests/policy.test.ts; the next node changes hooks/register.ts's retention code, hooks/engine/retention.ts and .claude-plugin/plugin.json; a docs node edits docs/reference.md. Do not touch those.
+
+      VERIFY: `command claude plugin test .` passes in full and `bunx -p typescript@5 tsc -p . --noEmit` prints nothing (the runtime reruns both).
+
+      STOP WHEN: the tests pass and the suite and tsc pass.
+
+      In ## Output give: the record's exact fields, where the hook records it (line), the labels added, the new test names, and the last line of the test run.
+
+  - id: trajectory-retention
+    label: Prune trajectories by age and size
+    category: standard
+    dependsOn:
+      - readonly-shadow
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/retention.ts
+      - hooks/register.ts
+      - .claude-plugin/plugin.json
+      - tests
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+        timeoutMs: 180000
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+        timeoutMs: 120000
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: .claude-plugin/plugin.json
+        contains: "\"trajectory_retention_days\""
+      - kind: file
+        path: .claude-plugin/plugin.json
+        contains: "\"trajectory_max_mb\""
+      - kind: file
+        path: .claude-plugin/plugin.json
+        absent: "Not pruned by retention_days"
+    prompt: |
+      TASK: Add trajectory_retention_days and trajectory_max_mb and prune .claude/dag/trajectories/ by them at startup.
+
+      CONTEXT:
+      - .claude-plugin/plugin.json: `trajectory_log` (opt-in, default false) records runs under .claude/dag/trajectories/ ("Each settled run is also joined into <run_id>.jsonl. Not pruned by retention_days"). Other numeric knobs show the shape (type number, title, description, default, min, max); AGENTS.md: a new knob goes in plugin.json plus the top of register() (invalid values silently keep the default) plus the settings docs (a docs node writes those).
+      - hooks/register.ts: trajectory paths come from TRAJECTORY_SUBDIR (hooks/engine/trajectory.ts) — a folder per run id (or `session-<sessionId>` for the main conversation) and the joined `<run_id>.jsonl`; read the code to confirm where the joined file lives. pruneArtifacts (search `async function pruneArtifacts`) runs the retention sweep from hooks/engine/retention.ts (`retentionPlan`, pure) only when retention_days > 0, and deletes with removePath; SAFE_RUN_DIR guards names.
+      - Runs: the `runs` map holds each run's status; a run is settled when its status is completed, failed or cancelled (check the Run type in hooks/engine/types.ts).
+
+      REQUIRED:
+      1. plugin.json: `trajectory_retention_days` (number, 0-3650, default 90, 0 keeps everything) and `trajectory_max_mb` (number, 0-102400, default 1024, 0 means no cap), with titles and descriptions; change trajectory_log's description so it names these two knobs instead of "Not pruned by retention_days".
+      2. A pure planner in hooks/engine/retention.ts that, given the trajectory entries (name, newest file mtime, total bytes, run id or session), now, the two limits, the current session id and the set of unsettled run ids, returns what to delete: first every settled run's entry whose newest file is older than the day limit; then, while the remaining total exceeds the size cap, the remaining settled entry with the oldest newest-file first. Never the current session's entry, an unsettled run's entry, or a name the safe-name check rejects. A run's folder and its joined .jsonl count and go together.
+      3. register.ts: read the two knobs at the top of register() like the others; at startup (where pruneArtifacts runs) gather the entries with $.fs.list/$.fs.stat (bounded: skip and log a folder holding more than 2000 files rather than reading it all), run the planner and delete with removePath, independently of retention_days. Log what was removed with debug.
+      4. Tests, red first: planner cases (age, cap, both, protection of the current session and unsettled runs, the 0 settings, unsafe names) and one hook-level test that startup removes an old settled trajectory and keeps a fresh one.
+
+      SCOPE: edit only hooks/engine/retention.ts, hooks/register.ts (knob reading and the startup prune), .claude-plugin/plugin.json and files under tests/. Earlier nodes of this run changed hooks/engine/policy.ts, the tool.check hook, hooks/engine/decisions.ts and hooks/ui/inspector-model.ts; a docs node edits docs/reference.md. Do not touch those.
+
+      VERIFY: `command claude plugin test .` passes in full, `bunx -p typescript@5 tsc -p . --noEmit` prints nothing and `command claude plugin validate .` passes (the runtime reruns all three).
+
+      STOP WHEN: the tests pass and the three checks pass.
+
+      In ## Output give: the knob definitions as added, the planner's name and signature, where startup calls it, the new test names, and the last line of the test run.
+
+  - id: docs
+    label: Document the three changes in docs/reference.md
+    category: writing
+    writes:
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "trajectory_retention_days"
+      - kind: file
+        path: docs/reference.md
+        contains: "trajectory_max_mb"
+      - kind: file
+        path: docs/reference.md
+        contains: "http_proxy"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md]
+    prompt: |
+      TASK: Document three changes in docs/reference.md (Korean; keep it Korean).
+
+      CONTRACT (other nodes implement exactly this at the same time; describe exactly this):
+      1. Read-only Bash judge: a `이름=값` token, standing alone (`d=/tmp/x; tail -1 $d/f`) or before a command, is accepted when the name is all lowercase letters, digits and underscores and is not one of http_proxy, https_proxy, ftp_proxy, all_proxy, no_proxy, or when it is a locale/display variable (LC_*, LANG, LANGUAGE, TZ, NO_COLOR, FORCE_COLOR, CLICOLOR, COLUMNS, TERM). Uppercase names (PATH, LD_PRELOAD, GIT_* ...) and the proxy names stay refused, because a shell-special or already exported variable changes what later commands do.
+      2. isReadOnly shadow record: Claude Code 2.1.304+ marks a read-only tool call with isReadOnly in tool.check. When the main-conversation gate is active and a Bash call the plugin's judge allowed arrives without that mark, the plugin records a decision of kind `readonly` (읽기 전용) with the masked command (up to 200 characters). It changes no verdict; it collects evidence on where the host's read-only judgment and the plugin's differ before the plugin ever uses the host value. The records appear with the other decisions (the `decisions` action of the dag tool and the decisions inspector in the /dag pane).
+      3. Trajectory retention: `trajectory_retention_days` (기본 90, 0이면 보관, 0-3650) and `trajectory_max_mb` (기본 1024, 0이면 제한 없음, 0-102400). At startup the plugin deletes the trajectory folder and joined `<run_id>.jsonl` of a settled run whose newest trajectory file is older than the day limit; then, while .claude/dag/trajectories/ is over the size cap, it deletes the settled run whose newest file is oldest first. It never deletes the current session's trajectory or that of a run that is not settled. retention_days does not affect trajectories.
+
+      REQUIRED:
+      1. The read-only Bash bullet (search '읽기 전용 Bash:' near line 107): add the lowercase-variable rule from item 1 next to the existing locale/display rule.
+      2. Near the main-conversation gate description (the section that bullet belongs to), add a short paragraph for item 2.
+      3. The settings table (search '| `jev_permission_scope`'): add rows for the two knobs, and change the `trajectory_log` row (and any other text that says trajectories are not pruned) to point at them. Find the trajectory section (search 'trajector' / '궤적') and add the pruning rule from item 3.
+      4. Change nothing else.
+
+      SCOPE: edit only docs/reference.md. Other nodes edit hooks/, tests/ and .claude-plugin/plugin.json.
+
+      VERIFY: `git diff --check -- docs/reference.md` prints nothing; `grep -n 'trajectory_retention_days\|http_proxy\|readonly' docs/reference.md` shows the new text.
+
+      STOP WHEN: all three items are documented and the check passes.
+
+      In ## Output give: each changed or added line with its line number.

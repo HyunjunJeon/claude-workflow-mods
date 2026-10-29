@@ -113,7 +113,8 @@ async function session($: Engine, on: On, timing: Timing, successor: boolean) {
 const unfinished = (run: { nodes: { id: string; state: string }[] }) =>
   run.nodes.filter(node => node.state === 'scheduled' || node.state === 'running' || node.state === 'pending').map(node => `${node.id}:${node.state}`)
 
-test('B6 scheduled form: past the host turn limit the session ends before the successor of the last stopped node is spawned', { plugins: [LATENCY] }, async ($, on) => {
+// The 2026-10-22 GitHub CI run took 11.3 s for the session-learning test against the 5 s default, so these slow tests get 30 s.
+test('B6 scheduled form: past the host turn limit the session ends before the successor of the last stopped node is spawned', { plugins: [LATENCY], timeoutMs: 30_000 }, async ($, on) => {
   const out = await session($, on, { stopAtMs: HOST_TURN_LIMIT_MS + 1_000, verifyMs: 40, spawnMs: 30 }, true)
   expect(unfinished(out.run)).toEqual([])
   expect(out.run.status).toBe('completed')

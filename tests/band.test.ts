@@ -47,7 +47,7 @@ test('an active run draws the status counts and most-urgent-first digit buttons 
   await $.classic.PermissionRequest({ agent_id: 'agent-2', tool_name: 'Write', tool_input: {} })
   expect(h.statuses.at(-1)).toBe(t.statusLine('Trio', 0, 3, 2, 1, 0, 1))
 
-  for (const surface of ['terminal', 'desktop'] as const) {
+  for (const surface of ['terminal', 'desktop', 'vscode'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text)
     expect(texts.slice(0, -1).join('')).toBe(`DAG Trio  ${t.done(0, 3)} · × ${t.failedCount(1)} · ? ${t.bandWaiting(1)} · ● ${t.bandRunning(2)}`)

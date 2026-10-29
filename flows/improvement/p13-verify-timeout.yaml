@@ -1,0 +1,183 @@
+# Per-check verify timeout: a command check may set timeoutMs (1000-600000 ms, default 30000).
+# Why: every command check runs under a fixed 30 s limit (hooks/register.ts commandCheckResult). On 2026-10-22 the full
+# suite (`claude plugin test .`, 1352 tests) took 17-19 s in a shell, but as the atomic-checkpoint node's verify in run
+# dag_mviujot7_x52mcq it hit "still running after 30000ms" and came back not_run, so a correct node settled failed and the
+# follow-up run had to gate on a node-written result file instead. Claude Code's $.process.run takes timeoutMs up to ten
+# minutes (default 30 s), and verifyNode runs outside the serialized() queue, so a longer check does not hold other runs.
+# The dag tool description is 2042 of 2048 characters, so the field's details live in the input schema.
+#
+# PREREQUISITE: `git status --short -- hooks tests docs skills` prints nothing, and no other session edits this checkout.
+# Run it with:  /dag run flows/improvement/p13-verify-timeout.yaml   (a rerun after it settles needs a new key)
+# Do not /reload-plugins while this run is active. This run's own checks still run under the old 30 s limit (the
+# session loaded the plugin before the change), so the suite gate is a node-written result file, as in p12.
+# No commit node: the user commits after reading the reviews.
+#
+# Run plan (components -> waves):
+#   wave 1: verify-timeout, docs-reference, doctrine
+#   then:   review-spec, review-standards (generated)
+# No edges: docs-reference and doctrine get the field's exact contract pasted into their prompts, and no node reads
+# another's files; tests do not read docs/ or skills/planning, so the suite run in verify-timeout cannot be broken by them.
+# Categories: standard for verify-timeout (one vertical slice through the type, the parser, the host runner, the tool
+# schema and tests; its "one producer owns 3 files" warning is expected); writing for the two text lanes.
+# The planning doctrine change is two sentences on a new optional field; the DAG-shape eval is not rerun for it.
+# First run: dag_mvixcbm1_3j1gmp (2026-10-22), completed: every node passed its checks, Spec and Standards verdicts PASS,
+# 1365 tests pass (18.8 s); TOOL_DESCRIPTION is now exactly 2048 characters.
+
+key: improve-p13-verify-timeout-1
+name: Per-check verify timeout (timeoutMs)
+goal: >
+  A command verify check accepts an optional timeoutMs (whole milliseconds, 1000 to 600000, default 30000) that the
+  runtime passes to $.process.run, out-of-range or non-command uses are refused as invalid_verification, a timed-out check
+  says how to raise the limit, the dag tool schema documents the field, and docs/reference.md and the planning skill
+  describe it; tests, tsc and claude plugin validate pass.
+review:
+  request: |
+    측정 기록을 커밋하고 1번(검증 시간 제한)을 진행
+    Agreed plan (2026-10-22), batch 2 item 1: per-node verify time limits (verify[].timeoutMs). Reason: in run dag_mviujot7_x52mcq the full suite (17-19 s in a shell) hit the runtime's fixed 30 s verify limit and came back not_run, so a correct node settled failed. Contract: a command check takes an optional timeoutMs, whole milliseconds from 1000 to 600000 (the host's $.process.run maximum), default 30000; anything else, or timeoutMs on a file check, is invalid_verification; a check without the field parses to the same object and runs with timeoutMs 30000 as before; when a command check runs past its limit, its verification outcome stays not_run and its detail ends with one sentence saying the check can set timeoutMs up to 600000, while other not_run details are unchanged.
+    Out of scope: a run-wide or node-wide timeout, streaming long checks with $.process.spawn, changing other $.process.run timeouts (semgrep, git reads, PATH lookup), rerunning the DAG-shape eval, a commit.
+  rules:
+    - AGENTS.md
+    - hooks/engine/AGENTS.md
+    - tests/AGENTS.md
+nodes:
+  - id: verify-timeout
+    label: Accept and apply timeoutMs on command checks
+    category: standard
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/engine/types.ts
+      - hooks/engine/verification.ts
+      - hooks/engine/tool-spec.ts
+      - hooks/register.ts
+      - tests
+    verify:
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - "import { parseChecks as p } from './hooks/engine/verification.ts'; const ok = p([{ kind: 'command', argv: ['git', 'status'], timeoutMs: 120000 }]); const plain = p([{ kind: 'command', argv: ['git', 'status'] }]); const bad = [0, 999, 600001, 1.5, '30000'].filter(t => p([{ kind: 'command', argv: ['git', 'status'], timeoutMs: t }]).ok); const fileOk = p([{ kind: 'file', path: 'a.txt', contains: 'x', timeoutMs: 60000 }]).ok; const accepted = ok.ok && ok.value[0].timeoutMs === 120000; const plainClean = plain.ok && !('timeoutMs' in plain.value[0]); console.log(JSON.stringify({ accepted, plainClean, wronglyAccepted: bad, fileOk })); process.exit(accepted && plainClean && bad.length === 0 && !fileOk ? 0 : 1)"
+      - kind: command
+        argv:
+          - bun
+          - -e
+          - "import { INPUT_SCHEMA, TOOL_DESCRIPTION, TOOL_DESCRIPTION_LIMIT } from './hooks/engine/tool-spec.ts'; const has = JSON.stringify(INPUT_SCHEMA).includes('\"timeoutMs\"'); console.log(JSON.stringify({ has, length: TOOL_DESCRIPTION.length })); process.exit(has && TOOL_DESCRIPTION.length <= TOOL_DESCRIPTION_LIMIT ? 0 : 1)"
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ".", --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+      - kind: file
+        path: hooks/register.ts
+        absent: "$.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })"
+      - kind: file
+        path: /tmp/dag-p13/verify-timeout-suite.txt
+        matches: "^ 0 fail$"
+      - kind: file
+        path: /tmp/dag-p13/verify-timeout-suite.txt
+        matches: "^Ran 1[3-9]\\d\\d tests across"
+    prompt: |
+      TASK: Let a command verify check carry an optional `timeoutMs` that the runtime uses as that check's time limit, through the type, the parser, the host runner, the dag tool schema and tests.
+
+      CONTEXT:
+      - hooks/engine/types.ts near line 35: `export type CommandCheck = { kind: 'command'; argv: string[]; expect?: CommandExpect }`.
+      - hooks/engine/verification.ts: `COMMAND_FIELDS` (near line 22) is `kind`, `argv`, `expect`; `parseCheck` (near line 131) refuses unknown fields with "unknown field ... in a command check; use argv and expect."; `parseChecks` wraps errors as `invalid_verification` with "verify check <n>: ...". File checks have their own `FILE_FIELDS`, so `timeoutMs` on a file check is already an unknown field there.
+      - hooks/register.ts near line 2078: `commandCheckResult` runs `await $.process.run(check.argv, { cwd: projectRoot, timeoutMs: 30_000 })`. In `verifyNode` (near line 2095) a rejected command becomes `not_run` with detail `Verification could not run: <message>`; a timeout's message reads `dag-workflow: $.process.run(<program>) aborted: still running after 30000ms`. verifyNode runs outside the serialized() queue, so a longer check does not block other runs.
+      - Claude Code's typings (.claude-plugin/types/claude-code/index.d.ts, ProcessRunInit) say `$.process.run` timeoutMs is in milliseconds, 30 seconds when absent, ten minutes at most.
+      - hooks/engine/tool-spec.ts: `TOOL_DESCRIPTION` is 2042 of the 2048-character `TOOL_DESCRIPTION_LIMIT` (Claude Code passes the model only the first 2048 characters; AGENTS.md forbids growing it past that). `INPUT_SCHEMA` describes each verify item's fields (`kind`, `path`, text fields, `argv`, `expect`).
+      - tests/control-runtime.test.ts near line 58 asserts a verify command runs with `init: { cwd: '/work', timeoutMs: 30_000 }` (`h.processes` in tests/control-harness.ts records each process.run event). Engine parse tests live in tests/verification.test.ts and tests/check-engine.test.ts.
+
+      REQUIRED:
+      1. Contract: `timeoutMs` is optional on command checks only; it must be a whole number from 1000 to 600000 inclusive; the default is 30000. Export the bounds and the default as named constants from hooks/engine/verification.ts (engine stays pure: no `$`, no clock) and use them in the parser and in register.ts. Refuse every other value (0, 999, 600001, 1.5, the string '30000', null) with one message naming the range and the default, for example 'timeoutMs must be a whole number of milliseconds from 1000 to 600000 (default 30000).'. Update the unknown-field message of command checks to list timeoutMs.
+      2. A command check without `timeoutMs` must parse to exactly the same object as today (no `timeoutMs` key), so existing definitions keep their fingerprints. Keep the field when given.
+      3. commandCheckResult passes `check.timeoutMs ?? <default constant>` to `$.process.run`; update the comment above it.
+      4. When a command check is not_run because it ran past its limit, append to the detail one sentence saying the check can set timeoutMs up to 600000 if it is slow by nature (detect the host's "still running after" message; leave other not_run details unchanged).
+      5. INPUT_SCHEMA: add `timeoutMs` to the verify item properties as an integer with minimum 1000, maximum 600000 and a description that says it applies to command checks, is in milliseconds and defaults to 30000. Add `timeoutMs?` to the command form in TOOL_DESCRIPTION only if you shorten other wording so the total stays at or under 2048 characters without losing any rule; otherwise leave TOOL_DESCRIPTION unchanged.
+      6. Tests (claude-code/testing, no wall-clock waits, prefer tests/control-harness.ts): parser accept and refuse cases including the file-check refusal and the unchanged parse of a check without the field; a hook-level test that a check with `timeoutMs: 120000` reaches process.run with that `timeoutMs` while one without it still gets 30000; a test for the step-4 hint on a timed-out check (make the harness process.run reject with the host's message for one marked argv). Write the new tests first and run them red.
+
+      SCOPE: edit only hooks/engine/types.ts, hooks/engine/verification.ts, hooks/engine/tool-spec.ts, hooks/register.ts (commandCheckResult and the not_run detail in verifyNode) and files under tests/. Other nodes of this run edit docs/reference.md and skills/planning at the same time; do not touch them, README.md or flows/.
+
+      VERIFY: run `mkdir -p /tmp/dag-p13 && command claude plugin test . > /tmp/dag-p13/verify-timeout-suite.txt 2>&1` in the foreground (about 20 s) and confirm the file has the lines ` 0 fail` and `Ran <n> tests across <m> files.`; this run's own verify still has the old 30 s limit, so the runtime reads that file instead of rerunning the suite. Run `bunx -p typescript@5 tsc -p . --noEmit` (no output) and `command claude plugin validate .` (passes; the existing ".catch" warnings are known). The runtime also runs two `bun -e` probes: parseChecks must accept `timeoutMs: 120000` on a command check, keep a plain command check without the key, refuse 0, 999, 600001, 1.5 and '30000', and refuse `timeoutMs` on a file check; INPUT_SCHEMA must contain "timeoutMs" and TOOL_DESCRIPTION must stay within its limit.
+
+      STOP WHEN: the probes pass and the suite file shows 0 fail with tsc and validate passing.
+
+      In ## Output give: the constant names and values, the exact refusal message, the not_run hint sentence, whether TOOL_DESCRIPTION changed and its new length, the new test names, and the last two lines of /tmp/dag-p13/verify-timeout-suite.txt.
+
+  - id: docs-reference
+    label: Document timeoutMs in docs/reference.md
+    category: writing
+    writes:
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        contains: "timeoutMs"
+      - kind: file
+        path: docs/reference.md
+        contains: "600000"
+      - kind: file
+        path: docs/reference.md
+        absent: "프로젝트 루트에서 셸 없이 실행해 30초 안에 끝나고"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md]
+    prompt: |
+      TASK: Document the new optional `timeoutMs` field of command verify checks in docs/reference.md (Korean; keep it Korean).
+
+      CONTRACT (another node implements exactly this at the same time; describe exactly this):
+      - A command check is `{kind: command, argv: [...], expect?, timeoutMs?}`. `timeoutMs` is whole milliseconds from 1000 to 600000 (10분, Claude Code's `$.process.run` maximum); without it the limit is 30000 (30초), as before.
+      - `timeoutMs` on a file check, or any other value (0, 999, 600001, 1.5, a string), is refused as `invalid_verification`.
+      - A command that runs past its limit is `not_run` (it fails whatever `expect` says), and its detail now adds that a check that is slow by nature can set `timeoutMs` up to 600000.
+      - Verification runs outside the plugin's serialized queue, so a long check delays only its own node.
+      - When to use it: only for a check that is slow by nature, such as a full test suite; keep reproduction and other checks fast, and never raise it to hide a hang. Example: `{kind: command, argv: [claude, plugin, test, "."], timeoutMs: 120000}`.
+
+      REQUIRED:
+      1. The verify table near line 293: in the 명령 row, add `timeoutMs?` to the form and replace '프로젝트 루트에서 셸 없이 실행해 30초 안에 끝나고' with wording that says it runs from the project root without a shell and must finish within its limit (기본 30초, `timeoutMs`로 최대 600000ms).
+      2. The command-check bullets near line 317 ('프로그램이 시작되지 못하거나 ... 30초 제한을 넘기면 ...'): say "its limit" instead of 30초, and add one bullet with the contract above (range, default, refusal, the not_run hint, when to use it, the example).
+      3. Search the rest of docs/reference.md for other statements of the 30-second verify limit (`30초`) and update only those that describe verify command checks; leave unrelated 30초 mentions (for example the stall marker) as they are.
+
+      SCOPE: edit only docs/reference.md. Other nodes edit hooks/, tests/ and skills/planning at the same time.
+
+      VERIFY: `git diff --check -- docs/reference.md` prints nothing; `grep -n 'timeoutMs' docs/reference.md` shows the table row and the new bullet.
+
+      STOP WHEN: the table row and the bullets describe the contract and the check passes.
+
+      In ## Output give: the changed lines with their line numbers and the other 30초 mentions you left unchanged.
+
+  - id: doctrine
+    label: Teach the planning skill about timeoutMs
+    category: writing
+    writes:
+      - skills/planning/SKILL.md
+      - skills/planning/references/planning.md
+    verify:
+      - kind: file
+        path: skills/planning/SKILL.md
+        contains: "timeoutMs"
+      - kind: file
+        path: skills/planning/references/planning.md
+        contains: "timeoutMs"
+      - kind: file
+        path: skills/planning/references/planning.md
+        absent: "The runtime kills checks after 30 seconds."
+      - kind: command
+        argv: [git, diff, --check, --, skills/planning]
+    prompt: |
+      TASK: Update the dag-workflow planning skill so planners know a command check can set `timeoutMs`.
+
+      CONTRACT (another node implements exactly this at the same time; describe exactly this):
+      - A command check is `{"kind": "command", "argv": [...], "expect"?, "timeoutMs"?}`. `timeoutMs` is whole milliseconds from 1000 to 600000; without it the limit is 30000 ms (30 seconds), as before. On a file check, or with any other value, `start` and `amend` refuse it as `invalid_verification`.
+      - A check that runs past its limit is `not_run`, and its detail says a check that is slow by nature can set `timeoutMs` up to 600000.
+      - Guidance: keep checks fast; set `timeoutMs` only on a check that is slow by nature, such as a full test suite (`{"kind": "command", "argv": ["claude", "plugin", "test", "."], "timeoutMs": 120000}`); never raise it to hide a hang; a reproduction check in the Debug chain still aims for seconds.
+
+      REQUIRED:
+      1. skills/planning/SKILL.md: the sentence near line 191 'Commands run from the project root without a shell, with a 30-second limit.' becomes a statement of the default limit and the optional `timeoutMs` (range and when to use it); add `"timeoutMs"?` to the command form in the check-forms list of '## The shape'.
+      2. skills/planning/references/planning.md: line 120 '**Fast.** The runtime kills checks after 30 seconds. ...' keeps its advice to aim for seconds but states the default limit and that only a slow-by-nature check sets `timeoutMs`; the sentence near line 327 gets the same change as SKILL.md; add `timeoutMs` to the command form in '## The `verify` contract' (near line 323) and to the 'Command `expect`' bullet's statement about timeouts if it names 30 seconds.
+      3. Change nothing else; keep the plain one-sentence-per-line style of these files.
+
+      SCOPE: edit only skills/planning/SKILL.md and skills/planning/references/planning.md. Other nodes edit hooks/, tests/ and docs/reference.md at the same time.
+
+      VERIFY: `git diff --check -- skills/planning` prints nothing; `grep -n 'timeoutMs' skills/planning/SKILL.md skills/planning/references/planning.md` shows each change.
+
+      STOP WHEN: both files state the default and the optional field and the check passes.
+
+      In ## Output give: each changed line with its file and line number.

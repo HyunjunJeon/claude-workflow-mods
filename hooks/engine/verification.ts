@@ -1,4 +1,4 @@
-import { fail, TEXT_FIELDS, type CommandExpect, type Definition, type EngineError, type Result, type TextExpect, type VerificationCheck } from './types.ts'
+import { fail, TEXT_FIELDS, type CommandCheck, type CommandExpect, type Definition, type EngineError, type Result, type TextExpect, type VerificationCheck } from './types.ts'
 
 // The .claude segment is refused in any letter case: on macOS and Windows .CLAUDE/dag opens the run's own checkpoints.
 export function projectPath(path: string): boolean {
@@ -16,10 +16,29 @@ export function readOnlyAbsolutePath(path: string): boolean {
 }
 
 const MAX_CHECKS = 16
+
+// A command check's time limit. $.process.run gives a child 30 s when timeoutMs is absent and refuses more than ten minutes
+// (ProcessRunInit in the Claude Code typings), so the default and the upper bound are the host's own. The lower bound keeps a
+// limit from expiring before a program has started.
+export const MIN_COMMAND_TIMEOUT_MS = 1_000
+export const MAX_COMMAND_TIMEOUT_MS = 600_000
+export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
+const TIMEOUT_MESSAGE = `timeoutMs must be a whole number of milliseconds from ${MIN_COMMAND_TIMEOUT_MS} to ${MAX_COMMAND_TIMEOUT_MS} (default ${DEFAULT_COMMAND_TIMEOUT_MS}).`
+
+// The host rejects $.process.run with "dag-workflow: $.process.run(<program>) aborted: still running after <limit>ms" when the
+// child outlives its limit; a program that cannot start is rejected with a different message.
+const RAN_PAST_LIMIT = /still running after \d+ms/
+
+// What to add to a command check's not_run detail when the host's rejection says it ran past its limit; otherwise undefined.
+export function timeoutAdvice(failure: string): string | undefined {
+  return RAN_PAST_LIMIT.test(failure)
+    ? `If this check is slow by nature, set timeoutMs on it, up to ${MAX_COMMAND_TIMEOUT_MS} milliseconds.`
+    : undefined
+}
 // contains, absent and matches with empty text would hold for every text; lastLine and equals may be '' (an empty stderr is a real check).
 const NONEMPTY_TEXT_FIELDS = new Set<string>(['contains', 'absent', 'matches'])
 const FILE_FIELDS = new Set<string>(['kind', 'path', ...TEXT_FIELDS])
-const COMMAND_FIELDS = new Set<string>(['kind', 'argv', 'expect'])
+const COMMAND_FIELDS = new Set<string>(['kind', 'argv', 'expect', 'timeoutMs'])
 const EXPECT_FIELDS = new Set<string>(['exit', 'stdout', 'stderr'])
 
 // "contains, absent, matches, lastLine or equals", for messages that name every text field.
@@ -105,6 +124,10 @@ function exitCode(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255
 }
 
+function commandTimeout(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= MIN_COMMAND_TIMEOUT_MS && value <= MAX_COMMAND_TIMEOUT_MS
+}
+
 function parseExpect(raw: unknown): Parsed<CommandExpect> {
   const empty = { ok: false, message: 'expect must be an object with at least one of exit, stdout or stderr.' } as const
   if (!isRecord(raw)) return empty
@@ -143,15 +166,22 @@ function parseCheck(raw: unknown): Parsed<VerificationCheck> {
   }
   if (raw.kind === 'command') {
     const unknown = unknownField(raw, COMMAND_FIELDS)
-    if (unknown !== undefined) return { ok: false, message: `unknown field "${unknown}" in a command check; use argv and expect.` }
+    if (unknown !== undefined) return { ok: false, message: `unknown field "${unknown}" in a command check; use argv, expect and timeoutMs.` }
     const { argv } = raw
     if (!Array.isArray(argv) || !argv.every((arg: unknown): arg is string => typeof arg === 'string') || (argv[0] ?? '').trim() === '') {
       return { ok: false, message: 'argv must be a nonempty array of strings whose first item names the program.' }
     }
-    if (raw.expect === undefined) return { ok: true, value: { kind: 'command', argv: [...argv] } }
-    const expectation = parseExpect(raw.expect)
-    if (!expectation.ok) return expectation
-    return { ok: true, value: { kind: 'command', argv: [...argv], expect: expectation.value } }
+    const parsed: CommandCheck = { kind: 'command', argv: [...argv] }
+    if (raw.expect !== undefined) {
+      const expectation = parseExpect(raw.expect)
+      if (!expectation.ok) return expectation
+      parsed.expect = expectation.value
+    }
+    if (raw.timeoutMs !== undefined) {
+      if (!commandTimeout(raw.timeoutMs)) return { ok: false, message: TIMEOUT_MESSAGE }
+      parsed.timeoutMs = raw.timeoutMs
+    }
+    return { ok: true, value: parsed }
   }
   return { ok: false, message: 'kind must be "file" or "command".' }
 }

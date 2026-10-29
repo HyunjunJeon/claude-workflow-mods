@@ -1,4 +1,3 @@
-import type { On } from 'claude-code'
 import { expect, test, type Engine, type Plugin } from 'claude-code/testing'
 import type { DecisionRecord } from '../hooks/engine/decisions.ts'
 import type { JevRequest } from '../hooks/engine/jev.ts'
@@ -67,15 +66,6 @@ function questionRequests(h: Harness): JevRequest[] {
   return h.requests.filter(request => 'question' in request.questions)
 }
 
-function recordNotify(on: On): string[] {
-  const sent: string[] = []
-  on('ui.notify', (_engine, e) => {
-    sent.push(e.text)
-    return { value: { isSent: true, channel: 'terminal_bell' } }
-  })
-  return sent
-}
-
 function nodeA(h: Harness, runId: string) {
   const node = checkpoint(h, runId).nodes.find(current => current.id === 'a')
   if (!node) throw new Error('Missing node a')
@@ -106,7 +96,6 @@ function questionRecords(h: Harness): DecisionRecord[] {
 }
 
 test('a blocked turn end runs no verification, keeps the agent and tells the main conversation and the person once', async ($, on) => {
-  const notified = recordNotify(on)
   const h = harness(on)
   await boot($)
   const runId = await start($, DEFINITION)
@@ -125,7 +114,7 @@ test('a blocked turn end runs no verification, keeps the agent and tells the mai
   expect(news[0]?.text).toContain('If nobody answers within 15 minutes, the default is sent as the answer.')
   expect(news[0]?.text).toContain(`{"action":"answer","run_id":"${runId}","node_id":"a","answer":"..."}`)
   expect(news[0]?.text).toContain(`/dag answer ${runId} a <text>`)
-  expect(notified).toEqual([`DAG Questions › a asks: ${QUESTION}`])
+  expect(h.notifications.map(note => note.text)).toEqual([`DAG Questions › a asks: ${QUESTION}`])
 })
 
 test('the answer action resumes the same agent at the same attempt, and its next turn end is verified and completes the node', async ($, on) => {

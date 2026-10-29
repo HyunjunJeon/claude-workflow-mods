@@ -49,7 +49,7 @@ function userPrompts(h: ReturnType<typeof harness>): Submit[] {
 
 // No DAG pane: every finished node also reaches the model as a node progress prompt.
 async function bootWithoutPane($: Engine): Promise<void> {
-  await $.session.start({ surface: 'vscode', isInteractive: true, cwd: '/work' })
+  await $.session.start({ surface: 'mobile', isInteractive: true, cwd: '/work' })
   await $.skill.prompt({ skill: 'dag-workflow:planning', text: '# planning' })
   await command($, 'enforce strict')
 }
