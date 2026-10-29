@@ -11,7 +11,7 @@ export type DecisionRecord = {
   readonly sessionId: string
   // Kind 'readonly' is a main-conversation Bash call the plugin's judge allowed that the host did not mark isReadOnly. No Jev
   // call is behind it: source baseline, outcome existing-decision (the host's verdict stands), proposed allow, selected the host's.
-  readonly kind: 'routing' | 'permission' | 'recovery' | 'mode' | 'surface' | 'readonly'
+  readonly kind: 'routing' | 'permission' | 'recovery' | 'mode' | 'surface' | 'question' | 'readonly'
   readonly subject: string
   readonly proposed: string
   readonly selected: string
@@ -53,7 +53,7 @@ function isDecision(value: unknown): value is DecisionRecord {
   const outcomes = ['applied', 'low-confidence', 'ask', 'existing-decision', 'disabled', 'missing-key', 'timeout', 'http-error', 'invalid-response', 'transport-error']
   if (!['id', 'sessionId', 'subject', 'proposed', 'selected', 'ruleset', 'stateHash'].every(key => typeof value[key] === 'string')) return false
   if (!['at', 'threshold', 'latencyMs'].every(key => typeof value[key] === 'number' && Number.isFinite(value[key]))) return false
-  if (value.kind !== 'routing' && value.kind !== 'permission' && value.kind !== 'recovery' && value.kind !== 'mode' && value.kind !== 'surface' && value.kind !== 'readonly') return false
+  if (value.kind !== 'routing' && value.kind !== 'permission' && value.kind !== 'recovery' && value.kind !== 'mode' && value.kind !== 'surface' && value.kind !== 'question' && value.kind !== 'readonly') return false
   if (value.source !== 'jev' && value.source !== 'baseline' && value.source !== 'rule') return false
   if (typeof value.outcome !== 'string' || !outcomes.includes(value.outcome)) return false
   if (value.confidence !== undefined && (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1)) return false

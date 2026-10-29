@@ -65,6 +65,12 @@
       "description": "Use confident Jev failure classification to retry within the original scope, at most two extra attempts per node; implementation fixes may use Opus. A reviewer FAIL verdict is never retried: once per run the producers its findings cite rerun with them, then the reviewers",
       "default": true
     },
+    "notify": {
+      "type": "boolean",
+      "title": "Native notifications",
+      "description": "Raise a native notification when a run of this session settles (not a cancelled one), when a node starts waiting for a permission answer, and when automatic recovery stops retrying a node. The in-pane toast is the fallback: it still shows when the notification is not sent or fails",
+      "default": true
+    },
     "jev_enabled": {
       "type": "boolean",
       "title": "Jev automatic decisions",
@@ -88,7 +94,23 @@
     "jev_confidence": {
       "type": "number",
       "title": "Jev minimum confidence",
-      "description": "Minimum confidence for automatic category assignment from the Jev API and for every tool permission or recovery decision",
+      "description": "Minimum confidence for applying a tool permission Jev chose (allow or deny); a less confident answer keeps the host decision",
+      "default": 0.9,
+      "min": 0,
+      "max": 1
+    },
+    "jev_routing_confidence": {
+      "type": "number",
+      "title": "Jev routing confidence",
+      "description": "Minimum confidence for applying a category the Jev API chose; a less confident answer keeps the definition's proposed category",
+      "default": 0.8,
+      "min": 0,
+      "max": 1
+    },
+    "jev_recovery_confidence": {
+      "type": "number",
+      "title": "Jev recovery confidence",
+      "description": "Minimum confidence for an automatic recovery retry of a failed node; a less confident answer leaves the node failed for the main conversation",
       "default": 0.9,
       "min": 0,
       "max": 1
@@ -96,7 +118,7 @@
     "jev_model_routing_confidence": {
       "type": "number",
       "title": "Jev session-model routing confidence",
-      "description": "Minimum confidence for applying a category the session model chose (without TYPESAFE_API_KEY or when the Jev API fails); permission and recovery decisions keep Jev minimum confidence",
+      "description": "Minimum confidence for applying a category the session model chose (without TYPESAFE_API_KEY or when the Jev API fails); tool permissions use Jev minimum confidence and recovery uses Jev recovery confidence",
       "default": 0.8,
       "min": 0,
       "max": 1

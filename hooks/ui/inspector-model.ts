@@ -5,6 +5,7 @@ import { awaitingApproval } from '../engine/run.ts'
 import { projectSessions, sessionConflicts, type SessionRecord } from '../engine/sessions.ts'
 import type { NodeRun, NodeState, Run, RunStatus, VerificationEvidence } from '../engine/types.ts'
 import { stringsFor, type Language, type Strings } from './i18n.ts'
+import { questionLines } from './view-model.ts'
 import { ACCENT, clean, fit, fitTail, formatDuration, width, type Line, type Segment } from './text.ts'
 
 export type InspectorView = 'decisions' | 'context' | 'sessions'
@@ -128,7 +129,7 @@ const EN: InspectorStrings = {
   hiddenSessions: count => `other projects: ${count} hidden`,
   noDecisions: 'No decisions recorded in this session.',
   decisionMissing: 'That decision is no longer in the log.',
-  kind: { routing: 'routing', permission: 'permission', recovery: 'recovery', mode: 'mode', surface: 'surface', readonly: 'read-only' },
+  kind: { routing: 'routing', permission: 'permission', recovery: 'recovery', mode: 'mode', surface: 'surface', question: 'question', readonly: 'read-only' },
   source: { jev: 'Jev', baseline: 'baseline', rule: 'final-audit rule' },
   outcome: {
     applied: 'applied',
@@ -210,7 +211,7 @@ const KO: InspectorStrings = {
   hiddenSessions: count => `다른 프로젝트의 세션 ${count}개 숨김`,
   noDecisions: '이 세션에 기록된 결정이 없습니다.',
   decisionMissing: '해당 결정은 더 이상 로그에 없습니다.',
-  kind: { routing: '라우팅', permission: '권한', recovery: '복구', mode: '실행 방식', surface: '표시 방식', readonly: '읽기 전용' },
+  kind: { routing: '라우팅', permission: '권한', recovery: '복구', mode: '실행 방식', surface: '표시 방식', question: '질문', readonly: '읽기 전용' },
   source: { jev: 'Jev', baseline: '기본 규칙', rule: '최종 감사 규칙' },
   outcome: {
     applied: '적용',
@@ -573,7 +574,7 @@ function contextView(input: InspectorInput, t: InspectorStrings, s: Strings): In
     const writes = [...new Set(run.definition.nodes.flatMap(node => node.writes ?? []))]
     lines.push(indented(dim(writes.length ? t.writes(writes.join(', ')) : t.noWrites)))
     const nodes = [...run.nodes].sort((a, b) => NODE_PRIORITY[a.state] - NODE_PRIORITY[b.state])
-    for (const node of nodes.slice(0, PAGE_SIZE)) lines.push(nodeLine(node, t, s, input.waiting))
+    for (const node of nodes.slice(0, PAGE_SIZE)) lines.push(nodeLine(node, t, s, input.waiting), ...questionLines(node, run.runId, s).map(line => indented(...line)))
     if (nodes.length > PAGE_SIZE) lines.push(indented(dim(t.more(nodes.length - PAGE_SIZE))))
 
     lines.push([], [heading(t.evidence)])

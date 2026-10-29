@@ -188,3 +188,11 @@ test('widest_wave is the size of the largest wave and max_concurrent echoes the 
   expect(preview(diamond(), 7).widest_wave).toBe(2)
   expect(preview(diamond(), 7).max_concurrent).toBe(7)
 })
+
+test('a vertical slice with three files previews its note beside the warnings', async () => {
+  const slice = node('api', [], { slice: true, writes: ['src/a.ts', 'src/b.ts', 'src/c.ts'], verify: [{ kind: 'file', path: 'src/a.ts', contains: 'x' }] })
+  const p = preview([slice])
+  expect(p.notes).toEqual(['node "api": declared a vertical slice that owns 3 files (src/a.ts, src/b.ts, src/c.ts) - the files warning is expected'])
+  expect(p.warnings.some(w => w.includes('one producer owns'))).toBe(false)
+  expect(preview(diamond()).notes).toEqual([])
+})

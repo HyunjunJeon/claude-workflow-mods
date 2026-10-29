@@ -1,0 +1,276 @@
+# Improvement P12: documentation drift and gating-hook guards (B2, B7, LEARN-3), plus A1 and A2 from
+# docs/external-benchmark-plan.md.
+# B2/B7/LEARN-3 come from docs/improvement-backlog.md (run dag_mvgmecok_150je7, base ec65b71); decisions D1-D7 in
+# docs/improvement-plan.md. A1: since Claude Code 2.1.301 a mod's `.catch` runs only when the hook throws or times out.
+# A2: since 2.1.292/2.1.300 Workflow agents pass the `agent.spawn` hook, which appends the learned-skill catalog to
+# every spawn prompt; decision D-X1 (2026-10-28): Workflow agents do not get the catalog.
+# Changes against the plan: `claude plugin validate` on 2.1.312 no longer prints the "gating hook without .catch"
+# list (removed in 2.1.304), so the "11 -> 8" acceptance line is replaced by runtime tests.
+# AGENTS.md and hooks/AGENTS.md are in .git/info/exclude: agents-doc edits a local-only file that no commit carries.
+#
+# PREREQUISITE: `git status --short -- hooks tests skills eval README.md .claude-plugin` prints nothing.
+# Run it with:  /dag run flows/improvement/p12-docs-guards.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves):
+#   wave 1: agents-doc, reference-doc, hint-from-usage (disjoint files)
+#   wave 2: hook-guards (register.ts after hint-from-usage)
+#   wave 3: workflow-spawn (register.ts after hook-guards)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: writing for the two documents; standard for hook-guards (it decides per hook, from the host's documented
+# failure semantics, whether a guard is needed at all); trivial for the hint and the workflow skip.
+# register.ts is shared by three nodes, so they form a chain; the edges carry no data beyond serialization.
+
+key: improve-p12-docs-guards-1
+name: P12 - documentation drift and gating-hook guards
+goal: >
+  AGENTS.md points to skills/planning/ and lists all eight shipped skills and the English-prompt rule;
+  docs/reference.md lists main_allowed_tools, /dag open and the Workflow-agent exception to the learned-skill catalog;
+  the /dag argument hint is built from the same list as USAGE; a store failure inside the prompt.submit,
+  session.receive or tool.check hook no longer rejects the user turn or loses the verdict, while a turn decision that
+  throws still leaves the DAG gate closed; Workflow agents' spawn prompts do not get the learned-skill catalog; the
+  plugin test suite, tsc and validate pass. The untracked planning files docs/improvement-backlog.md,
+  docs/improvement-plan.md, docs/external-benchmark-plan.md and flows/improvement/*.yaml predate this run's code
+  changes and are committed as they are.
+review:
+  request: |
+    추천한 작업대로 시작. dag-workflow
+    Recommended work for this phase (docs/improvement-plan.md P12 and docs/external-benchmark-plan.md A1, A2):
+    - B2: AGENTS.md uses skills/planning/ and lists the shipped skills; docs/reference.md lists main_allowed_tools
+      (default []) in the settings table and documents /dag open as an alias of /dag; the /dag argument hint is built
+      from the same list as USAGE, with a test that compares them.
+    - LEARN-3: AGENTS.md states that every agent-read prompt is English.
+    - B7 + A1: prompt.submit, session.receive and tool.check log a store failure and fall through instead of failing
+      the user turn; no user notice; the closed gate when decideTurn throws stays. Follow the 2.1.301 `.catch`
+      semantics. The other eight hooks are out of scope.
+    - A2 (decision D-X1): the agent.spawn hook does not append the learned-skill catalog to Workflow agents.
+    - D2: commit the planning documents and the discovery flow as they are, in their own commit.
+  rules:
+    - AGENTS.md
+    - hooks/AGENTS.md
+commit:
+  - message: "docs(plan): add the improvement backlog, plans and phase flows"
+    paths:
+      - docs/improvement-backlog.md
+      - docs/improvement-plan.md
+      - docs/external-benchmark-plan.md
+      - flows/improvement/discover.yaml
+      - flows/improvement/p12-docs-guards.yaml
+  - message: |
+      fix(runtime): keep gating hooks from failing a turn on a store error
+
+      Build the /dag argument hint from the USAGE list, follow the 2.1.301 .catch
+      semantics in prompt.submit, session.receive and tool.check, and leave the
+      learned-skill catalog out of Workflow agents' spawn prompts.
+    paths:
+      - hooks/register.ts
+      - tests/dag-ping.test.ts
+      - tests/runtime-guards.test.ts
+      - tests/session-learning.test.ts
+      - docs/reference.md
+
+nodes:
+  - id: agents-doc
+    label: AGENTS.md paths, shipped skills and the English-prompt rule
+    category: writing
+    writes:
+      - AGENTS.md
+    verify:
+      - kind: file
+        path: AGENTS.md
+        absent: skills/dag-planning
+      - kind: file
+        path: AGENTS.md
+        contains: "skills/planning/SKILL.md"
+      - kind: file
+        path: AGENTS.md
+        matches: "anti-slop[\\s\\S]*debugging[\\s\\S]*interview[\\s\\S]*planning[\\s\\S]*pm[\\s\\S]*review-standards[\\s\\S]*secure-coding[\\s\\S]*testing"
+      - kind: file
+        path: AGENTS.md
+        contains: "in English"
+    prompt: |
+      TASK: Correct the repository guide AGENTS.md so agents find the shipped skills and know the prompt-language rule.
+      DELIVERABLE: AGENTS.md with these three changes and nothing else:
+      1. Replace both stale paths `skills/dag-planning/` (the STRUCTURE tree line and the WHERE TO LOOK row
+         "Planning doctrine") with the real folder `skills/planning/` (`skills/planning/SKILL.md`, companion
+         `skills/planning/references/planning.md`).
+      2. In the STRUCTURE tree, replace the single skill line with a `skills/` entry that lists all eight shipped skill
+         folders in this alphabetical order, each with a short comment taken from the `description` in its SKILL.md
+         front matter: anti-slop, debugging, interview, planning, pm, review-standards, secure-coding, testing.
+      3. Under UNIQUE STYLES add one bullet: every text an agent reads (agent and skill prompts, DAG node prompts,
+         generated review templates, learned skills) is written in English; human-facing documents such as README.md
+         and docs/*.md may stay Korean. The bullet must contain the words "in English".
+      Keep the header, every other row and the existing style (tables, backticks, one fact per bullet).
+      SCOPE: read AGENTS.md and skills/*/SKILL.md; edit AGENTS.md only. hooks/AGENTS.md is out of scope.
+      AGENTS.md is excluded from git (.git/info/exclude), so do not stage or commit it.
+      VERIFY: `grep -n "skills/dag-planning" AGENTS.md` prints nothing; `grep -n "skills/planning/" AGENTS.md` shows
+      both corrected places; all eight folder names appear in the tree in the order above.
+      STOP WHEN: the three changes are in AGENTS.md and the greps hold. In ## Output list the changed sections.
+
+  - id: reference-doc
+    label: reference.md settings row, /dag open and the Workflow exception
+    category: writing
+    writes:
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        matches: "^\\| *`main_allowed_tools` *\\| *`\\[\\]` *\\|"
+      - kind: file
+        path: docs/reference.md
+        matches: "^/dag open +"
+      - kind: file
+        path: docs/reference.md
+        contains: "Workflow"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md]
+    prompt: |
+      TASK: Close three documentation gaps in docs/reference.md (Korean prose; keep it Korean).
+      DELIVERABLE: docs/reference.md with:
+      1. In the `## 설정` table, a new row after `max_concurrent` or next to the enforcement rows:
+         `| \`main_allowed_tools\` | \`[]\` | <description> |`. The description, in Korean: the tool names the main
+         conversation may still call under strict enforcement (and in DAG turns under auto), besides the read-only and
+         orchestration tools. Source: .claude-plugin/plugin.json `main_allowed_tools` and the existing sentence near
+         line 115 of docs/reference.md. Match the table's column style.
+      2. In the command block under `## 사용법` ("파일로 실행하기"), a line `/dag open` right after the `/dag` line,
+         described as the same as `/dag` (opens the DAG pane). hooks/register.ts runCommand treats an empty verb as
+         `open`, and `if (verb === 'open')` opens the pane.
+      3. In `## 세션 학습`, after the paragraph that says the next user prompt and subagent start prompts receive the
+         applicable skills' descriptions and paths (about line 79), one sentence: agents that the Workflow tool starts
+         do not receive this list, because a workflow script writes its agents' prompts itself. Use the word
+         "Workflow" literally.
+      SCOPE: read docs/reference.md, .claude-plugin/plugin.json and hooks/register.ts; edit docs/reference.md only.
+      The code change for item 3 is made by another node; describe the behavior, do not edit code.
+      VERIFY: `git diff --check -- docs/reference.md` exits 0; the new table row starts with `| \`main_allowed_tools\``.
+      STOP WHEN: the three additions are in place. In ## Output list them with their line numbers.
+
+  - id: hint-from-usage
+    label: Build the /dag argument hint from the USAGE list
+    category: trivial
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/dag-ping.test.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        absent: "argumentHint: '[list | run <file> | preview <file>"
+      - kind: file
+        path: tests/dag-ping.test.ts
+        contains: argumentHint
+      - kind: command
+        argv: [claude, plugin, test, "."]
+    prompt: |
+      TASK: Make the /dag command's argument hint come from the same list as its USAGE string, with a test that compares
+      them.
+      DELIVERABLE: In hooks/register.ts, `const USAGE` (about line 75) is the full usage string
+      `Usage: /dag [list | run <file> | ... | learning [status|on|off|prune]]`, while the command registration's
+      `argumentHint` (about line 3704) is a separate hand-written literal that omits context, note, decisions,
+      sessions, handoff, accept, inspect and view, and spells `[node...]` where USAGE has `[nodes...]`.
+      Define the subcommand forms once (for example an array of strings) and build both USAGE and argumentHint from
+      it, so USAGE keeps its current text exactly and argumentHint becomes `[<the same forms joined by ' | '>]`.
+      Add a test in tests/dag-ping.test.ts that reads the registered /dag command's argumentHint through the test kit
+      and asserts it equals the bracketed list inside the USAGE text that `/dag` with an unknown verb prints (or
+      another public way to read USAGE; do not export internals only for the test unless no public way exists). Red
+      first: the test must fail against the current literal.
+      SCOPE: edit hooks/register.ts (only the USAGE/argumentHint definitions) and tests/dag-ping.test.ts. Other nodes
+      edit register.ts after you; leave every other line alone.
+      VERIFY: `claude plugin test .` exits 0, and the new test failed before your register.ts change.
+      STOP WHEN: the suite passes. In ## Output give the new definition's line numbers and the test name.
+
+  - id: hook-guards
+    label: Store failures in prompt.submit, session.receive and tool.check
+    category: standard
+    dependsOn:
+      - hint-from-usage
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/runtime-guards.test.ts
+    verify:
+      - kind: file
+        path: tests/runtime-guards.test.ts
+        contains: "prompt.submit lets the user turn through when the context store write fails"
+      - kind: file
+        path: tests/runtime-guards.test.ts
+        contains: "session.receive passes a handoff delivery on when the session refresh fails"
+      - kind: file
+        path: tests/runtime-guards.test.ts
+        contains: "tool.check keeps the engine verdict when recording the permission wait fails"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Make a storage failure inside three gating hooks in hooks/register.ts log and fall through instead of
+      failing the user's turn or losing the verdict.
+      DELIVERABLE: Code changes in hooks/register.ts and three runtime tests in tests/runtime-guards.test.ts with
+      exactly these titles:
+        "prompt.submit lets the user turn through when the context store write fails"
+        "session.receive passes a handoff delivery on when the session refresh fails"
+        "tool.check keeps the engine verdict when recording the permission wait fails"
+      The hooks (line numbers approximate):
+      - `on('prompt.submit', ...)` (~3860) awaits persistContext, decideTurn and learning collection unguarded.
+      - `on('session.receive', ...)` (~3782) awaits refreshSessions and refreshExternalRuns unguarded.
+      - `on('tool.check', ...)` (~3937) awaits markWaiting; markWaiting (~676) calls `$.clock.now()` outside its try.
+      HOST SEMANTICS (Claude Code 2.1.312, read .claude-plugin/types/claude-code/index.d.ts first): since 2.1.301 a
+      mod's `.catch(($, e, next) => ...)` runs only when the hook throws or times out; `next.called` tells whether the
+      hook had already called next, and `next.error` describes the failure. The type comments state each event's
+      default when a hook fails: a failed prompt.submit hook never blocks the prompt; a failed tool.check guard is
+      skipped, leaving the verdict beneath. Read the comments on 'prompt.submit', 'session.receive' and 'tool.check'
+      and the `.catch` examples (search for `next.called`).
+      METHOD: For each hook, first write its test (inject the failure through the test kit's storage or clock mock,
+      see tests/control-harness.ts and existing tests in tests/runtime-guards.test.ts) and run it against the current
+      code. If it fails, fix the hook: catch the failure where it happens (or with `.catch`), log it with `$.ui.log`
+      including the error message, and continue with `next(e)` (prompt.submit, session.receive) or return the engine's
+      verdict (tool.check). No toast or notice to the user. If the test already passes because the host fails open,
+      keep the test as a regression pin, change no code for that hook, and say so in ## Output.
+      INVARIANT: under enforcement auto, prompt.submit sets turnMode to 'dag' before `decideTurn` so that a decision
+      that throws leaves the DAG gate closed. Keep that behavior; a guard must not reset turnMode or turnSurface. Find
+      the existing test that covers a throwing decision and cite it; if none exists, add one titled
+      "a turn decision that throws keeps the DAG gate closed".
+      SCOPE: edit only those three hooks (and markWaiting if needed) in hooks/register.ts and add tests to
+      tests/runtime-guards.test.ts. The other gating hooks are out of scope. A later node edits the agent.spawn hook;
+      leave it alone.
+      VERIFY: `claude plugin test .` exits 0 and `bunx -p typescript@5 tsc -p . --noEmit` exits 0.
+      STOP WHEN: the three tests exist and pass. In ## Output give, per hook: red or already-green, the change made
+      (file:line) or "none", and the test name; plus the closed-gate test name.
+
+  - id: workflow-spawn
+    label: Leave the learned-skill catalog out of Workflow agents
+    category: trivial
+    dependsOn:
+      - hook-guards
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    writes:
+      - hooks/register.ts
+      - tests/session-learning.test.ts
+    verify:
+      - kind: file
+        path: hooks/register.ts
+        contains: "e.workflow"
+      - kind: file
+        path: tests/session-learning.test.ts
+        contains: "a Workflow agent's spawn prompt gets no learned-skill catalog"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+    prompt: |
+      TASK: Stop the agent.spawn hook from appending the learned-skill catalog to agents the Workflow tool starts.
+      DELIVERABLE: In hooks/register.ts, `on('agent.spawn', ...)` (about line 3916) returns
+      `next({ ...e, prompt: \`${e.prompt}\n\n${learningCatalog(...)}\` })` for every spawn when learning is on and
+      skills are eligible. Since Claude Code 2.1.292 Workflow agents pass this hook too, and their input carries
+      `workflow?: { runId, ... }` (see AgentSpawnInput in .claude-plugin/types/claude-code/index.d.ts, about line 360).
+      Add a check so a spawn with `e.workflow` set goes to `next(e)` unchanged, placed after the two existing
+      learning-agent checks and before the catalog append. Add a test titled exactly
+      "a Workflow agent's spawn prompt gets no learned-skill catalog" to tests/session-learning.test.ts, next to the
+      existing test that shows an ordinary spawn receives the catalog (about line 383); dispatch an agent.spawn with a
+      `workflow` field through the test kit and assert the prompt is unchanged. Red first.
+      SCOPE: edit only the agent.spawn hook in hooks/register.ts and tests/session-learning.test.ts. docs/reference.md
+      is handled by another node.
+      VERIFY: `claude plugin test .` exits 0, and the new test failed before the change.
+      STOP WHEN: the suite passes. In ## Output give the changed line and the test name.

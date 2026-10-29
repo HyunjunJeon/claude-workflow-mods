@@ -1,0 +1,459 @@
+# Improvement P13: definition lint and review template (B5, B3, B8, B9, B1 of docs/improvement-backlog.md),
+# decisions D3, D4, D5, D7 in docs/improvement-plan.md.
+# Changes against the plan (checked 2026-10-28 at 0856c39):
+# - `bun eval/check-definition.ts` today prints FAIL for p4 and p5 (files warning on a declared slice) and for p6 and p11
+#   (review.request clauses that start with a bare article); p7 already prints OK. lint-paths fixes the article rule,
+#   flows-annotate adds `slice: true`.
+# - Node ids avoid words that make lint count a node as a verifier (check, test, review) or rework skip it.
+# - reference-doc depends on the three lint nodes, because it documents their exact wording.
+# - flows-annotate runs after the whole lint chain, so it sees every new warning on the old flows.
+#
+# PREREQUISITE: `git status --short` prints nothing.
+# Run it with:  /dag run flows/improvement/p13-definition-lint.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves):
+#   wave 1: lint-paths, spec-template, doctrine (disjoint files)
+#   wave 2: lint-precision (lint.ts after lint-paths)
+#   wave 3: lint-rerun-risk (lint.ts after lint-precision)
+#   wave 4: flows-annotate, reference-doc (disjoint files; both read the lint chain's results)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: standard for lint-paths (one normalized path set, a new node field outside the fingerprint and a notes
+# channel through three callers) and lint-precision (a host-time file read wired into start and the dry run);
+# trivial for lint-rerun-risk, flows-annotate and spec-template; writing for the two documents.
+# lint-paths is one vertical slice (field, lint, notes, check-definition, preview); it declares `slice: true`, so check-definition prints a note.
+# lint-paths' second verify check was corrected after the first attempt: p6 and p11 also carry the files warning until
+# flows-annotate runs, so it accepts exit 0 or 1 and only requires the article-rule message to be gone.
+# The run was amended with a contains-existing node (the long-contains warning skips text the target file already holds);
+# p11 docs-planning was relabelled "Remove ..." because "drop" makes the review-fix round skip a producer.
+
+key: improve-p13-definition-lint-1
+name: P13 - definition lint and review template
+goal: >
+  A node may declare `slice: true`, which is outside the node fingerprint and turns the "one producer owns N files"
+  warning into a note that check-definition prints beside OK and the dry-run preview returns; review.request clauses that
+  start with a bare article are no longer taken for a deliverable; start and the dry run warn when a file check's
+  `contains` quotes 40 or more characters that its node's prompt does not repeat, and when an `absent` string already
+  occurs two or more times in its existing target file; a definition with `review` warns when a producer's id, label or
+  task_summary would make the review-fix round skip it, naming the word and suggesting a rename; the generated
+  review-spec prompt tells the reviewer that a requested REPORT*/SUMMARY*/FINDINGS*/ANALYSIS* Markdown file is written by
+  the main conversation after the run, so the producer's notes file or Output is what it judges; the planning doctrine
+  covers lanes that widen a shared type and `slice: true`; docs/reference.md lists the field and the three new
+  warnings; `bun eval/check-definition.ts` exits 0 on p4, p5, p6, p7, p11 and p13 of flows/improvement; the plugin test
+  suite, tsc and validate pass.
+review:
+  request: |
+    계속 진행
+    The phase is P13 of docs/improvement-plan.md (B5, B3, B8, B9, B1) with decisions D3, D4, D5 and D7:
+    - B5 (D4): a node field `slice: true` is outside the fingerprint, and check-definition prints OK with a note instead
+      of the files warning for such a node; one normalized path set is computed once and tested with a table; a clause
+      that starts with only "a", "an" or "and a" is not taken for a deliverable start.
+    - B3 (D3): warn when a file check's `contains` is 40 or more characters and does not appear verbatim in its node
+      prompt; warn at start or dry-run time when an `absent` string already occurs two or more times in its target
+      file. Both only warn and never refuse.
+    - B8: warn, in a definition that has review nodes, when a producer's name would make the review-fix round skip it
+      (reusing rerunRisk), with the matching word and a rename suggestion.
+    - B9 (D7): the generated review-spec template tells the reviewer to judge the node's draft and Output when the
+      request names a report-like file that the host refuses to subagents.
+    - B1 (D5): guidance only, no lint: a lane that widens a shared type owns its consumers, or a node after the wave
+      runs tsc; also how to use `slice: true`.
+    Acceptance: check-definition exits 0 on the improvement flows, with p4, p6 and p11 printing OK and a note;
+    tests/lint.test.ts has a positive and a negative case for each new warning; a test shows the D7 text in the
+    generated review-spec prompt; test, tsc and validate exit 0.
+  rules:
+    - AGENTS.md
+    - hooks/AGENTS.md
+commit:
+  - message: |
+      docs(planning): cover widened shared types and declared slices
+
+      Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    paths:
+      - skills/planning
+  - message: |
+      feat(lint): declared slices, check precision and review-fix risk warnings
+
+      A node may declare slice: true (outside the fingerprint), which turns the
+      files warning into a note; a bare article no longer starts a deliverable
+      clause; contains and absent checks get precision warnings; producers
+      whose names the review-fix round skips are named at definition time;
+      and the review-spec template judges the draft of a host-blocked report.
+
+      Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    paths:
+      - hooks
+      - eval/check-definition.ts
+      - tests
+      - docs/reference.md
+      - flows/improvement
+
+nodes:
+  - id: lint-paths
+    label: Declared slices, one normalized path set and the article rule
+    category: standard
+    slice: true
+    writes:
+      - hooks/engine/lint.ts
+      - hooks/engine/definition.ts
+      - hooks/engine/types.ts
+      - hooks/engine/preview.ts
+      - eval/check-definition.ts
+      - tests/lint.test.ts
+      - tests/preview.test.ts
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    verify:
+      - kind: file
+        path: hooks/engine/types.ts
+        matches: "slice\\?: boolean"
+      - kind: command
+        argv: [bun, eval/check-definition.ts, flows/improvement/p6-board-results.yaml, flows/improvement/p11-board-surface.yaml]
+        expect:
+          exit: [0, 1]
+          stdout:
+            absent: "names a deliverable without an observable criterion"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Let a DAG node declare itself one vertical slice with `slice: true`, compute the lint's deliverable path set
+      once, and stop the review.request rule from taking a bare article for a deliverable start.
+
+      Facts (read hooks/engine/lint.ts in full first):
+      - The files rule: `deliverablePaths(node)` (about line 60) merges `writes` and project-relative file-check paths,
+        normalizes them, drops test paths and keeps the most specific; `lintDefinition` warns
+        `node "<id>": one producer owns N files (...)` at 3 or more (MIN_SPLIT_FILES).
+      - The clause rule: `DELIVERABLE_START` (about line 141) is
+        `/^(?:add|create|implement|build|write|introduce|expose|support|make|return|an?|and an?)\b/i`. The alternatives
+        `an?` and `and an?` make clauses such as "a run started in a board turn gets board lines in its settle message
+        instead" (flows/improvement/p11-board-surface.yaml) and "and a re-settle after a retry updates the same board"
+        (flows/improvement/p6-board-results.yaml) warn although they state behavior. Today both files print FAIL from
+        `bun eval/check-definition.ts`.
+      - `nodeFingerprint` in hooks/engine/definition.ts (about line 97) hashes prompt, category, agent, dependsOn,
+        verify and writes; label and load_skills are outside it. `NodeDef` is in hooks/engine/types.ts (about line 53).
+      - Callers of lintDefinition: eval/check-definition.ts (exit 1 on any warning), hooks/engine/preview.ts (the
+        dry-run preview's `warnings`), hooks/register.ts (start; not in your scope) and eval/shape.ts (counts warnings).
+
+      Change:
+      1. `slice?: boolean` on NodeDef, parsed by parseDefinition (reject a non-boolean with the parser's usual
+        invalid-definition error), kept OUT of nodeFingerprint, so amending only `slice` reruns nothing. Add a test that
+        two definitions differing only in `slice` give the same node fingerprint.
+      2. Compute the normalized deliverable path set once per node (one function returning the set, used by the files
+        rule and by the new note), and cover its cases with a table-driven test in tests/lint.test.ts: `./src/` vs `src`,
+        `src\\a.ts`, a folder and a file inside it, a tests folder, an absolute check path, a duplicate spelling.
+      3. For a producer with `slice: true` and 3 or more deliverable paths, emit no warning; emit a note instead, through
+        a new exported function such as `lintNotes(definition): string[]` with text
+        `node "<id>": declared a vertical slice that owns N files (...) - the files warning is expected`.
+        eval/check-definition.ts prints `OK <path> (<n> nodes)` followed by one `  note: <text>` line per note and still
+        exits 0 when only notes remain. hooks/engine/preview.ts returns the notes in a `notes` array next to `warnings`
+        (add a case to tests/preview.test.ts). Leave hooks/register.ts to a later node.
+      4. Remove `an?` and `and an?` from DELIVERABLE_START. Add negative cases with the two clauses quoted above and keep
+        a positive case such as "Add a /health endpoint" still warning.
+
+      DELIVERABLE: the change in the files of SCOPE with red-first tests. In `## Output` list: the field name and where it
+      is parsed, the notes function's name, signature and exact note text, the check-definition output shape, the
+      preview field name, the final DELIVERABLE_START source and the new test names.
+
+      SCOPE: edit only hooks/engine/lint.ts, hooks/engine/definition.ts, hooks/engine/types.ts,
+      hooks/engine/preview.ts, eval/check-definition.ts, tests/lint.test.ts and tests/preview.test.ts. Do not edit flow
+      files, hooks/register.ts, docs or skills; other nodes own them. Do not commit.
+
+      VERIFY: run `bun eval/check-definition.ts flows/improvement/p6-board-results.yaml
+      flows/improvement/p11-board-surface.yaml` (exit 0, both OK), `claude plugin test .` and
+      `bunx -p typescript@5 tsc -p . --noEmit` (both exit 0).
+
+      STOP WHEN: the four changes have passing tests and the three commands succeed.
+
+  - id: spec-template
+    label: Review-spec judges the draft of a host-blocked report
+    category: trivial
+    writes:
+      - hooks/engine/stages.ts
+      - tests/stages.test.ts
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    verify:
+      - kind: file
+        path: hooks/engine/stages.ts
+        contains: "ANALYSIS"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Add one instruction to the generated review-spec prompt in hooks/engine/stages.ts so the reviewer judges a
+      producer's draft and Output when the request names a report-like Markdown file that the host refuses to subagents.
+
+      Facts: Claude Code refuses subagent Write calls to Markdown files named REPORT*, SUMMARY*, FINDINGS* or ANALYSIS*
+      (case-insensitive name start, `.md`). The plugin's doctrine therefore has the producer write the text to
+      `<node-id>-notes.md` (or return it in `## Output`), and the main conversation writes the requested file verbatim
+      after the run settles. In run git-fixtures-rerun (eval/baselines/git-fixtures-rerun.md, Findings) the request said
+      "Finally write report.md" and the reviewer judged against a file that could not exist yet. The review-spec template
+      is built in hooks/engine/stages.ts (the block that prints `REQUEST (the user's words, verbatim; ...)`, about line
+      185).
+
+      Change: add one short English paragraph to the review-spec template (not review-standards) saying: when the request
+      names a REPORT*, SUMMARY*, FINDINGS* or ANALYSIS* Markdown file, the host refuses that write to subagents and the
+      main conversation writes it after the run from the producer's notes file or Output; judge that notes file or Output
+      as the deliverable, and do not report the missing final file as missing work. Reuse the existing name rule if
+      stages.ts or lint.ts already exports one (hooks/engine/lint.ts has `isBlockedReportPath`) only if the template needs
+      it; plain text is fine.
+
+      DELIVERABLE: the template change and a test in tests/stages.test.ts that expands a definition with `review` and
+      asserts the generated review-spec prompt contains the new paragraph's key phrase and that review-standards does not.
+      Red first. In `## Output` quote the added paragraph and the test name.
+
+      SCOPE: edit only hooks/engine/stages.ts and tests/stages.test.ts. Do not commit.
+
+      VERIFY: run `claude plugin test .` and `bunx -p typescript@5 tsc -p . --noEmit`; both exit 0.
+
+      STOP WHEN: the test passes and both commands exit 0.
+
+  - id: doctrine
+    label: Planning doctrine for widened shared types and declared slices
+    category: writing
+    writes:
+      - skills/planning/references/planning.md
+      - skills/planning/SKILL.md
+    verify:
+      - kind: file
+        path: skills/planning/references/planning.md
+        contains: "slice: true"
+      - kind: file
+        path: skills/planning/references/planning.md
+        matches: "[Ww]iden"
+      - kind: command
+        argv: [git, diff, --check, --, skills/planning]
+    prompt: |
+      TASK: Add planning guidance to the dag-workflow planning doctrine for parallel lanes that widen a shared type, and
+      for the new node field `slice: true`.
+
+      Facts:
+      - Parallel lanes often verify with file checks only, because the full suite or tsc would see the other lanes'
+        unfinished work. When one lane widens a shared type (adds a union member, a required field, a changed signature),
+        a consumer in another lane's files breaks and no node owns it. In run p10 this ended as a tsc failure in
+        board-chips.ts; flows p4, p6, p7, p8 and p11 used the file-checks-only workaround.
+      - Decision D5: guidance only, no lint rule. The rule: a lane that widens a shared type also owns the files that
+        consume it, or the plan puts a node after the wave that runs tsc (and the suite) over the joined result. Keep the
+        post-wave node a convention, not a new field.
+      - New field (added by another node in this run): `slice: true` on a node declares it one vertical slice. It is
+        outside the node fingerprint (changing it reruns nothing) and turns the "one producer owns N files" warning into a
+        note; check-definition prints OK with that note. Today the doctrine says to name a slice in the plan and treat the
+        warning as expected ("A slice is ONE deliverable although it writes files in several layers" in the Vertical
+        slices section, and the "One warning is expected" lines under the start audit table).
+
+      Change:
+      1. skills/planning/references/planning.md: in "Vertical slices and wide refactors", replace the advice to treat the
+         warning as expected with: declare `slice: true` on the slice node, which turns the warning into a note; keep the
+         rule that a slice is one deliverable. Update the start-audit lines that call the three-files warning expected the
+         same way. Add a short paragraph (where parallel lanes and write scopes are discussed, for example under "Edges,
+         data and write scopes") on lanes that widen a shared type, with the two options above. Use the word "widen".
+      2. skills/planning/SKILL.md: where it mentions the three-files warning on a vertical slice, say to declare
+         `slice: true`; one sentence on widened shared types pointing to the reference.
+      Both files are read by agents: write in English, in the files' existing terse style. Change nothing else.
+
+      DELIVERABLE: the two edited files. In `## Output` quote each added or changed sentence with its file and heading.
+
+      SCOPE: edit only skills/planning/references/planning.md and skills/planning/SKILL.md. Do not commit.
+
+      VERIFY: run `git diff --check -- skills/planning` (exit 0) and reread both changed passages.
+
+      STOP WHEN: both files carry the guidance and the check exits 0.
+
+  - id: lint-precision
+    label: Precision warnings for contains and absent file checks
+    category: standard
+    dependsOn: [lint-paths]
+    writes:
+      - hooks/engine/lint.ts
+      - hooks/register.ts
+      - tests/lint.test.ts
+      - tests/preview-tool.test.ts
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    verify:
+      - kind: file
+        path: tests/lint.test.ts
+        contains: "absent"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Warn, without refusing, about two kinds of imprecise file checks in a DAG definition (decision D3).
+
+      Facts:
+      - Seen in real runs: a node's `contains` check quoted an exact sentence the worker could not know (the text was
+        moved to another file), so the first attempt failed; a broad `absent` string also matched text the task said to
+        keep (it was already in a commit message), so the check could never pass. hooks/engine/lint.ts has no rule for
+        either. File checks are `{kind: 'file', path, contains?, absent?, matches?, lastLine?, equals?}`.
+      - The previous node (lint-paths, its Output is below) changed hooks/engine/lint.ts; read the current file first.
+
+      Rules:
+      1. Pure lint, in lintDefinition: a file check whose `contains` is 40 or more characters (including spaces) and does
+         not appear verbatim in its node's `prompt` warns
+         `node "<id>": check <n> contains a <len>-character exact text that the prompt does not give the worker - quote it in the prompt or check a shorter stable phrase`.
+         (n is the 1-based check index.)
+      2. Host-time, at `start` and at the dry run: for each relative file check with `absent` whose target exists, read it
+         and warn when the absent string already occurs two or more times:
+         `node "<id>": check <n> absent "<text>" already occurs <k> times in <path> - narrow the string or the path, or the check may never pass`.
+         Keep the counting pure (an exported helper in lint.ts that takes the definition and a map or function of file
+         texts and returns warnings) and do the reading in hooks/register.ts where start assembles its warnings (about
+         line 2380, `[...lintDefinition(definition), ...planningWarning()]`) and where the dry-run preview is returned,
+         using the host file API the file already uses (`$.fs.read`). Skip folders, absolute paths, paths under
+         `.claude`, missing files and files over 1 MB silently. A read error never fails start.
+      Both rules only add warnings; nothing is refused.
+
+      DELIVERABLE: the rules with red-first tests: in tests/lint.test.ts a positive and a negative case for each rule
+      (a 40-character contains repeated in the prompt does not warn; a 39-character one does not warn; an absent string
+      found once does not warn); and one runtime test (tests/preview-tool.test.ts, or another runtime test file that
+      already drives the dag tool's dry run, if it fits better) where a dry run over a definition whose absent string
+      occurs twice in a project file returns the warning. In `## Output` give both warning texts exactly, the helper's
+      name and signature, and the register.ts sites as file:line.
+
+      SCOPE: edit only hooks/engine/lint.ts, hooks/register.ts, tests/lint.test.ts and the one runtime test file you
+      choose (name it in Output). Keep everything lint-paths added. Do not touch flow files, docs or skills. Do not commit.
+
+      VERIFY: run `claude plugin test .` and `bunx -p typescript@5 tsc -p . --noEmit`; both exit 0.
+
+      STOP WHEN: both rules have passing positive and negative tests and both commands exit 0.
+
+  - id: lint-rerun-risk
+    label: Warn at definition time about producers the review-fix round would skip
+    category: trivial
+    dependsOn: [lint-precision]
+    writes:
+      - hooks/engine/lint.ts
+      - hooks/engine/rework.ts
+      - tests/lint.test.ts
+    load_skills:
+      - dag-workflow:testing
+      - dag-workflow:anti-slop
+    verify:
+      - kind: file
+        path: tests/lint.test.ts
+        contains: "review-fix"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: |
+      TASK: Make lintDefinition warn, in a definition that declares `review`, about each producer whose id, label or
+      task_summary would make the automatic review-fix round skip it.
+
+      Facts: hooks/engine/rework.ts holds `externalWord(def)` (private) and `rerunRisk(def)` (exported, about line 36),
+      which returns `is named for work outside the project files ("<word>")` for a node named with words such as commit,
+      delete, deploy, push, send. A completed producer with such a name is never rerun by the round, so a reviewer's FAIL
+      settles the run for manual repair. rework.ts already imports `isVerificationNode` and `normalizePath` from lint.ts,
+      so lint.ts importing rework.ts would create an import cycle: avoid it, for example by moving `externalWord` and the
+      word lists into lint.ts (or a small new module both import) and keeping rework.ts's behavior and exports unchanged.
+      The previous lint nodes' Output is below; read the current lint.ts first.
+
+      Rule: only when `definition.review` is set, for each producer (not a verification node, not a generated review,
+      security or commit node, and not a node marked `external: true`, which is deliberate) whose name matches an external
+      word, warn
+      `node "<id>": its name contains "<word>", so the automatic review-fix round would not rerun it after a FAIL verdict - rename it (id, label or task_summary) unless it really works outside the project files`.
+      Do not warn for producers that only lack `writes`; that is out of scope.
+
+      DELIVERABLE: the rule with red-first tests in tests/lint.test.ts: a review definition with a producer labelled
+      "Add avatar and delete endpoints" warns naming "delete"; the same producer without `review` does not; a producer
+      with `external: true` does not; a producer labelled "Document the notify setting" does not. Existing tests in
+      tests/rework.test.ts must stay green unchanged. In `## Output` give the warning text, where externalWord lives now,
+      and the test names.
+
+      SCOPE: edit only hooks/engine/lint.ts, hooks/engine/rework.ts and tests/lint.test.ts. Keep everything earlier nodes
+      added. Do not commit.
+
+      VERIFY: run `claude plugin test .` and `bunx -p typescript@5 tsc -p . --noEmit`; both exit 0.
+
+      STOP WHEN: the four cases pass and both commands exit 0.
+
+  - id: flows-annotate
+    label: Mark the slice nodes of the improvement flows
+    category: trivial
+    dependsOn: [lint-paths, lint-precision, lint-rerun-risk]
+    writes:
+      - flows/improvement
+    verify:
+      - kind: command
+        argv: [bun, eval/check-definition.ts, flows/improvement/p4-board.yaml, flows/improvement/p5-board-interview.yaml, flows/improvement/p6-board-results.yaml, flows/improvement/p7-board-trace.yaml, flows/improvement/p11-board-surface.yaml, flows/improvement/p13-definition-lint.yaml]
+        expect:
+          exit: 0
+          stdout:
+            contains: "note:"
+      - kind: file
+        path: flows/improvement/p4-board.yaml
+        contains: "slice: true"
+    prompt: |
+      TASK: Declare `slice: true` on the vertical-slice nodes of the improvement flow files and update their stale header
+      comments, so `bun eval/check-definition.ts` prints OK with a note for them.
+
+      Facts: the lint nodes of this run (their Outputs are below) added the node field `slice: true` and a note that
+      replaces the files warning. The headers name the slice nodes:
+      - flows/improvement/p4-board.yaml: flow-layout ("Expected lint warning ... on flow-layout. It is one slice").
+      - flows/improvement/p5-board-interview.yaml: board-host-p2.
+      - flows/improvement/p6-board-results.yaml: chip-view.
+      - flows/improvement/p7-board-trace.yaml: board-engine and board-render (its header expects warnings that today no
+        longer appear).
+      - flows/improvement/p11-board-surface.yaml: the removal slice its header describes (read the header for the id).
+      - flows/improvement/p13-definition-lint.yaml (this run's own file): lint-paths. Editing it does not affect this run.
+
+      Change: add `slice: true` to exactly those nodes (one line next to `category`), and rewrite each header's
+      "Expected lint warning" sentence to say the node declares `slice: true` and check-definition prints a note. Change
+      nothing else in the files: not prompts, verify checks, keys or other nodes.
+
+      If check-definition still reports a warning for one of the six files after your change (for example a new precision
+      or review-fix warning from this run's lint nodes), do not edit checks or prompts to silence it: list the file and
+      the exact warning in `## Output` and end with `DAG_NODE_STATUS: failed: clarification: <file> <warning>`.
+
+      DELIVERABLE: the edited flow files. In `## Output` give the full check-definition output for the six files.
+
+      SCOPE: edit only files under flows/improvement. Do not commit.
+
+      VERIFY: run `bun eval/check-definition.ts flows/improvement/p4-board.yaml flows/improvement/p5-board-interview.yaml
+      flows/improvement/p6-board-results.yaml flows/improvement/p7-board-trace.yaml flows/improvement/p11-board-surface.yaml
+      flows/improvement/p13-definition-lint.yaml`; it exits 0 and prints OK and note lines.
+
+      STOP WHEN: all six files print OK and the command exits 0, or a remaining warning is reported as above.
+
+  - id: reference-doc
+    label: Document the slice field and the new definition warnings
+    category: writing
+    dependsOn: [lint-paths, lint-precision, lint-rerun-risk]
+    writes:
+      - docs/reference.md
+    verify:
+      - kind: file
+        path: docs/reference.md
+        matches: "^\\| `slice`"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md]
+    prompt: |
+      TASK: Document the new node field `slice` and the three new definition warnings of the dag-workflow plugin in
+      docs/reference.md, in Korean, in the file's existing style.
+
+      Facts come from the Outputs of lint-paths, lint-precision and lint-rerun-risk pasted below. Recheck each fact against
+      hooks/engine/lint.ts, hooks/engine/definition.ts, hooks/register.ts and eval/check-definition.ts before writing.
+
+      Add:
+      1. In the node field table (rows such as "| `label`, `task_summary`, `description` |" and "| `writes` |", about line
+         228-231) a row starting "| `slice`" saying: `true` declares the node one vertical slice; it is outside the
+         fingerprint, so changing it reruns nothing; the "one producer owns N files" warning becomes a note, which
+         check-definition prints beside OK and the dry run returns in `notes`.
+      2. Where the document lists the definition warnings returned by start and the dry run (search for "warnings" and
+         "vacuous"), entries for: the long `contains` warning (40 or more characters not in the node prompt); the `absent`
+         warning checked at start and dry-run time against the existing file (two or more occurrences); the review-fix
+         name warning with the rename suggestion. Name the exact thresholds. If no such list exists, add a short subsection
+         next to the start or dry-run description.
+      Keep every existing line; only add lines or append to a sentence.
+
+      DELIVERABLE: the edited docs/reference.md. In `## Output` list each added line as file:line with a short quote.
+
+      SCOPE: edit only docs/reference.md. Do not commit.
+
+      VERIFY: run `git diff --check -- docs/reference.md` (exit 0) and `git diff --stat -- docs/reference.md`.
+
+      STOP WHEN: the row and the three warning entries are in place.

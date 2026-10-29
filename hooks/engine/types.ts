@@ -67,6 +67,9 @@ export type NodeDef = {
   // true when the node changes something outside the project's files: a push, a deploy, a database, storage or settings
   // change, a sent message. The review-fix round (rework.ts) never reruns such a node; outside the fingerprint, like load_skills.
   external?: boolean
+  // true when the node is one vertical slice that legitimately owns several files: the under-split warning becomes a note
+  // (lintNotes). Outside the fingerprint, like load_skills, so amending only slice reruns nothing.
+  slice?: boolean
   // Set only on a node added at run time (run.ts expandNodes): the id of the completed node it came from. Never parsed from
   // a definition and outside the fingerprint, so a declared definition never carries it.
   expandedFrom?: string
@@ -98,6 +101,20 @@ export type Definition = {
   commit?: CommitEntry[]
 }
 
+// What a node asks when it ends its turn with `DAG_NODE_STATUS: blocked: <text>` (node-prompt.ts parseOutcome). options
+// holds two or more choices; needsPerson means only the person may answer (permissions, cost, external changes).
+export type QuestionSpec = { text: string; options?: string[]; default?: string; needsPerson?: true }
+
+export type NodeQuestion = QuestionSpec & { askedAt: number }
+
+// timeout: the default after an interactive question waited its full time; default: the default sent at once, where nobody
+// could be asked (a non-interactive session, or a session that restarted without a person).
+export type AnswerSource = 'person' | 'model' | 'jev' | 'timeout' | 'default'
+
+// One answered question. attempt is the node attempt that asked it, so markBlocked can count the questions of the current
+// attempt and the prompt of a later attempt can say which attempt it came from.
+export type Clarification = { question: string; answer: string; by: AnswerSource; at: number; attempt: number }
+
 export type NodeRun = {
   id: string
   label: string
@@ -107,12 +124,19 @@ export type NodeRun = {
   agentId?: string
   model?: string
   promptOverride?: string
+  // Set by the review-fix round on a producer only: its finished agent, which gets the note by $.session.send instead of a new
+  // agent being spawned. Any other start of the node (markRunning, retry, amend, failToStart, a session's resume) drops it.
+  resume?: { agentId: string; note: string }
   startedAt?: number
   finishedAt?: number
   error?: string
   answer?: string
   output?: string
   reportPath?: string
+  // Set only while the node is blocked on it.
+  question?: NodeQuestion
+  // Every answered question, oldest first. Retry, recovery and rework keep them; an amend that changes the node drops them.
+  clarifications?: Clarification[]
   // Read from the whole answer when the node finished. answer and output are cut to keep the checkpoint small (the host
   // reads a file back only up to 4 MiB), so what later steps need from the part they lose is kept here; the report file at
   // reportPath holds the whole text.

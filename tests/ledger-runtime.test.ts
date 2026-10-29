@@ -51,7 +51,12 @@ function promptOf(h: ReturnType<typeof harness>, id: string): string {
   return h.spawns.filter(spawn => spawn.prompt.startsWith(`You are executing node "${id}"`)).at(-1)?.prompt ?? ''
 }
 
-// code and docs complete, review-standards passes and review-spec fails, so the round reruns docs (agent-5).
+// The text the round sent to docs's own finished agent (agent-2), which the review fix resumes instead of spawning.
+function fixText(h: ReturnType<typeof harness>): string {
+  return h.sends.find(send => send.to === 'agent-2')?.text ?? ''
+}
+
+// code and docs complete, review-standards passes and review-spec fails, so the round resumes docs on agent-2.
 async function failSpecReview($: Engine, h: ReturnType<typeof harness>, key: string, docsWrites = ['README.md'], root = '/work'): Promise<string> {
   const notes = defaultNotesFolder(key)
   await boot($)
@@ -70,7 +75,7 @@ async function failSpecReview($: Engine, h: ReturnType<typeof harness>, key: str
 // docs makes its fix and the reviewers start again.
 async function fixDocs($: Engine, h: ReturnType<typeof harness>, root = '/work'): Promise<void> {
   h.files.set(`${root}/README.md`, AFTER_FIX)
-  await finish($, h, 'agent-5')
+  await finish($, h, 'agent-2')
 }
 
 test('a run started in a worktree copies and diffs the worktree\'s files, while the copy stays in the session\'s run store', { plugins: [NO_INDEX_EXIT] }, async ($, on) => {
@@ -111,7 +116,7 @@ test('with the ledger on by default, the round copies the producer\'s files befo
     '+Call greet(name); it returns the greeting string.',
     '',
   ].join('\n'))
-  expect(promptOf(h, 'docs')).toContain(`${LEDGER_CLOSING}\n</task>`)
+  expect(fixText(h)).toContain(LEDGER_CLOSING)
   expect(h.files.get(`${ROOT}/runs/${runId}/review-fix-1/before/README.md`)).toBe(BEFORE_FIX)
   expect(JSON.parse(h.files.get(`${ROOT}/runs/${runId}/review-fix-1/before.json`) ?? 'null')).toEqual({ scopes: ['README.md'], files: ['README.md'] })
   expect(checkpoint(h, runId).reviewFix?.history[0]?.findings).toEqual([{ reviewer: 'review-spec', text: expect.stringContaining(FINDING) }])
@@ -134,7 +139,7 @@ test('with review_ledger off, the producer gets the closing line from before the
   const h = harness(on)
   h.control.git.set(LS_README, 'README.md\0')
   const runId = await failSpecReview($, h, 'greet-no-ledger')
-  expect(promptOf(h, 'docs')).toContain(`${CLOSING}\n</task>`)
+  expect(fixText(h)).toContain(CLOSING)
   expect(checkpoint(h, runId).reviewFix?.history[0]).not.toHaveProperty('findings')
 
   await fixDocs($, h)

@@ -9,15 +9,15 @@ export const TOOL_DESCRIPTION_LIMIT = 2048
 
 export const TOOL_DESCRIPTION = [
   'The only way to get work done in this session: plan the task as a dependency-ordered DAG of subagent nodes and run it here.',
-  'start returns at once. Do not poll: when the run settles you receive a summary with every node\'s output. Treat node completion claims as false until you verify them.',
-  'Every node needs verify: 1-16 checks run by the plugin before the node completes, {kind:"file",path,contains?|absent?|matches?|lastLine?|equals?} (path relative, or absolute read-only; a folder allows contains/absent) or {kind:"command",argv,expect?:{exit,stdout,stderr},timeoutMs?} (exit 0 unless expect.exit); start/amend refuse nodes without them.',
-  'A node receives the outputs of the nodes in its dependsOn, so list exactly the nodes whose results it needs. Ready nodes run in parallel waves; a failed node skips its dependents.',
-  'Definition: "key" (same key and definition returns the existing run; a different definition under that key is refused), "name", optional "goal" (shown to every node) and "nodes".',
+  'start returns at once. Do not poll: when the run settles you get a summary with every node\'s output. Treat node completion claims as false until you verify them.',
+  'Every node needs verify: 1-16 plugin-run checks before the node completes, {kind:"file",path,contains?|absent?|matches?|lastLine?|equals?} (path relative, or absolute read-only; a folder allows contains/absent) or {kind:"command",argv,expect?:{exit,stdout,stderr},timeoutMs?} (exit 0 unless expect.exit); start/amend refuse nodes without them.',
+  'A node receives the outputs of its dependsOn nodes, so list exactly the nodes whose results it needs. Ready nodes run in parallel waves; a failed node skips its dependents.',
+  'Definition: "key" (same key and definition reuses the run; another definition under it is refused), "name", optional "goal" (shown to every node) and "nodes".',
   '"review":{request} and "commit":[{message,paths}] add the review pair and a commit node.',
-  'Node: "id", a self-contained "prompt" (what to do and produce), optional "dependsOn", "category" (model routing; Jev may override), "agent" (subagent type such as Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
-  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} previews waves, models, write conflicts and warnings, starting nothing; start {preview_id} runs it as previewed; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
-  'retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and their skipped dependents; completed nodes are reused); amend {run_id, definition} (re-runs changed nodes and their dependents, adds nodes);',
-  'send {run_id, node_id, message} (steer a running node); attach {run_id} (adopt a run from another session).',
+  'Node: "id", a self-contained "prompt" (what to do and produce), optional "dependsOn", "category" (model routing; Jev may override), "agent" (subagent type, e.g. Explore), "writes" (project-relative paths, for session conflict display), "label", "task_summary", "load_skills".',
+  'Actions: start {definition} or start {path} (a project-relative .yaml/.yml/.json definition file); start {..., dryRun:true} previews waves, models, write conflicts and warnings, starts nothing; start {preview_id} runs it as previewed; list; context; decisions; sessions; snapshot {run_id}; wait {run_id} (current snapshot, never blocks); cancel {run_id, reason};',
+  'retry {run_id, node_id|node_ids, prompt} (failed/cancelled nodes and skipped dependents; completed ones are reused); amend {run_id, definition} (re-runs changed nodes and dependents, adds nodes);',
+  'send {run_id, node_id, message} (steer a running node); answer {run_id, node_id, answer} (answer a blocked node); attach {run_id} (adopt another session\'s run).',
 ].join(' ')
 
 // Keyed by TextField, so a field added to TEXT_FIELDS does not compile until it is described here.
@@ -48,6 +48,7 @@ const NODE_SCHEMA = {
     load_skills: { type: 'array', items: { type: 'string' } },
     writes: { type: 'array', items: { type: 'string' }, description: 'Project-relative write scopes; [] for read-only work' },
     external: { type: 'boolean', description: 'true when the node changes anything outside the project files (push, deploy, database, storage, settings, messages); the automatic review fix never reruns it' },
+    slice: { type: 'boolean', description: 'true when the node is one vertical slice that owns several files; the many-files lint warning becomes a note' },
     verify: {
       type: 'array',
       minItems: 1,
@@ -85,7 +86,7 @@ const NODE_SCHEMA = {
 export const INPUT_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['start', 'list', 'context', 'decisions', 'sessions', 'snapshot', 'wait', 'cancel', 'retry', 'amend', 'send', 'attach'] },
+    action: { type: 'string', enum: ['start', 'list', 'context', 'decisions', 'sessions', 'snapshot', 'wait', 'cancel', 'retry', 'amend', 'send', 'answer', 'attach'] },
     definition: {
       type: 'object',
       properties: {
@@ -130,6 +131,7 @@ export const INPUT_SCHEMA = {
     node_ids: { type: 'array', items: { type: 'string' } },
     prompt: { type: 'string' },
     message: { type: 'string' },
+    answer: { type: 'string', description: 'answer only: the reply to the blocked node\'s question, one of its options or free text' },
     reason: { type: 'string' },
   },
   required: ['action'],

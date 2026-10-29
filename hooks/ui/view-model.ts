@@ -3,14 +3,15 @@ import { STATUS_PREFIX } from '../engine/node-prompt.ts'
 import { awaitingApproval } from '../engine/run.ts'
 import type { NodeRun, NodeState, Run, RunStatus } from '../engine/types.ts'
 import type { UsageHold } from '../engine/usage.ts'
-import { isStalled, type Activity } from './activity.ts'
+import { isStalled, stallReason, type Activity } from './activity.ts'
 import type { GraphModel, GraphNode, ViewKind } from './graph-model.ts'
 import { ACCENT, formatDuration, type Line, type Segment } from './text.ts'
 import { DEFAULT_STRINGS, type Strings } from './i18n.ts'
 
 export type { Line, Segment } from './text.ts'
 export { formatDuration } from './text.ts'
-export type Card = { id: string; expanded: boolean; selected: boolean; header: Line; lines: Line[] }
+/** `options` are the choices of a blocked node's question, one pane button each; empty when it has none. */
+export type Card = { id: string; expanded: boolean; selected: boolean; header: Line; lines: Line[]; options: readonly string[] }
 export type RunRow = { index: number; selected: boolean; line: Line }
 export type RunSelector = { heading: Line; rows: RunRow[]; completed: Line | null }
 export type PaneModel = {
@@ -84,7 +85,18 @@ export function visibleRuns(all: Run[], sessionId: string): Run[] {
 }
 
 export function isExpanded(run: Run, node: NodeRun, prefs: CollapsePrefs): boolean {
-  return prefs[run.runId]?.[node.id] ?? node.state === 'running'
+  return prefs[run.runId]?.[node.id] ?? (node.state === 'running' || node.question !== undefined)
+}
+
+/** The question a blocked node waits on: its text, default and who may answer, or the /dag answer hint when it offers no options. */
+export function questionLines(node: NodeRun, runId: string, t: Strings): Line[] {
+  const { question } = node
+  if (!question) return []
+  const lines: Line[] = [[{ text: t.questionAsks(question.text), color: WAITING_COLOR, bold: true }]]
+  if (question.default !== undefined) lines.push([{ text: t.questionDefault(question.default), dim: true }])
+  if (question.needsPerson) lines.push([{ text: t.questionNeedsPerson, color: WAITING_COLOR }])
+  if (!question.options) lines.push([{ text: t.questionHint(runId, node.id), dim: true }])
+  return lines
 }
 
 export function clampRunIndex(index: number, count: number): number {
@@ -161,6 +173,11 @@ function progressLine(node: NodeRun, activity: Activity | undefined, now: number
   return [{ text: firstOutputLine ?? lastAnswerLine(node.answer) ?? t.state[node.state], dim: true }]
 }
 
+function stallLine(activity: Activity | undefined, now: number, t: Strings): Line[] {
+  const reason = activity && stallReason(activity, now)
+  return reason ? [[{ text: t.stallReason(reason.rule, formatDuration(reason.quietMs), formatDuration(reason.limitMs)), dim: true }]] : []
+}
+
 type Ctx = { activity: ReadonlyMap<string, Activity>; waiting: ReadonlyMap<string, string>; t: Strings }
 
 function liveActivity(node: NodeRun, ctx: Ctx): Activity | undefined {
@@ -218,7 +235,7 @@ function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Ctx
     ...(deps.length ? [{ text: `  ← ${deps.join(', ')}`, dim: true as const }] : []),
   ]
   const expanded = isExpanded(run, node, view.prefs)
-  if (!expanded) return { id: node.id, expanded, selected, header, lines: [] }
+  if (!expanded) return { id: node.id, expanded, selected, header, lines: [], options: [] }
 
   const who = [
     node.agentId ? `agent ${node.agentId.slice(0, 10)}` : t.notStarted,
@@ -230,6 +247,8 @@ function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Ctx
     ...(def?.task_summary || def?.description ? [[{ text: def.task_summary ?? def.description ?? '' }]] : []),
     [{ text: who, dim: true }],
     waiting ? [{ text: waiting, color: WAITING_COLOR }] : progressLine(node, activity, now, t),
+    ...stallLine(activity, now, t),
+    ...questionLines(node, run.runId, t),
     [{ text: timing, dim: true }],
   ]
   if (view.details) {
@@ -238,7 +257,7 @@ function cardFor(run: Run, node: NodeRun, view: ViewState, now: number, ctx: Ctx
     const shown = node.output || node.answer
     if (shown) lines.push([{ text: shown.slice(0, 600) }])
   }
-  return { id: node.id, expanded, selected, header, lines }
+  return { id: node.id, expanded, selected, header, lines, options: node.question?.options ?? [] }
 }
 
 function isActive(run: Run): boolean {

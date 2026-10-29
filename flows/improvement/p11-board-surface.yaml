@@ -24,7 +24,7 @@
 #   wave 2: host-surface
 #   then:   review-spec, review-standards, commit (generated)
 # Categories: trivial for the three pure lanes; standard for settle-board (removes one feature across the host, the
-# formatter, the board types and their tests; one removal slice, so its files-lint warning is expected) and host-surface
+# formatter, the board types and their tests; one removal slice that declares `slice: true`, so check-definition prints a note) and host-surface
 # (one new judgment through the 3959-line host); writing for both docs lanes.
 # Wave-1 lanes declare file checks only, because the full suite and tsc can go red on a sibling's half-written file;
 # host-surface runs the full gate.
@@ -199,6 +199,7 @@ nodes:
   - id: settle-board
     label: Remove the result board; board-answer settle lines
     category: standard
+    slice: true
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop
@@ -261,7 +262,7 @@ nodes:
       In ## Output give: the settleMessage signature, every file changed or deleted, how an old `run` field is handled on load, and the test and tsc result lines.
 
   - id: docs-planning
-    label: Drop the plan-board step from the planning doctrine
+    label: Remove the plan-board step from the planning doctrine
     category: writing
     writes:
       - skills/planning/SKILL.md

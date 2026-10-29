@@ -405,7 +405,19 @@ test('an ordinary agent started alongside learning keeps its normal tool access'
   expect(session(h).batch?.agentId).not.toBe(ordinary.agentId)
 })
 
-test('a learning completion reaches the underlying host lifecycle', async ($, on) => {
+test("a Workflow agent's spawn prompt gets no learned-skill catalog", async ($, on) => {
+  const h = harness(on, { home: HOME })
+  seed(h)
+  await boot($, 'off')
+  await ask($)
+  const base = { prompt: 'Workflow work', description: 'Workflow worker', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'sonnet', background: true, fork: false } as const
+  await $.agent.spawn({ ...base, tool_use_id: 'ordinary-spawn' })
+  await $.agent.spawn({ ...base, tool_use_id: 'workflow-spawn', workflow: { runId: 'wf_1', agentIndex: 1 } })
+  expect(h.spawns.at(-2)?.prompt).toContain('"kind":"learned-skills"')
+  expect(h.spawns.at(-1)?.prompt).toBe('Workflow work')
+})
+
+test('a learning completion reaches the underlying host lifecycle',async ($, on) => {
   const h = harness(on, { home: HOME })
   await boot($, 'off')
   await ask($)

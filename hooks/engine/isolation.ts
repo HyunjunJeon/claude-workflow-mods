@@ -1,4 +1,4 @@
-import { externalWord } from './rework.ts'
+import { externalWord } from './lint.ts'
 import type { NodeDef } from './types.ts'
 
 // Which nodes run in their own git worktree, what the worktree is called, and how one file of a node's change merges back.
@@ -15,7 +15,7 @@ export function parseNodeIsolation(value: unknown): NodeIsolation {
 
 // A node that changes something outside the project files (a push, a deploy, a database) is never isolated: a worktree
 // separates project files only, so it cannot keep that change apart. The same word list decides the review-fix round
-// (rework.ts), so the two never disagree on "external".
+// (rework.ts, through lint.ts externalWord), so the two never disagree on "external".
 export function isolatedNode(def: NodeDef, mode: NodeIsolation): boolean {
   if (mode === 'off' || def.external || externalWord(def) !== undefined) return false
   if (mode === 'writes') return def.writes !== undefined && def.writes.length > 0

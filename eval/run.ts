@@ -1,15 +1,13 @@
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isPlanningSkill } from '../hooks/engine/policy.ts'
 import type { Run } from '../hooks/engine/types.ts'
 import { SCENARIOS, type Scenario } from './scenarios.ts'
-import { classifyToolResults, verificationOf, type NodeVerificationReport, type ToolResult, type ToolResultCounts, type VerificationTotals } from './report.ts'
+import { scenarioMatched, summarizeRepeats, transcriptCounts, verificationOf, type NodeVerificationReport, type TranscriptCounts, type VerificationTotals } from './report.ts'
+import { parseArgs, USAGE, type Options } from './options.ts'
 import { shapeOf, type ShapeMetrics } from './shape.ts'
 
 const REPO = realpathSync(new URL('..', import.meta.url).pathname)
 const MAIN_TOOLS = ['mcp__dag-workflow__dag', 'Skill', 'Read', 'Write', 'Edit', 'Bash', 'TaskStop', 'ToolSearch', 'LSP']
-
-type Options = { list: boolean; only?: string[]; concurrency: number; model: string; timeoutMin: number; keep: boolean; enforcement?: string }
 
 // The plugin's userConfig lives in settings.json pluginConfigs under its name; a --plugin-dir copy may load as <name>@inline.
 // Since the default became auto (2026-10-11), Jev runs small scenarios directly, so a run measured against a baseline taken
@@ -31,17 +29,13 @@ type RunReport = ShapeMetrics & {
   verificationTotals: VerificationTotals
 }
 
-type TranscriptReport = ToolResultCounts & {
-  path?: string
-  skillBeforeStart: boolean | null
-  starts: number
-  askUserQuestions: number
-}
+type TranscriptReport = TranscriptCounts & { path?: string }
 
-const NO_COUNTS: ToolResultCounts = { planningRefusals: 0, toolDenials: 0, verificationRequired: 0, invalidVerification: 0 }
+const NO_TRANSCRIPT: TranscriptReport = transcriptCounts([])
 
 type ScenarioResult = {
   id: string
+  repeat: number
   expect: string
   exitCode: number | null
   timedOut: boolean
@@ -51,23 +45,6 @@ type ScenarioResult = {
   check: { passed: boolean; output: string }
   unchangedOk: boolean
   stdoutTail: string
-}
-
-function parseArgs(argv: string[]): Options {
-  const value = (flag: string) => {
-    const i = argv.indexOf(flag)
-    return i >= 0 ? argv[i + 1] : undefined
-  }
-  const only = value('--only')
-  return {
-    list: argv.includes('--list'),
-    ...(only ? { only: only.split(',') } : {}),
-    concurrency: Number(value('--concurrency') ?? 4),
-    model: value('--model') ?? 'sonnet',
-    timeoutMin: Number(value('--timeout-min') ?? 15),
-    keep: argv.includes('--keep'),
-    ...(value('--enforcement') ? { enforcement: value('--enforcement') } : {}),
-  }
 }
 
 async function readRuns(dir: string): Promise<Run[]> {
@@ -90,40 +67,16 @@ async function readTranscript(dir: string): Promise<TranscriptReport> {
       files.push({ path, mtime: (await Bun.file(path).stat()).mtimeMs })
     }
   } catch {
-    return { skillBeforeStart: null, starts: 0, askUserQuestions: 0, ...NO_COUNTS }
+    return NO_TRANSCRIPT
   }
   const newest = files.sort((a, b) => b.mtime - a.mtime)[0]
-  if (!newest) return { skillBeforeStart: null, starts: 0, askUserQuestions: 0, ...NO_COUNTS }
-  let index = 0
-  let skillAt = -1
-  let firstStartAt = -1
-  let starts = 0
-  let askUserQuestions = 0
-  const toolNames = new Map<string, string>()
-  const results: ToolResult[] = []
-  for (const line of (await Bun.file(newest.path).text()).split('\n')) {
-    if (!line.trim()) continue
-    const row = JSON.parse(line) as { type?: string; isSidechain?: boolean; message?: { content?: unknown } }
-    if (row.isSidechain || !Array.isArray(row.message?.content)) continue
-    for (const block of row.message.content as { type: string; id?: string; name?: string; input?: Record<string, unknown>; content?: unknown; tool_use_id?: string; is_error?: boolean }[]) {
-      if (block.type === 'tool_use' && block.id && block.name) toolNames.set(block.id, block.name)
-      index += 1
-      if (block.type === 'tool_use' && block.name === 'AskUserQuestion') askUserQuestions += 1
-      if (block.type === 'tool_use' && block.name === 'Skill' && isPlanningSkill(block.input?.skill) && skillAt < 0) skillAt = index
-      if (block.type === 'tool_use' && block.name === 'mcp__dag-workflow__dag' && block.input?.action === 'start') {
-        starts += 1
-        if (firstStartAt < 0) firstStartAt = index
-      }
-      if (block.type === 'tool_result') {
-        results.push({ tool: toolNames.get(block.tool_use_id ?? '') ?? '', isError: block.is_error === true, text: JSON.stringify(block.content ?? '') })
-      }
-    }
-  }
-  return { path: newest.path, skillBeforeStart: firstStartAt < 0 ? null : skillAt >= 0 && skillAt < firstStartAt, starts, askUserQuestions, ...classifyToolResults(results) }
+  if (!newest) return NO_TRANSCRIPT
+  return { path: newest.path, ...transcriptCounts((await Bun.file(newest.path).text()).split('\n')) }
 }
 
-async function runScenario(scenario: Scenario, root: string, options: Options): Promise<ScenarioResult> {
-  const dir = `${root}/${scenario.id}`
+async function runScenario(scenario: Scenario, repeat: number, root: string, options: Options): Promise<ScenarioResult> {
+  const name = options.repeat > 1 ? `${scenario.id}-${repeat}` : scenario.id
+  const dir = `${root}/${name}`
   await Bun.$`mkdir -p ${dir}`.quiet()
   for (const [path, content] of Object.entries(scenario.files)) await Bun.write(`${dir}/${path}`, content)
   // The generated review nodes read the change through git (rev-parse, status, diff), and on 2026-10-10 none of the 8 planners added a review pair on the non-git fixtures (eval/baselines/stages-baseline.md).
@@ -145,7 +98,7 @@ async function runScenario(scenario: Scenario, root: string, options: Options): 
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
   const exitCode = await proc.exited
   clearTimeout(timer)
-  await Bun.write(`${root}/${scenario.id}.out.txt`, `${stdout}\n--- stderr ---\n${stderr}`)
+  await Bun.write(`${root}/${name}.out.txt`, `${stdout}\n--- stderr ---\n${stderr}`)
 
   const runs = (await readRuns(dir)).map(run => {
     const states: Record<string, number> = {}
@@ -163,6 +116,7 @@ async function runScenario(scenario: Scenario, root: string, options: Options): 
   })()
   return {
     id: scenario.id,
+    repeat,
     expect: scenario.expect,
     exitCode,
     timedOut,
@@ -188,10 +142,23 @@ async function pool<T, R>(items: T[], size: number, work: (item: T) => Promise<R
   return results
 }
 
+function acrossRepeats(results: ScenarioResult[], matched: (r: ScenarioResult) => boolean): string[] {
+  const summaries = summarizeRepeats(results.map(r => ({ id: r.id, matched: matched(r), shape: r.runs.map(run => run.shape).join('; ') || 'no run', seconds: r.seconds })))
+  return [
+    '## Across repeats',
+    '',
+    '| scenario | matched/samples | shapes seen | seconds (min-median-max) |',
+    '| --- | --- | --- | --- |',
+    ...summaries.map(s => `| ${s.id} | ${s.matched}/${s.samples} | ${s.shapes.join(', ')} | ${s.minSeconds}-${s.medianSeconds}-${s.maxSeconds} |`),
+    '',
+  ]
+}
+
 function markdown(results: ScenarioResult[], stamp: string, options: Options): string {
   const shapes = new Set(results.flatMap(r => r.runs.map(run => run.shape)))
   const producerShapes = new Set(results.flatMap(r => r.runs.map(run => run.producerShape)))
-  const matches = results.filter(r => (r.expect === 'direct' ? r.runs.length === 0 : r.runs.some(run => run.shape === r.expect || run.producerShape === r.expect))).length
+  const matched = (r: ScenarioResult) => scenarioMatched(r.expect, r.runs, options.enforcement)
+  const matches = results.filter(matched).length
   const rows = results.map(r => {
     const main = r.runs[0]
     const shape = r.runs.map(run => `${run.shape} (producers: ${run.producerShape})`).join('; ') || 'no run'
@@ -203,7 +170,7 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
       .map(n => `${n.id}:${n.state}${n.error ? ` (${n.error.slice(0, 60)})` : ''}`)
       .join('; ')
     const totals = r.runs.reduce((sum, run) => ({ verified: sum.verified + run.verificationTotals.verifiedNodes, nodes: sum.nodes + run.nodeVerification.length, retries: sum.retries + run.verificationTotals.autoRetries }), { verified: 0, nodes: 0, retries: 0 })
-    return `| ${r.id} | ${r.expect} | ${r.runs.length} | ${shape} | ${main?.nodes ?? '-'} | ${main?.depth ?? '-'} | ${widths || '-'} | ${main?.fanInNodes ?? '-'} | ${main?.verify ?? '-'} | ${main?.warnings ?? '-'} | ${categories || '-'} | ${status} | ${r.check.passed && r.unchangedOk ? 'PASS' : 'FAIL'} | ${r.transcript.skillBeforeStart} | ${r.transcript.planningRefusals}/${r.transcript.toolDenials} | ${r.transcript.askUserQuestions} | ${r.transcript.verificationRequired}/${r.transcript.invalidVerification} | ${totals.verified}/${totals.nodes} | ${totals.retries} | ${problems || '-'} | ${r.seconds}s |`
+    return `| ${options.repeat > 1 ? `${r.id} #${r.repeat}` : r.id} | ${r.expect} | ${r.runs.length} | ${shape} | ${main?.nodes ?? '-'} | ${main?.depth ?? '-'} | ${widths || '-'} | ${main?.fanInNodes ?? '-'} | ${main?.verify ?? '-'} | ${main?.warnings ?? '-'} | ${categories || '-'} | ${status} | ${r.check.passed && r.unchangedOk ? 'PASS' : 'FAIL'} | ${r.transcript.skillBeforeStart} | ${r.transcript.planningRefusals}/${r.transcript.toolDenials} | ${r.transcript.denials.map(d => `${d.tool}: ${d.reason} x${d.count}`).join('; ') || '-'} | ${r.transcript.askUserQuestions} | ${r.transcript.verificationRequired}/${r.transcript.invalidVerification} | ${totals.verified}/${totals.nodes} | ${totals.retries} | ${problems || '-'} | ${r.seconds}s |`
   })
   const all = results.flatMap(r => r.runs)
   const sum = (pick: (t: VerificationTotals) => number) => all.reduce((n, run) => n + pick(run.verificationTotals), 0)
@@ -212,20 +179,28 @@ function markdown(results: ScenarioResult[], stamp: string, options: Options): s
   return [
     `# DAG shape evaluation ${stamp}`,
     '',
+    `Repeats: ${options.repeat}.`,
+    '',
     `Model: ${options.model}. Plugin: ${REPO}. Fixtures: git repositories with one initial commit.${options.enforcement ? ` Enforcement: ${options.enforcement}.` : ''}`,
     '',
-    `Distinct shapes: ${shapes.size} (${[...shapes].join(', ')}). Distinct producer shapes: ${producerShapes.size} (${[...producerShapes].join(', ')}). Scenarios matching their expected shape: ${matches}/${results.length}.`,
+    `Distinct shapes: ${shapes.size} (${[...shapes].join(', ')}). Distinct producer shapes: ${producerShapes.size} (${[...producerShapes].join(', ')}). Samples matching their expected shape: ${matches}/${results.length}.`,
     '',
     verifySummary,
     '',
-    '| scenario | expected | runs | shape | nodes | depth | layer widths | fan-in nodes | verify node | warnings | categories | status | outcome check | skill before start | refusals (planning/tools) | AskUserQuestion calls | verify refusals (required/invalid) | verified/total nodes | auto retries | unfinished nodes | time |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| scenario | expected | runs | shape | nodes | depth | layer widths | fan-in nodes | verify node | warnings | categories | status | outcome check | skill before start | refusals (planning/total) | refusals by tool and reason | AskUserQuestion calls | verify refusals (required/invalid) | verified/total nodes | auto retries | unfinished nodes | time |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...rows,
     '',
+    ...(options.repeat > 1 ? acrossRepeats(results, matched) : []),
   ].join('\n')
 }
 
-const options = parseArgs(Bun.argv.slice(2))
+const parsed = parseArgs(Bun.argv.slice(2))
+if ('error' in parsed) {
+  console.error(`${parsed.error}\n${USAGE}`)
+  process.exit(1)
+}
+const options = parsed.options
 const selected = SCENARIOS.filter(s => !options.only || options.only.includes(s.id))
 if (options.list) {
   for (const s of selected) console.log(`${s.id.padEnd(16)} expect=${s.expect.padEnd(15)} ${s.prompt}`)
@@ -233,9 +208,10 @@ if (options.list) {
 }
 const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
 const root = `/tmp/dag-shapes/${stamp}`
-const results = await pool(selected, options.concurrency, async scenario => {
-  const result = await runScenario(scenario, root, options)
-  console.log(`SCENARIO_DONE ${scenario.id} runs=${result.runs.length} shape=${result.runs[0]?.shape ?? 'none'} check=${result.check.passed}`)
+const samples = selected.flatMap(scenario => Array.from({ length: options.repeat }, (_, i) => ({ scenario, repeat: i + 1 })))
+const results = await pool(samples, options.concurrency, async ({ scenario, repeat }) => {
+  const result = await runScenario(scenario, repeat, root, options)
+  console.log(`SCENARIO_DONE ${scenario.id}#${repeat} runs=${result.runs.length} shape=${result.runs[0]?.shape ?? 'none'} check=${result.check.passed}`)
   return result
 })
 const outDir = `${REPO}/eval/results`

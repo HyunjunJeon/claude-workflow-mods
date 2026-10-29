@@ -1,0 +1,215 @@
+# External benchmark X3: host API cleanup (A7, A8, A9, H3) from docs/external-benchmark-plan.md, plus the A6 verdict
+# from eval/baselines/d8-a6-baseline.md.
+# A8 (2.1.299): Text `bold` is deprecated in favour of `weight`; `bold: true` reads as `weight: 'semibold'`. A decoration
+# (prompt paint, virtualText) takes no `weight`, so its `bold` stays. A7 (2.1.304): tool.check carries `e.isReadOnly`
+# when the tool itself holds the input read-only; policy.ts classifies with its own lists. This phase only observes the
+# difference (a debug line), it changes no verdict. A9 (2.1.305): a docked pane is at most 45% of the terminal width.
+# H3: a retried node must not be settled by its earlier attempt's agent end (agentRuns in hooks/register.ts).
+# A6 (measured 2026-10-28): the not-deferred dag tool removed 2 ToolSearch calls in 16 sessions, left time to the first
+# start and input tokens per session flat and raised input tokens per message 5.6%, so it is held.
+#
+# PREREQUISITE: `git status --short` prints nothing but this file.
+# Run it with:  /dag run flows/improvement/x3-host-api.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves):
+#   wave 1: bold-weight (hooks/ui, register.ts, board-export), plan-note (docs/external-benchmark-plan.md)
+#   wave 2: readonly-crosscheck (register.ts after bold-weight), layout-45 and stale-end (new test files)
+# Every code node verifies with the whole suite (claude plugin test has no single-file mode), so the two test-only
+# nodes wait for bold-weight, whose many-file edit would otherwise be half done while their checks run.
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: standard for bold-weight (it must tell Text styles from decorations across many files) and
+# readonly-crosscheck (it compares two classifications without changing either); trivial for the two tests and the note.
+# No edge carries data; they serialize hooks/register.ts and the shared test suite.
+
+key: improve-x3-host-api-1
+name: X3 - host API cleanup
+goal: >
+  Host Text styles use `weight` instead of the deprecated `bold` (decoration `bold` stays); the main-conversation
+  tool.check logs one debug line when the plugin's read-only classification and the host's `e.isReadOnly` disagree,
+  without changing any verdict; tests cover a layout rendered at 45% of a representative terminal width and a retried
+  node that an earlier attempt's agent end must not settle; docs/external-benchmark-plan.md records A6 as held and the
+  X3 items as done; the plugin tests, tsc and validate pass.
+review:
+  request: |
+    그래 X3 정의를 작성해서 진행해보자.
+    The phase is X3 of docs/external-benchmark-plan.md (A7, A8, A9, H3):
+    - A8: replace the deprecated Text `bold` with `weight` where the host Text style takes it; keep `bold` on decorations.
+    - A7: a main-conversation call whose read-only classification differs from tool.check's `e.isReadOnly` produces
+      one debug line `read-only disagreement: <tool> host=... plugin=...`; agreeing calls produce none; every verdict stays as before.
+    - A9: tests for a layout rendered at 45% of the terminal width.
+    - H3: a regression test that a retried node is not settled by its earlier attempt's agent end.
+    - Record A6 as held with the D8/A6 numbers, and mark X3 done in the plan.
+  rules:
+    - AGENTS.md
+    - hooks/AGENTS.md
+commit:
+  - message: |
+      refactor(host): adopt Text weight, log read-only disagreements, pin docked width and stale ends
+
+      Text styles use weight instead of the bold the host deprecated in 2.1.299; tool.check logs when the plugin's
+      read-only classification and the host's isReadOnly disagree, changing no verdict; tests cover a layout at 45% of
+      the terminal width and a retried node that its earlier attempt's agent end must not settle. The plan records A6
+      as held.
+    paths:
+      - hooks
+      - tests
+      - docs/external-benchmark-plan.md
+      - docs/reference.md
+      - flows/improvement/x3-host-api.yaml
+nodes:
+  - id: bold-weight
+    label: Use Text weight instead of the deprecated bold
+    category: standard
+    slice: true
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes:
+      - hooks/ui
+      - hooks/register.ts
+      - hooks/engine/board-export.ts
+      - tests/sequence-layout.test.ts
+      - tests/board-host.test.ts
+      - tests/board-blocks.test.ts
+      - tests/views.test.ts
+      - tests/board-export.test.ts
+      - tests/inspector.test.ts
+    verify:
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+      - kind: file
+        path: hooks/register.ts
+        matches: "weight: 'semibold'"
+    prompt: |
+      TASK: Claude Code 2.1.299 deprecated the Text style `bold` in favour of `weight`
+      ('regular' | 'medium' | 'semibold' | 'bold'); `bold: true` is read as `weight: 'semibold'`. See the Text style type
+      in .claude-plugin/types/claude-code/index.d.ts (around the `@deprecated Use weight` comment). Not every `bold` is
+      deprecated: a decoration (prompt paint, virtualText, the range entries near the comment "Drawn in bold; a
+      decoration takes no `weight`") still takes `bold`, so CHIP_PAINT-style paints may stay. The plugin also has its own
+      model fields named bold (for example `Segment` in hooks/ui/text.ts); they are not host props.
+      DELIVERABLE: every place that hands a host Text (or Box) style a `bold` now hands `weight: 'semibold'` (same
+      rendering), whether it is written inline or mapped from an internal field at the boundary (for example
+      hooks/register.ts near `...(s.bold ? { bold: true } : {})`). Decide per call site from the host type which ones
+      are Text styles; leave decorations and internal model fields alone unless renaming one is needed to keep the
+      code clear. Update the tests that assert host trees with `bold: true` to the new prop. List in Output every file
+      you changed, the count of host `bold` props replaced, and every `bold` you deliberately kept with the reason
+      (decoration or internal field).
+      SCOPE: edit only the files in writes; no visual change, no other refactor.
+      VERIFY: run claude plugin test . and bunx -p typescript@5 tsc -p . --noEmit; grep the changed files for `bold`
+      and recheck each remaining one against the host type.
+      STOP WHEN: no host Text style receives `bold` and the checks pass.
+
+  - id: layout-45
+    label: Test layouts at 45 percent of the terminal width
+    category: trivial
+    dependsOn: [bold-weight]
+    load_skills: [dag-workflow:testing]
+    writes: [tests/docked-width.test.ts]
+    verify:
+      - kind: file
+        path: tests/docked-width.test.ts
+        contains: "45"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+    prompt: |
+      TASK: Since Claude Code 2.1.305 a docked pane is at most 45% of the terminal width. Add tests that render the
+      plugin's pane views at that width. DELIVERABLE: tests/docked-width.test.ts. For representative terminal widths 80,
+      120 and 200 columns, take Math.floor(0.45 * width) (36, 54, 90) and render the width-aware views the existing
+      tests already render (see tests/views.test.ts for viewLines and tests/graph.test.ts for the graph layout; reuse
+      their fixtures or build a small run the same way): assert every rendered line fits the width (use the same width
+      measure those tests use) and that the content a reader needs at that width is still present (for example the
+      node ids or the run name, whatever the view promises at narrow widths). If a view truncates below some width, assert
+      the documented truncation rather than inventing a new rule. Write tests against the current code; if one fails,
+      do not change the layout code, end failed and name the failing view and width.
+      SCOPE: write only tests/docked-width.test.ts.
+      VERIFY: run claude plugin test .
+      STOP WHEN: the new tests pass. In Output, list the views and widths covered.
+
+  - id: stale-end
+    label: Test that an earlier attempt's agent end does not settle a retried node
+    category: trivial
+    dependsOn: [bold-weight]
+    load_skills: [dag-workflow:testing]
+    writes: [tests/stale-end.test.ts]
+    verify:
+      - kind: file
+        path: tests/stale-end.test.ts
+        contains: "agent"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+    prompt: |
+      TASK: Pin the rule that a retried node is settled only by its own attempt's agent. hooks/register.ts keeps
+      `agentRuns` (agentId -> runId) and claimCompletion settles a node only through the agent id it maps
+      (nodeForAgent). First search tests/ for an existing test of this exact case (a node retried while its old agent
+      still ends later); runtime tests use the harness in tests/control-harness.ts and the agent.spawn / agent end events
+      as tests/runtime.test.ts and tests/scenario-lifecycle.test.ts do.
+      DELIVERABLE: tests/stale-end.test.ts with a runtime test: a node's first attempt is spawned as agent A, the node is
+      retried (or cancelled and retried) so attempt 2 is spawned as agent B, then agent A's end arrives with a completed
+      report; assert the node stays running at attempt 2 and is settled only when agent B ends. If an existing test
+      already covers exactly this, still write the file with a one-line comment naming that test and a second case it
+      does not cover (for example agent A ending after attempt 2 completed, which must not change the result).
+      SCOPE: write only tests/stale-end.test.ts. If the test fails, do not change hooks/register.ts: end failed and
+      describe the observed behavior.
+      VERIFY: run claude plugin test .
+      STOP WHEN: the test passes. In Output, name the cases covered and any existing test you found.
+
+  - id: plan-note
+    label: Record the A6 verdict and the X3 items in the plan
+    category: trivial
+    writes: [docs/external-benchmark-plan.md]
+    verify:
+      - kind: file
+        path: docs/external-benchmark-plan.md
+        contains: "d8-a6-baseline.md"
+      - kind: command
+        argv: [git, diff, --check, --, docs/external-benchmark-plan.md]
+    prompt: |
+      TASK: Update docs/external-benchmark-plan.md (Korean prose, like the rest of the file). DELIVERABLE: (1) in the
+      candidate table, the A6 row's verdict becomes 보류 with the date 2026-10-28 and a pointer to the X2 section; (2) in
+      the X2 section, replace the A6 bullet's plan with the measured result from eval/baselines/d8-a6-baseline.md:
+      16 sessions each under strict enforcement, ToolSearch calls 2 -> 0, median seconds to the first dag start 24 -> 25,
+      median input tokens per message 55,114 -> 58,210 (+5.6%), median input tokens per session 553,557 -> 549,685, shape
+      match 13/16 -> 15/16 at two samples per scenario; held because the round trip it removes is rare and every turn
+      pays the schema; revisit if ToolSearch round trips become common. (3) Do not mark X3 done; another session does
+      that after the run. SCOPE: edit only that file; take every number from eval/baselines/d8-a6-baseline.md.
+      VERIFY: run git diff --check -- docs/external-benchmark-plan.md and recheck each number against the baseline.
+      STOP WHEN: both edits are written.
+
+  - id: readonly-crosscheck
+    label: Log when the host read-only flag and the plugin classification disagree
+    category: standard
+    slice: true
+    dependsOn: [bold-weight]
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes: [hooks/register.ts, hooks/engine/policy.ts, tests/readonly-crosscheck.test.ts, docs/reference.md]
+    verify:
+      - kind: file
+        path: tests/readonly-crosscheck.test.ts
+        contains: "isReadOnly"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Claude Code 2.1.304 sets `e.isReadOnly: true` on a tool.check event when the tool itself holds that input
+      read-only (see the ToolCheck event type in .claude-plugin/types/claude-code/index.d.ts: absent also means the tool
+      cannot say, and it is the tool's word, not proof). The plugin classifies main-conversation calls itself:
+      mainLoopVerdict in hooks/engine/policy.ts (MAIN_LOOP_TOOLS, readOnlyBashProblem), called from the tool.check
+      handlers in hooks/register.ts (near `const verdict = mainLoopVerdict(`). In the 2026-10-28 baseline every
+      main-conversation refusal was a read-only Bash denial (python3, xargs, awk, command substitution), so it is worth
+      knowing where the host disagrees. This phase observes only.
+      DELIVERABLE: (1) where the plugin decides a main-conversation call, compare its read-only judgment with
+      `e.isReadOnly` for Bash calls and for tools outside MAIN_LOOP_TOOLS, and when they disagree write one debug line
+      (the plugin's existing `debug($, ...)` helper) `read-only disagreement: <tool> host=<read-only|not stated>
+      plugin=<read-only|refused: <reason>>`, never the command text beyond the first 80 characters. Do not change any
+      verdict, policy list or refusal message. Put any pure comparison helper in hooks/engine/policy.ts. (2) Tests in
+      tests/readonly-crosscheck.test.ts: the pure helper over a table of cases (host read-only + plugin refused; host
+      silent + plugin read-only Bash; agreement in both directions writes nothing), and one runtime test that the
+      verdict of a disagreeing call is unchanged. (3) docs/reference.md: one short Korean paragraph next to the
+      enforcement description of main-conversation tools saying the debug line exists, that it changes nothing and why
+      (observation before deciding whether to trust the host flag).
+      SCOPE: edit only the files in writes. bold-weight edited hooks/register.ts before you; keep its changes.
+      VERIFY: run claude plugin test ., bunx -p typescript@5 tsc -p . --noEmit and claude plugin validate .
+      STOP WHEN: the checks pass. In Output, give the exact debug line format, where it is written, and the helper name.

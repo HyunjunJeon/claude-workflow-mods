@@ -1,12 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { citedPaths, findingSections, producersOf, rerunRisk, REWORK_FINDINGS_CHARS, reworkNote, reworkPlan, type ReworkPlan, type ReworkSkip } from '../hooks/engine/rework.ts'
-import { createRun, markFinished, markRunning, reworkRun } from '../hooks/engine/run.ts'
-import type { Run } from '../hooks/engine/types.ts'
+import { amendRun, cancelRun, createRun, failToStart, markFinished, markRunning, pauseRunning, resumePaused, retryRun, reworkRun } from '../hooks/engine/run.ts'
+import type { NodeDef, Run } from '../hooks/engine/types.ts'
 
 const CHECK = [{ kind: 'command', argv: ['check-control'] }]
 const asPlan = (result: ReworkPlan | ReworkSkip | undefined): ReworkPlan | undefined => (result && 'skip' in result ? undefined : result)
 const TASK = 'TASK: x STOP WHEN: y'
+const node = (fields: Partial<NodeDef>): NodeDef => ({ id: 'x', prompt: TASK, dependsOn: [], ...fields })
 
 // Two producers with their own files, an optional third one with no write scope, and a hand-written audit over all of them.
 function settled(audit: { error: string; state?: 'failed' | 'completed' }, extra: { id: string; failed?: string }[] = []): Run {
@@ -51,7 +52,6 @@ test('no round when another kind of failure is in the run or the round is spent;
 // Seen in real runs: apply-env, switch-role, setup-assets (a Supabase upload), delete-token-row and commit-push changed
 // things outside the project, and none of them declared writes.
 test('rerunRisk keeps nodes that work outside the project files out of the round, and lets file producers and verifiers through', () => {
-  const node = (fields: Record<string, unknown>) => ({ id: 'x', prompt: TASK, dependsOn: [], ...fields })
   expect(rerunRisk(node({ id: 'apply-env' }))).toBe('is named for work outside the project files ("apply")')
   expect(rerunRisk(node({ id: 'commitPush', writes: ['src/a.ts'] }))).toContain('("commit")')
   expect(rerunRisk(node({ id: 'deploy-preview', writes: ['dist'] }))).toContain('("deploy")')
@@ -61,6 +61,15 @@ test('rerunRisk keeps nodes that work outside the project files out of the round
   for (const ok of [node({ id: 'product-page', writes: ['src/product.ts'] }), node({ id: 'verify-files', dependsOn: ['a'] }), node({ id: 'docs', writes: ['README.md'] })]) {
     expect({ id: ok.id, risk: rerunRisk(ok) }).toEqual({ id: ok.id, risk: undefined })
   }
+})
+
+// Run dag_mvrn1mj1_b26cng (2026-10-28) lost its round: a docs node labelled "Document the notify setting" matched the
+// prefix notif. A node that sends a message still names it (send, email, sms) or declares no writes.
+test('rerunRisk lets a producer that builds a notification feature through, and still stops one that sends a message', () => {
+  expect(rerunRisk(node({ id: 'notify', label: 'Native notifications with the toast as fallback', writes: ['hooks/register.ts'] }))).toBeUndefined()
+  expect(rerunRisk(node({ id: 'reference-doc', label: 'Document the notify setting', writes: ['docs/reference.md'] }))).toBeUndefined()
+  expect(rerunRisk(node({ id: 'notify-slack' }))).toBe('declares no writes, so what a rerun would change is unknown')
+  expect(rerunRisk(node({ id: 'send-digest', writes: ['out/digest.md'] }))).toContain('("send")')
 })
 
 test('a round that would rerun an external producer, or a completed external node downstream of it, becomes a skip naming it', () => {
@@ -114,6 +123,24 @@ test('reworkRun reruns the producers with the note and everything downstream, an
   expect(node('verify-all')?.error).toBeUndefined()
   expect(result.value.reviewFix).toEqual({ rounds: 1, history: [{ at: 9, reviewers: ['verify-all'], producers: ['api'] }] })
   expect(reworkRun(run, ['verify-all'], 'x', [], 9).ok).toBe(false)
+})
+
+test('reworkRun records each producer\'s finished agent to resume with the note, and every other way to start the node again drops it', () => {
+  const result = reworkRun(settled({ error: 'Spec verdict: FAIL - src/api/a.ts:1' }), ['api'], '[Review fix 1/1] fix it', ['verify-all'], 9)
+  if (!result.ok) throw new Error(result.error.message)
+  const reworked = result.value
+  const resumeOf = (run: Run, id: string) => run.nodes.find(current => current.id === id)?.resume
+  expect(resumeOf(reworked, 'api')).toEqual({ agentId: 'agent-api', note: '[Review fix 1/1] fix it' })
+  expect(resumeOf(reworked, 'verify-all')).toBeUndefined()
+  expect(resumeOf(markRunning(reworked, 'api', 'agent-api', 10), 'api')).toBeUndefined()
+  expect(resumeOf(failToStart(reworked, 'api', 'no agent', 10), 'api')).toBeUndefined()
+  const amended = amendRun(reworked, reworked.definition, 10)
+  if (!amended.ok) throw new Error(amended.error.message)
+  expect(resumeOf(amended.value.run, 'api')).toBeUndefined()
+  expect(resumeOf(resumePaused(pauseRunning(reworked, 10), 'other-session', 10), 'api')).toBeUndefined()
+  const retried = retryRun(cancelRun(reworked, 'stop', 10).run, {}, 11)
+  if (!retried.ok) throw new Error(retried.error.message)
+  expect(resumeOf(retried.value, 'api')).toBeUndefined()
 })
 
 test('citedPaths keeps project files and basenames, and drops paths outside the project', () => {

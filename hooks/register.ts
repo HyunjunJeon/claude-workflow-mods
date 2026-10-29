@@ -1,10 +1,10 @@
 import type { Elements, EngineInterface, On, PluginOptions, RenderInput, RenderSurface, SessionMessage, SessionRateLimit, Timer, ToolCallResult, ToolCheckDecision } from 'claude-code'
 import { parseDefinition } from './engine/definition.ts'
-import { err, keepAliveMessage, listText, nodeMessage, ok, previewText, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type ToolReply } from './engine/format.ts'
+import { answerMessage, err, keepAliveMessage, listText, nodeMessage, ok, previewText, questionMessage, questionNotice, recoveryHoldReason, reworkMessage, runLine, runStartedMessage, settleMessage, splitArgs, statusText, type RecoveryHold, type ToolReply } from './engine/format.ts'
 import { attemptReportPath, buildNodePrompt, extractOutput, hasStatusLine, parseOutcome, spawnTarget, type UpstreamResult } from './engine/node-prompt.ts'
-import { isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
+import { absentOccurrenceWarnings, containsPrecisionWarnings, fileCheckPaths, isBlockedReportPath, isFinalAudit, lintDefinition, notesNameFor } from './engine/lint.ts'
 import { previewDefinition, type Preview } from './engine/preview.ts'
-import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
+import { answerModeRequest, MODE_CONFIDENCE, modeRequest, PERSON_TOOLS, popupAnswer, modelPrompt, parseChoices, parseModelChoices, permissionRequest, questionRequest, recoveryRequest, routingParts, routingRequest, SURFACE_CONFIDENCE, type JevChoice, type JevContext, type JevEvaluation, type JevOutcome, type JevRequest } from './engine/jev.ts'
 import { shareJevCall, type PendingJevCall } from './engine/jev-calls.ts'
 import { appendDecisions, JEV_RULESET_VERSION, parseDecisionLog, type DecisionOutcome, type DecisionRecord } from './engine/decisions.ts'
 import { addNote, contextSlices, contextSummary, contextUnseen, deliverBlock, deliverRuns, emptyContext, nothingDelivered, parseContext, recordRequest, removeNote } from './engine/context.ts'
@@ -17,7 +17,7 @@ import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
 import { isReviewStageNode, lensVerifyFolder, REVIEW_SECURITY_ID, securityLensOf } from './engine/stages.ts'
-import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
+import { denyMessage, gatesMainLoop, gatesPlanning, isPlanningSkill, MAIN_LOOP_TOOLS, mainLoopVerdict, PLANNING_SKILL, planningRequired, protocolFor, readOnlyDisagreement, type Enforcement, type TurnMode, type TurnSurface } from './engine/policy.ts'
 import {
   amendRun,
   approveRun,
@@ -41,6 +41,10 @@ import {
   snapshotOf,
   advance,
   expandNodes,
+  failUnanswered,
+  requeueAnswered,
+  resumeAnswered,
+  type QuestionAnswer,
 } from './engine/run.ts'
 import { retentionPlan, type RetentionFile } from './engine/retention.ts'
 import { familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.ts'
@@ -62,7 +66,7 @@ import { chunkArrived, fromTranscript, stepStarted, toolStarted, type Activity, 
 import { approvalPreview } from './ui/approval.ts'
 import { BAND_GAP, buildBand, summarizeActive } from './ui/band.ts'
 import { stringsFor, type Strings } from './ui/i18n.ts'
-import { SETTLE_NOTIFIES, settleNotice, type SettleNotify } from './ui/settle-notice.ts'
+import { NOTICE_TITLE, SETTLE_NOTIFIES, settleNotice, type SettleNotify } from './ui/settle-notice.ts'
 import type { ViewKind } from './ui/graph-model.ts'
 import { ACCENT } from './ui/text.ts'
 import { buildInspector, type InspectorView } from './ui/inspector-model.ts'
@@ -78,7 +82,31 @@ import { createDefinitionFiles, definitionPaths } from './host/autocomplete.ts'
 
 const TOOL_NAME = 'mcp__dag-workflow__dag'
 const RUNS_SUBDIR = `${DAG_SUBDIR}/runs`
-const USAGE = 'Usage: /dag [list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [nodes...] | approve <run> | reject <run> [reason] | approval [off|always] | context | note <text> | note rm <number> | decisions [id] | sessions | handoff <run> <session|cancel> | accept <run> | inspect <dag|decisions|context|sessions|board> | enforce [strict|auto|guide|off] | view [auto|graph|lanes|timeline] | learn | learning [status|on|off|prune]]'
+const DAG_FORMS = [
+  'list',
+  'run <file>',
+  'preview <file>',
+  'status <run>',
+  'cancel <run>',
+  'retry <run> [nodes...]',
+  'approve <run>',
+  'reject <run> [reason]',
+  'answer <run> <node> <text>',
+  'approval [off|always]',
+  'context',
+  'note <text>',
+  'note rm <number>',
+  'decisions [id]',
+  'sessions',
+  'handoff <run> <session|cancel>',
+  'accept <run>',
+  'inspect <dag|decisions|context|sessions|board>',
+  'enforce [strict|auto|guide|off]',
+  'view [auto|graph|lanes|timeline]',
+  'learn',
+  'learning [status|on|off|prune]',
+].join(' | ')
+const USAGE = `Usage: /dag [${DAG_FORMS}]`
 const ENFORCEMENTS: readonly Enforcement[] = ['strict', 'auto', 'guide', 'off']
 type StartApproval = 'off' | 'always'
 const START_APPROVALS: readonly StartApproval[] = ['off', 'always']
@@ -101,6 +129,9 @@ const HOLD_LIMIT_MS = 3_600_000
 // On 2026-10-10 a node that ended its turn waiting on a background `bun eval/run.ts` was verified at once and failed; it
 // resumed by itself later and passed.
 const BACKGROUND_WAIT_MS = 30 * 60_000
+// How long a blocked node waits for an answer in an interactive session before its default is sent or it fails
+// (docs/design/node-questions.md, decision 5).
+const QUESTION_TIMEOUT_MS = 15 * 60_000
 // The usage hold's reset timer fires this long after its window's resetsAt. usageHold already ignores a window once its reset
 // time has come; the margin covers a local clock a few seconds behind the API's (a chosen margin, not a measured one).
 const USAGE_RESET_GRACE_MS = 5_000
@@ -126,6 +157,24 @@ const FINAL_AUDIT_CATEGORY = 'standard'
 // The command a readonly decision keeps in its note: enough to tell which command the host did not mark read-only.
 const DECISION_COMMAND_CHARS = 200
 const SAFE_FILE = /^[A-Za-z0-9_.-]+\.json$/
+
+// Fire and forget: a hook's verdict never waits on the notification, and a refused or rejected call never reaches it.
+// `fallbackToast` is for a case with no toast of its own, so the text still reaches the person.
+function raiseNotify($: EngineInterface, text: string, fallbackToast: boolean): void {
+  if (!notifyEnabled) return
+  const fallback = (why: string) => {
+    debug($, `notification not delivered (${why})`)
+    if (fallbackToast) $.ui.toast(text, { timeoutMs: ATTENTION_TOAST_MS })
+  }
+  try {
+    $.ui.notify(text, { title: NOTICE_TITLE }).then(
+      result => { if (!result.isSent) fallback(result.reason) },
+      error => fallback(message(error)),
+    )
+  } catch (error) {
+    fallback(message(error))
+  }
+}
 
 // The strict gate must outlive the conversation's process, while the conversation still holds the planning skill.
 // `planningLoaded` is the fast in-process copy, and two stores carry it past a restart of the plugin's code:
@@ -279,15 +328,25 @@ const backgroundAgents = new Set<string>()
 // Workers whose turn ended with that work pending and no status line: the answer they gave and the timer that fails the
 // node if no next turn starts within BACKGROUND_WAIT_MS.
 const backgroundWaits = new Map<string, { answer: string; timer: Timer }>()
+// `<run>/<node>` -> the timeout of the question that node is blocked on, in an interactive session.
+const questionTimers = new Map<string, Timer>()
 // Per run and node, the tools already explained in a non-interactive session for the node's current attempt, in
 // first-seen order: a retried call adds no second line, and the settle summary lists them. A new attempt starts over.
 const askedTools = new Map<string, Map<string, { attempt: number; tools: string[] }>>()
+// Per run and node, the transient or implementation recovery Jev judged below jev_recovery_confidence for the node's
+// current attempt; the settle summary says why that failed node was not retried. A new attempt drops it.
+const recoveryHolds = new Map<string, Map<string, RecoveryHold & { attempt: number }>>()
 let userRequest = ''
 let jevEnabled = true
 let jevMaxCalls = 100
 let jevCallsUsed = 0
 let jevLimitNoted = false
+// Tool permissions only; routing and recovery have their own bars below.
 let jevConfidence = 0.9
+// A replay of 145 routing and 7 recovery decisions (eval/baselines/jev-threshold-replay.md) chose 0.8 for HTTP routing
+// and kept 0.9 for recovery.
+let jevRoutingConfidence = 0.8
+let jevRecoveryConfidence = 0.9
 // Session-model routing answers measured 0.60-0.97 confident with every choice correct, so they apply from a lower bar.
 let jevModelRoutingConfidence = 0.8
 let jevModelFallback = true
@@ -309,6 +368,7 @@ let metadataWrites: Promise<unknown> = Promise.resolve()
 let decisionSequence = 0
 let sessionClosed = false
 let autoRecovery = true
+let notifyEnabled = true
 let inspectorView: 'dag' | 'board' | InspectorView = 'dag'
 let inspectorPage = 0
 let inspectorColumns = FALLBACK_GRAPH_COLUMNS
@@ -378,6 +438,7 @@ async function markWaiting($: EngineInterface, agentId: string, tool: string, to
     waiting.set(agentId, { tool, since, ...(toolUseId ? { toolUseId } : {}) })
     debug($, `${owner.run.runId}/${owner.nodeId} waits for a permission answer (${tool})`)
     $.ui.toast(text, { timeoutMs: ATTENTION_TOAST_MS })
+    raiseNotify($, text, false)
     updateStatus($)
     $.ui.invalidate('ui.render')
   }
@@ -571,7 +632,10 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
   const evaluation = await evaluateJev($, request, undefined, routingParts(run, ids, JEV_MODEL_CALLS))
   const records: DecisionRecord[] = []
   const at = await $.clock.now()
-  const threshold = evaluation.backend === 'model' ? jevModelRoutingConfidence : jevConfidence
+  const [threshold, setting] = evaluation.backend === 'model'
+    ? [jevModelRoutingConfidence, 'jev_model_routing_confidence']
+    : [jevRoutingConfidence, 'jev_routing_confidence']
+  const kept: string[] = []
   const nodes = run.nodes.map(node => {
     if (!ids.includes(node.id)) return node
     const choice = evaluation.choices.get(node.id)
@@ -587,6 +651,9 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
       latencyMs: evaluation.latencies?.get(node.id) ?? evaluation.latencyMs, stateHash: hash(stableStringify(request.state)),
       ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
     }, evaluation, threshold))
+    if (outcome === 'low-confidence' && choice && choice.choice !== category && !ruled) {
+      kept.push(`${node.id} ${category} (Jev ${choice.choice} at ${choice.confidence})`)
+    }
     if (ruled) {
       debug($, `final-audit rule ${run.runId}/${node.id}: ${FINAL_AUDIT_CATEGORY} instead of trivial`)
       return { ...node, routing: { source: 'rule' as const, category: FINAL_AUDIT_CATEGORY } }
@@ -598,6 +665,7 @@ async function routeRun($: EngineInterface, run: Run, ids: string[]): Promise<Ru
     return { ...node, routing: { source: 'definition' as const, category } }
   })
   await persistDecisions($, records)
+  if (kept.length > 0) $.ui.log(`Jev routing ${run.runId}: kept the proposed category below ${setting} ${threshold}: ${kept.join(', ')}`)
   return { ...run, nodes }
 }
 
@@ -983,6 +1051,7 @@ async function recoverRuns($: EngineInterface): Promise<void> {
     }
     runs.set(run.runId, requeueLost(run, live, now))
     await tick($, run.runId)
+    for (const node of run.nodes) await waitForAnswer($, run.runId, node.id)
   }
 }
 
@@ -1044,6 +1113,10 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   })
   // The ledger joins the task text, so the reporting contract stays the prompt's end.
   const ledger = await ledgerSection($, run, def)
+  if (node.resume) {
+    const resumed = await resumeProducer($, run, node, node.resume, ledger, target.subagentType, node.routing?.category ?? def.category)
+    if (resumed) return resumed
+  }
   const prompt = buildNodePrompt(run, def, ledger === undefined ? node : { ...node, promptOverride: `${node.promptOverride ?? def.prompt}\n\n${ledger}` }, upstream)
   const model = node.recovery?.model ?? target.model
   let spawned: { agentId?: string; model?: string; deny?: string }
@@ -1069,6 +1142,28 @@ async function startNode($: EngineInterface, run: Run, id: string): Promise<Run>
   }
   await recordTrajectory($, trajectory, trajectoryCalls($), { ...started, model, error: spawned.deny ?? 'no agent id was returned' })
   return attemptRecovery($, failToStart(run, id, `Could not start the node agent: ${spawned.deny ?? 'no agent id was returned'}`, now), id)
+}
+
+// The review-fix round sends its note to the producer's finished agent (NodeRun.resume), as answerNode sends an answer, and
+// the next attempt runs on that agent: its turn end arrives under the same id and is claimed through agentRuns. undefined
+// when the send is not delivered or throws; startNode then spawns a fresh agent, whose promptOverride carries the same note.
+async function resumeProducer($: EngineInterface, run: Run, node: NodeRun, resume: { agentId: string; note: string }, ledger: string | undefined, subagentType: string, category: string | undefined): Promise<Run | undefined> {
+  const text = reworkMessage(resume.note, ledger)
+  agentRuns.set(resume.agentId, run.runId)
+  let failure: string | undefined
+  try {
+    const sent = await $.session.send({ to: { agentId: resume.agentId }, text })
+    if (!sent.isDelivered) failure = sent.reason
+  } catch (error) {
+    failure = message(error)
+  }
+  if (failure !== undefined) {
+    agentRuns.delete(resume.agentId)
+    $.ui.log(`${run.name} › ${node.id}: the review fix did not reach agent ${resume.agentId} (${failure}); a new agent starts with the findings in its prompt`)
+    return undefined
+  }
+  await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'node.start', runId: run.runId, nodeId: node.id, attempt: node.attempt + 1, agentId: resume.agentId, model: node.model, subagentType, category, recovery: node.recovery, prompt: text })
+  return markRunning(run, node.id, resume.agentId, await $.clock.now(), node.model)
 }
 
 const settleSubmits = new Set<string>()
@@ -1211,14 +1306,21 @@ function recheckUsageHold($: EngineInterface): void {
 
 // One native notification for a run of this session that has just settled, under settle_notify (settle-notice.ts decides). The
 // caller guards it with settleToasts, so a settle raises it once. Whatever the host answers stays out of the run: an unsent or
-// rejected notification only reaches the debug log.
+// rejected notification reaches the debug log, and for a completed run, which has no settle toast of its own (a failed run
+// raised toastSettledFailed), also a toast with the same text.
 function notifySettled($: EngineInterface, run: Run, now: number): void {
   const notice = settleNotice(run, sessionId, settleNotify, now, t)
   if (!notice) return
+  const fallbackToast = () => {
+    if (run.nodes.every(node => node.state === 'completed')) $.ui.toast(notice.text, { timeoutMs: ATTENTION_TOAST_MS })
+  }
   $.ui.notify(notice.text, { title: notice.title }).then(sent => {
-    if (!sent.isSent) debug($, `the notification that ${run.runId} settled was not sent: ${sent.reason}`)
+    if (sent.isSent) return
+    debug($, `the notification that ${run.runId} settled was not sent: ${sent.reason}`)
+    fallbackToast()
   }).catch(error => {
     debug($, `could not raise the notification that ${run.runId} settled: ${message(error)}`)
+    fallbackToast()
   })
 }
 
@@ -1238,7 +1340,7 @@ function announce($: EngineInterface, run: Run, text?: string, deferred = false)
   settleSubmits.add(run.runId)
   const send = () => {
     // Plugin submissions run once idle; never await them in the queue.
-    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), boardAnswerRuns.has(run.runId))).then(result => {
+    submitRunNews($, run, text ?? settleMessage(run, TOOL_NAME, settleAsks(run), boardAnswerRuns.has(run.runId), settleHolds(run))).then(result => {
       if ('drop' in result) throw new Error(result.drop)
       return serialized(async () => {
         const current = runs.get(run.runId)
@@ -1389,6 +1491,200 @@ async function backgroundTimedOut($: EngineInterface, agentId: string, timer: Ti
   await applyCompletion($, claim, result)
 }
 
+function questionKey(runId: string, nodeId: string): string {
+  return `${runId}/${nodeId}`
+}
+
+function cancelQuestionTimer(runId: string, nodeId: string): void {
+  const key = questionKey(runId, nodeId)
+  questionTimers.get(key)?.cancel()
+  questionTimers.delete(key)
+}
+
+// A blocked node that a cancel ended or an amend rebuilt waits for nothing: its timer stops and its agent is unmapped.
+function dropQuestionWaits(before: Run, after: Run): void {
+  for (const node of before.nodes) {
+    if (node.state !== 'blocked' || after.nodes.find(current => current.id === node.id)?.state === 'blocked') continue
+    cancelQuestionTimer(before.runId, node.id)
+    if (node.agentId) agentRuns.delete(node.agentId)
+  }
+}
+
+// The one way an answer reaches a blocked node, whoever gave it; callers run inside serialized. The answer goes to the same
+// agent, which resumes the same attempt with its context, and its next turn end is verified as usual. When the send is not
+// delivered or throws, the node starts again as a new attempt whose prompt carries the answer (<clarifications>). `resumed`
+// says which of the two happened.
+async function answerNode($: EngineInterface, runId: string, nodeId: string, reply: QuestionAnswer): Promise<Result<{ run: Run; resumed: boolean }>> {
+  const run = runs.get(runId)
+  if (!run) return fail('unknown_run', `No run "${runId}" in this project.`)
+  const now = await $.clock.now()
+  const resumed = resumeAnswered(run, nodeId, reply, now)
+  if (!resumed.ok) return resumed
+  cancelQuestionTimer(runId, nodeId)
+  const agentId = run.nodes.find(node => node.id === nodeId)?.agentId
+  if (agentId) agentRuns.set(agentId, runId)
+  const delivered = agentId !== undefined && await deliverAnswer($, agentId, answerMessage(reply.answer, reply.by))
+  let next = resumed.value
+  if (!delivered) {
+    if (agentId) agentRuns.delete(agentId)
+    const requeued = requeueAnswered(run, nodeId, reply, now)
+    if (!requeued.ok) return requeued
+    next = requeued.value
+  }
+  runs.set(runId, next)
+  $.ui.log(`${run.name} › ${nodeId}: answered by ${reply.by}; ${delivered ? 'the same agent continues' : 'a new attempt starts'}`)
+  return { ok: true, value: { run: (await tick($, runId)) ?? next, resumed: delivered } }
+}
+
+async function deliverAnswer($: EngineInterface, agentId: string, text: string): Promise<boolean> {
+  try {
+    const sent = await $.session.send({ to: { agentId }, text })
+    if (!sent.isDelivered) $.ui.log(`the answer did not reach agent ${agentId}: ${sent.reason}`)
+    return sent.isDelivered
+  } catch (error) {
+    $.ui.log(`the answer did not reach agent ${agentId}: ${message(error)}`)
+    return false
+  }
+}
+
+// Nobody can answer: the node fails as a clarification, with no Jev call (recoverNode refuses the kind anyway).
+async function failQuestion($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  const run = runs.get(runId)
+  if (!run) return
+  const failed = failUnanswered(run, nodeId, await $.clock.now())
+  if (!failed.ok) {
+    $.ui.log(`${run.name} › ${nodeId}: ${failed.error.message}`)
+    return
+  }
+  cancelQuestionTimer(run.runId, nodeId)
+  const agentId = run.nodes.find(node => node.id === nodeId)?.agentId
+  if (agentId) agentRuns.delete(agentId)
+  runs.set(run.runId, failed.value)
+  $.ui.log(`${run.name} › ${nodeId}: failed (${failed.value.nodes.find(node => node.id === nodeId)?.error})`)
+  $.ui.toast(t.toastNodeFailed(run.name, nodeId), { timeoutMs: ATTENTION_TOAST_MS })
+  failureToasts.set(run.runId, (failureToasts.get(run.runId) ?? new Set()).add(nodeId))
+  await tick($, run.runId)
+}
+
+// A non-interactive session has nobody to wait for: Jev picks one of the node's options when it clears
+// jev_recovery_confidence, else the node's default is sent, else the node fails as a clarification. The decision is logged
+// as a recovery record, since decisions.ts has no question kind and the bar is the recovery one.
+async function decideUnattended($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  const run = runs.get(runId)
+  const node = run?.nodes.find(current => current.id === nodeId)
+  const question = node?.question
+  if (!run || !node || !question) return
+  const request = questionRequest(run, node)
+  if (request) {
+    const evaluation = await evaluateJev($, request)
+    const choice = evaluation.choices.get('question')
+    const outcome = decisionOutcome(evaluation, choice, 'question', jevRecoveryConfidence)
+    const picked = outcome === 'applied' ? question.options?.find(option => option === choice?.choice) : undefined
+    const scored: { confidence?: number, probabilities?: DecisionRecord['probabilities'] } = {}
+    if (choice) {
+      scored.confidence = choice.confidence
+      if (choice.probabilities) scored.probabilities = choice.probabilities
+    }
+    await persistDecisions($, [decisionRecord({
+      at: await $.clock.now(), kind: 'question', subject: node.id, runId: run.runId, nodeId: node.id,
+      proposed: question.default ?? 'clarification', selected: picked ?? question.default ?? 'clarification',
+      source: picked === undefined ? 'baseline' : 'jev', outcome, latencyMs: evaluation.latencyMs,
+      stateHash: hash(stableStringify(request.state)), ...scored,
+    }, evaluation, jevRecoveryConfidence)])
+    if (picked !== undefined) {
+      logUnanswered($, run, nodeId, await answerNode($, run.runId, nodeId, { answer: picked, by: 'jev' }))
+      return
+    }
+  }
+  if (question.default !== undefined) {
+    logUnanswered($, run, nodeId, await answerNode($, run.runId, nodeId, { answer: question.default, by: 'default' }))
+    return
+  }
+  await failQuestion($, runId, nodeId)
+}
+
+function logUnanswered<T>($: EngineInterface, run: Run, nodeId: string, result: Result<T>): void {
+  if (!result.ok) $.ui.log(`${run.name} › ${nodeId}: the answer was not applied: ${result.error.message}`)
+}
+
+async function questionTimedOut($: EngineInterface, runId: string, nodeId: string, askedAt: number): Promise<void> {
+  const run = runs.get(runId)
+  const question = run?.nodes.find(node => node.id === nodeId && node.state === 'blocked')?.question
+  // Answered, cancelled, rebuilt by an amend, asked again or handed to another session since the timer started.
+  if (!run || run.sessionId !== sessionId || question?.askedAt !== askedAt) return
+  questionTimers.delete(questionKey(runId, nodeId))
+  if (question.default !== undefined) {
+    logUnanswered($, run, nodeId, await answerNode($, runId, nodeId, { answer: question.default, by: 'timeout' }))
+    return
+  }
+  await failQuestion($, runId, nodeId)
+}
+
+// A blocked node's agent stays mapped, so the turn an answer starts comes back through onAgentDone. An interactive session
+// waits up to QUESTION_TIMEOUT_MS from when the node asked (less after a restart); a non-interactive one decides at once.
+async function waitForAnswer($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  const node = runs.get(runId)?.nodes.find(current => current.id === nodeId)
+  if (node?.state !== 'blocked' || !node.question || !node.agentId) return
+  agentRuns.set(node.agentId, runId)
+  if (!interactive) {
+    await decideUnattended($, runId, nodeId)
+    return
+  }
+  cancelQuestionTimer(runId, nodeId)
+  const askedAt = node.question.askedAt
+  const timer = $.clock.after(Math.max(0, askedAt + QUESTION_TIMEOUT_MS - await $.clock.now()), () => {
+    serialized(() => questionTimedOut($, runId, nodeId, askedAt)).catch(error => {
+      $.ui.log(`could not end the wait for an answer of ${runId}/${nodeId}: ${message(error)}`)
+    })
+  })
+  questionTimers.set(questionKey(runId, nodeId), timer)
+}
+
+// The question notices this session submitted, by text, while their questions are open. A plugin's prompt runs once the
+// session is idle, so a notice can wait behind a busy main turn while that turn answers the question: on 2026-10-28 one
+// arrived after the model had answered it from the node's Output, and asked the model to answer again.
+const questionNotices = new Map<string, { runId: string; nodeId: string; askedAt: number }>()
+const ANSWERED_NOTICE = 'the question was answered or withdrawn before this notice ran'
+
+function questionStillOpen(notice: { runId: string; nodeId: string; askedAt: number }): boolean {
+  const node = runs.get(notice.runId)?.nodes.find(current => current.id === notice.nodeId)
+  return node?.state === 'blocked' && node.question?.askedAt === notice.askedAt
+}
+
+// A node that just asked: besides the wait, an interactive session tells the main conversation once (the model may answer
+// unless the question needs the person) and the person.
+async function nodeBlocked($: EngineInterface, runId: string, nodeId: string): Promise<void> {
+  await waitForAnswer($, runId, nodeId)
+  const run = runs.get(runId)
+  const question = run?.nodes.find(node => node.id === nodeId)?.question
+  if (!interactive || !run || !question) return
+  const text = questionMessage(run, nodeId, question, TOOL_NAME, QUESTION_TIMEOUT_MS / 60_000)
+  for (const [pending, notice] of questionNotices) if (!questionStillOpen(notice)) questionNotices.delete(pending)
+  questionNotices.set(text, { runId, nodeId, askedAt: question.askedAt })
+  // Plugin submissions run once idle; never await them in the queue.
+  submitRunNews($, run, text).then(result => {
+    if ('drop' in result && result.drop !== ANSWERED_NOTICE) throw new Error(result.drop)
+  }).catch(error => {
+    $.ui.log(`could not tell the session that ${run.runId}/${nodeId} asks a question: ${message(error)}`)
+  })
+  raiseNotify($, questionNotice(run.name, nodeId, question.text), true)
+}
+
+// The pane's option buttons: a press is the person's own answer, checked as a typed /dag answer is. A new attempt the
+// fallback starts waits for a busy main turn to end, as an approval does.
+async function paneAnswer($: EngineInterface, runId: string, nodeId: string, answer: string): Promise<void> {
+  const reply = await serialized(async () => {
+    deferStarts = mainTurnBusy
+    try {
+      return await handleTool($, { action: 'answer', run_id: runId, node_id: nodeId, answer }, 'user')
+    } finally {
+      deferStarts = false
+    }
+  })
+  if (reply.isError) $.ui.log(reply.result)
+  $.ui.invalidate('ui.render')
+}
+
 async function onAgentDone($: EngineInterface, end: AgentEnd): Promise<void> {
   endBackgroundWait(end.agentId)
   const pending = await awaitsBackground($, end)
@@ -1453,9 +1749,14 @@ async function applyCompletion($: EngineInterface, claim: CompletionClaim, resul
   if (runs.get(runId)?.nodes.find(current => current.id === node.id)?.state === 'failed') {
     $.ui.toast(verification && verification.status !== 'passed' ? t.toastVerificationFailed(run.name, node.id) : t.toastNodeFailed(run.name, node.id), { timeoutMs: ATTENTION_TOAST_MS })
     failureToasts.set(runId, (failureToasts.get(runId) ?? new Set()).add(node.id))
+    if (autoRecovery && (runs.get(runId)?.nodes.find(current => current.id === node.id)?.recovery?.used ?? 0) >= 1) raiseNotify($, t.notifyRecoveryStopped(run.name, node.id), false)
   }
   $.ui.log(`${run.name} › ${node.id}: ${outcome.state}${outcome.error ? ` (${outcome.error})` : ''}`)
   const after = await tick($, runId)
+  if (after?.nodes.find(current => current.id === node.id)?.state === 'blocked') {
+    await nodeBlocked($, runId, node.id)
+    return
+  }
   if (!paneSurface && after && !isSettled(after)) {
     // No pane to watch: say that a node finished; the settle summary still goes through announce.
     submitRunNews($, after, nodeMessage(after, node.id)).catch(error => {
@@ -1646,14 +1947,21 @@ async function attemptRecovery($: EngineInterface, run: Run, nodeId: string): Pr
   const evaluation = await evaluateJev($, request)
   const choice = evaluation.choices.get('recovery')
   const kind = choice ? recoveryKind(choice.choice) : undefined
-  const outcome = decisionOutcome(evaluation, choice, 'recovery')
+  const outcome = decisionOutcome(evaluation, choice, 'recovery', jevRecoveryConfidence)
   await persistDecisions($, [decisionRecord({
     at: await $.clock.now(), kind: 'recovery', subject: node.id, runId: run.runId, nodeId: node.id,
     proposed: 'manual', selected: outcome === 'applied' && kind ? kind : 'manual',
     source: outcome === 'applied' ? 'jev' : 'baseline', outcome, latencyMs: evaluation.latencyMs,
     stateHash: hash(stableStringify(request.state)),
     ...(choice ? { confidence: choice.confidence, ...(choice.probabilities ? { probabilities: choice.probabilities } : {}) } : {}),
-  }, evaluation)])
+  }, evaluation, jevRecoveryConfidence)])
+  if (outcome === 'low-confidence' && choice && (kind === 'transient' || kind === 'implementation')) {
+    const hold = { choice: kind, confidence: choice.confidence, bar: jevRecoveryConfidence }
+    let held = recoveryHolds.get(run.runId)
+    if (!held) recoveryHolds.set(run.runId, held = new Map())
+    held.set(node.id, { ...hold, attempt: node.attempt })
+    $.ui.log(`Jev recovery ${run.runId}/${node.id}: no automatic retry; ${recoveryHoldReason(hold)}`)
+  }
   if (outcome !== 'applied' || !kind) return run
   const reason = (node.error ?? 'The node failed.').slice(0, 2_000)
   const prepared: Run = {
@@ -1763,11 +2071,27 @@ async function fileCheckResult($: EngineInterface, check: FileCheck, root: strin
   return problem ? { outcome: 'failed', detail: problem } : { outcome: 'passed', detail: `File verified: ${check.path}` }
 }
 
+// The tail of each argv's queue of command checks: nodes of one wave that verify with the same command run it one at a time.
+// On 2026-10-28 three nodes ran `claude plugin test .` at once; the suite takes 19 s alone, and together two of the runs
+// passed the 30 s limit and ended not_run.
+const commandCheckQueues = new Map<string, Promise<unknown>>()
+
+async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const current = (commandCheckQueues.get(key) ?? Promise.resolve()).then(work)
+  const tail = current.catch(() => undefined)
+  commandCheckQueues.set(key, tail)
+  try {
+    return await current
+  } finally {
+    if (commandCheckQueues.get(key) === tail) commandCheckQueues.delete(key)
+  }
+}
+
 // A program that cannot start or runs past its limit makes $.process.run reject, which fails the check whatever expect says.
 // The limit is the check's own timeoutMs, or the host's 30 s default without one (the parser keeps it within 1 s to 10 min).
 // The host reads a signal exit as code 1, so only a rejection or a missing code is told apart here.
 async function commandCheckResult($: EngineInterface, check: CommandCheck, root: string): Promise<CheckResult> {
-  const result = await $.process.run(check.argv, { cwd: root, timeoutMs: check.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS })
+  const result = await oneAtATime(JSON.stringify(check.argv), () => $.process.run(check.argv, { cwd: root, timeoutMs: check.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS }))
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
   const expectation = check.expect
   const truncated = (stream: 'stdout' | 'stderr') => expectation?.[stream] !== undefined && (stream === 'stdout' ? result.isStdoutTruncated : result.isStderrTruncated)
@@ -1900,6 +2224,24 @@ async function missingProgramProblem($: EngineInterface, definition: Definition,
   return absent.length > 0 ? { code: 'invalid_verification', message: missingProgramsMessage(absent) } : undefined
 }
 
+const ABSENT_READ_LIMIT = 1_000_000
+
+// Reads the files the definition's absent and long contains checks target so their current text can be judged. Folders, missing files and
+// files over 1 MB are left out silently; a read error only drops that file, it never fails the caller. Paths resolve against
+// root, the folder the run will work in (workingRoot).
+async function absentWarnings($: EngineInterface, definition: Definition, root: string): Promise<string[]> {
+  const texts = new Map<string, string>()
+  for (const path of fileCheckPaths(definition)) {
+    try {
+      const stat = await $.fs.stat(`${root}/${path}`)
+      if (stat.kind === 'file' && stat.size <= ABSENT_READ_LIMIT) texts.set(path, await $.fs.read(`${root}/${path}`))
+    } catch {
+      // A missing or unreadable file has nothing to count; the warning is advisory.
+    }
+  }
+  return [...absentOccurrenceWarnings(definition, texts), ...containsPrecisionWarnings(definition, texts)]
+}
+
 // A dry run creates, persists and spawns nothing and opens no pane, so it leaves no trace.
 async function previewRequest($: EngineInterface, input: unknown): Promise<Result<{ preview: Preview; existing: Run | undefined }>> {
   const root = await workingRoot($, projectRoot)
@@ -1907,7 +2249,9 @@ async function previewRequest($: EngineInterface, input: unknown): Promise<Resul
   if (!screened.ok) return screened
   const missing = screened.value.existing ? undefined : await missingProgramProblem($, screened.value.definition, root)
   if (missing) return { ok: false, error: missing }
-  return { ok: true, value: { preview: previewDefinition(screened.value.definition, { maxConcurrent }), existing: screened.value.existing } }
+  const preview = previewDefinition(screened.value.definition, { maxConcurrent })
+  const absent = await absentWarnings($, screened.value.definition, root)
+  return { ok: true, value: { preview: { ...preview, warnings: [...preview.warnings, ...absent] }, existing: screened.value.existing } }
 }
 
 function effectiveApproval(): StartApproval {
@@ -1953,7 +2297,7 @@ async function startDefinition($: EngineInterface, input: unknown, by: 'model' |
   await openPane($, false)
   const held = awaitingApproval(started)
   if (held) $.ui.toast(t.toastApproval(started.name), { timeoutMs: ATTENTION_TOAST_MS })
-  const warnings = [...lintDefinition(definition), ...planningWarning()]
+  const warnings = [...lintDefinition(definition), ...await absentWarnings($, definition, root), ...planningWarning()]
   return ok({
     reused: false,
     run_id: runId,
@@ -2126,6 +2470,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
       cancelled = markFinished(cancelled, node.id, { state: 'cancelled', error: `Cancelled: ${reason}` }, now)
     }
     for (const node of run.nodes) if (node.agentId) clearWaiting($, node.agentId)
+    dropQuestionWaits(run, cancelled)
     await persist($, cancelled)
     const failures: { agent_id: string; error: string }[] = []
     for (const agentId of stopAgents) {
@@ -2157,6 +2502,7 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
+    dropQuestionWaits(run, routed)
     runs.set(run.runId, routed)
     await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
     return ok({
@@ -2178,6 +2524,22 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     return sent.isDelivered
       ? ok({ delivered: true, node_id: node.id })
       : err({ code: 'not_delivered', message: sent.reason ?? 'The message was not delivered.' })
+  }
+  if (input.action === 'answer') {
+    // A run the person rejected takes no answer from the model.
+    if (run.rejected && by === 'model') {
+      return err({ code: 'rejected_by_user', message: `The user rejected run ${run.runId} ("${run.name}"); only the user can answer its nodes.` })
+    }
+    const node = run.nodes.find(n => n.id === input.node_id)
+    if (!node) return err({ code: 'unknown_node', message: `Node "${String(input.node_id)}" is not in run ${run.runId}.` })
+    if (node.question?.needsPerson && by === 'model') {
+      return err({ code: 'needs_person', message: `Node "${node.id}" marked its question Needs: person, so only the user can answer it, in the /dag pane or with /dag answer ${run.runId} ${node.id} <text>. Tell the user the question instead.` })
+    }
+    if (typeof input.answer !== 'string' || input.answer.trim() === '') return err({ code: 'invalid_request', message: 'answer needs a non-empty answer.' })
+    const answered = await answerNode($, run.runId, node.id, { answer: input.answer.trim(), by: by === 'user' ? 'person' : 'model' })
+    if (!answered.ok) return err(answered.error)
+    const after = answered.value.run.nodes.find(n => n.id === node.id)
+    return ok({ node_id: node.id, resumed: answered.value.resumed, state: after?.state, attempt: after?.attempt })
   }
   return err({ code: 'invalid_request', message: `Unknown action "${String(input.action)}".` })
 }
@@ -2479,6 +2841,13 @@ async function runCommand($: EngineInterface, args: string, fromComposer = false
     const text = run ? runStatusText(run) : reply.result
     return { text: warnings.length ? `${text}\nWarnings:\n${warnings.map(warning => `- ${warning}`).join('\n')}` : text }
   }
+  if (verb === 'answer') {
+    const [runId, nodeId, ...words] = rest
+    if (!runId || !nodeId || words.length === 0) return { text: 'Usage: /dag answer <run> <node> <text>' }
+    const reply = await handleTool($, { action: 'answer', run_id: runId, node_id: nodeId, answer: words.join(' ') }, fromComposer ? 'user' : 'model')
+    const run = runs.get(runId)
+    return { text: reply.isError || !run ? reply.result : runStatusText(run) }
+  }
   if (verb !== 'status' && verb !== 'cancel' && verb !== 'retry') return { text: USAGE }
   const run = rest[0] ? runs.get(rest[0]) : undefined
   if (!run) return { text: `Unknown run "${rest[0] ?? ''}".\n${USAGE}` }
@@ -2596,6 +2965,17 @@ function settleAsks(run: Run): Map<string, string[]> {
   return asked
 }
 
+// Like settleAsks, only the node's current attempt counts: a retried node's earlier hold no longer explains its result.
+function settleHolds(run: Run): Map<string, RecoveryHold> {
+  const holds = new Map<string, RecoveryHold>()
+  const nodes = recoveryHolds.get(run.runId)
+  for (const node of run.nodes) {
+    const entry = nodes?.get(node.id)
+    if (entry && entry.attempt === node.attempt) holds.set(node.id, entry)
+  }
+  return holds
+}
+
 // claude -p cannot put an ask to anyone, so the host refuses the call; this says why it was left at ask.
 function headlessAskNote(tool: string, why: string): string {
   return `${tool} needs approval that this non-interactive session cannot ask for (${why}); allow it up front with --allowedTools ${tool} or a --permission-mode that covers it`
@@ -2686,6 +3066,23 @@ function shownRuns(): Run[] {
   return visibleRuns([...runs.values()], sessionId)
 }
 
+// Called straight from the press: the host refuses a view that does not answer the person's own input.
+async function openTranscript($: EngineInterface, node: NodeRun): Promise<void> {
+  if (!node.agentId) {
+    $.ui.toast(t.toastNoTranscript(node.id), { timeoutMs: ATTENTION_TOAST_MS })
+    return
+  }
+  const refused = (reason: string) => $.ui.toast(t.toastTranscriptDenied(node.id, reason, node.reportPath), { timeoutMs: ATTENTION_TOAST_MS })
+  try {
+    const shown = await $.ui.view({ agentId: node.agentId })
+    if (shown.deny !== undefined) refused(shown.deny)
+  } catch (error) {
+    const reason = message(error)
+    debug($, `transcript view failed (${reason})`)
+    refused(reason)
+  }
+}
+
 function shownRun(): Run | undefined {
   const shown = shownRuns()
   return shown[clampRunIndex(view.runIndex, shown.length)]
@@ -2767,7 +3164,7 @@ function drawLine({ Box, Text }: Pick<Elements[RenderSurface], 'Box' | 'Text'>, 
     children: segments.map(s =>
       Text({
         ...(s.color ? { color: s.color } : {}),
-        ...(s.bold ? { bold: true } : {}),
+        ...(s.bold ? { weight: 'semibold' as const } : {}),
         ...(s.dim ? { dimColor: true } : {}),
         wrap: 'truncate-end',
         children: [s.text],
@@ -2840,6 +3237,7 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
     step()
     redraw()
   }
+  const transcriptNode = view.selected ? shownRun()?.nodes.find(node => node.id === view.selected) : undefined
   const footer = [
     gap(),
     Box({
@@ -2858,6 +3256,9 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
         }),
         Button({ key: 'view-switch', label: t.viewSwitch, hotkey: 'v', plain: true, onPress: () => cycleView($) }),
         Button({ key: 'fold', label: view.unfold ? t.fold : t.unfold, hotkey: 'f', plain: true, onPress: act(() => (view = { ...view, unfold: !view.unfold })) }),
+        ...(transcriptNode
+          ? [Button({ key: 'transcript', label: t.transcript, hotkey: 'o', plain: true, onPress: () => openTranscript($, transcriptNode) })]
+          : []),
         ...(shown.length > 1
           ? [Button({ key: 'completed-runs', label: t.completedToggle, hotkey: 'c', plain: true, onPress: act(() => (view = { ...view, showCompleted: !view.showCompleted })) })]
           : []),
@@ -2926,6 +3327,14 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
           ],
         }),
         ...(card.lines.length ? [Box({ flexDirection: 'column', paddingLeft: 4, children: card.lines.map(line) })] : []),
+        ...(card.options.length && run.sessionId === sessionId
+          ? [Box({
+            flexDirection: 'row',
+            columnGap: 2,
+            paddingLeft: 4,
+            children: card.options.map((option, at) => Button({ key: `answer-${card.id}-${at}`, label: option, plain: true, onPress: () => paneAnswer($, run.runId, card.id, option) })),
+          })]
+          : []),
       ],
     }),
   )
@@ -2954,11 +3363,16 @@ async function drawPane($: EngineInterface, e: RenderEvent) {
 export function register(on: On, options: PluginOptions) {
   language = options.language === 'ko' ? 'ko' : 'en'
   autoRecovery = options.auto_recovery !== false
+  notifyEnabled = options.notify !== false
   jevEnabled = options.jev_enabled !== false
   const jevLimitOption = options.jev_max_calls
   if (typeof jevLimitOption === 'number' && Number.isInteger(jevLimitOption) && jevLimitOption >= 1 && jevLimitOption <= 1000) jevMaxCalls = jevLimitOption
   jevModelFallback = options.jev_model_fallback !== false
   if (typeof options.jev_confidence === 'number' && Number.isFinite(options.jev_confidence) && options.jev_confidence >= 0 && options.jev_confidence <= 1) jevConfidence = options.jev_confidence
+  const routing = options.jev_routing_confidence
+  if (typeof routing === 'number' && Number.isFinite(routing) && routing >= 0 && routing <= 1) jevRoutingConfidence = routing
+  const recovery = options.jev_recovery_confidence
+  if (typeof recovery === 'number' && Number.isFinite(recovery) && recovery >= 0 && recovery <= 1) jevRecoveryConfidence = recovery
   const modelRouting = options.jev_model_routing_confidence
   if (typeof modelRouting === 'number' && Number.isFinite(modelRouting) && modelRouting >= 0 && modelRouting <= 1) jevModelRoutingConfidence = modelRouting
   t = stringsFor(options.language)
@@ -3098,7 +3512,7 @@ export function register(on: On, options: PluginOptions) {
     await $.command.register({
       name: 'dag',
       description: 'Manage DAG workflows and enforcement, or learn and manage reusable skills from the whole session',
-      argumentHint: '[list | run <file> | preview <file> | status <run> | cancel <run> | retry <run> [node...] | approve <run> | reject <run> [reason] | approval [off|always] | enforce [strict|auto|guide|off] | learn | learning [status|on|off|prune]]',
+      argumentHint: `[${DAG_FORMS}]`,
       immediate: true,
     })
     return next(e)
@@ -3186,8 +3600,14 @@ export function register(on: On, options: PluginOptions) {
   on('session.receive', async ($, e, next) => {
     const peer = e.origin.kind === 'peer' || e.origin.kind === 'peer-send-message'
     if (e.agentId || !peer || !/(^|\n)\[dag-handoff\](?:\s|$)/.test(e.text)) return next(e)
-    await refreshSessions($)
-    await serialized(() => refreshExternalRuns($))
+    try {
+      await refreshSessions($)
+      await serialized(() => refreshExternalRuns($))
+    } catch (error) {
+      // The host would reject the delivery with the throw; pass it on unconsumed so the handoff text still reaches its reader.
+      $.ui.log(`could not refresh sessions for a handoff delivery: ${message(error)}`)
+      return next(e)
+    }
     $.ui.log('A manual handoff is available. Open /dag sessions or the Sessions pane to inspect and accept it.')
     $.ui.toast(t.toastHandoff, { timeoutMs: ATTENTION_TOAST_MS })
     $.ui.invalidate('ui.render')
@@ -3274,21 +3694,35 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    const notice = e.origin.kind === 'plugin' ? questionNotices.get(e.text) : undefined
+    if (notice && !questionStillOpen(notice)) {
+      questionNotices.delete(e.text)
+      return { drop: ANSWERED_NOTICE }
+    }
     const userOrigin = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
     if (next.origin.plugin === 'engine' && userOrigin && e.text.trim()) {
       const recent = workflowContext.requests.slice(-3).map(entry => entry.text)
       userRequest = e.text
       workflowContext = recordRequest(workflowContext, { text: e.text, at: await $.clock.now() })
-      await persistContext($)
+      try {
+        await persistContext($)
+      } catch (error) {
+        $.ui.log(`could not save the workflow context for this prompt: ${message(error)}`)
+      }
       // Under auto each user prompt is decided anew; a plugin's prompt (settle, keep-alive, progress) keeps the mode and
       // the surface. The strict rules hold while Jev is asked; every answer, none included, then sets the mode, and only
       // a decision that throws leaves the gate closed. The surface starts as chat and is set by the same decision.
       if (enforcement === 'auto') {
         turnMode = 'dag'
         turnSurface = 'chat'
-        const decision = await decideTurn($, e.text, recent, next.signal)
-        turnMode = decision.mode
-        turnSurface = decision.surface
+        try {
+          const decision = await decideTurn($, e.text, recent, next.signal)
+          turnMode = decision.mode
+          turnSurface = decision.surface
+        } catch (error) {
+          // The mode stays dag and the surface chat, set above: the gate stays closed and the prompt still enters.
+          $.ui.log(`could not decide the turn mode, keeping the DAG gate closed: ${message(error)}`)
+        }
       }
     }
     // The protocol rides on every prompt. The block (up to 8,000 characters) goes only on a user prompt whose run and
@@ -3315,7 +3749,11 @@ export function register(on: On, options: PluginOptions) {
     if (block && result.drop === undefined) block.received()
     if (result.drop === undefined && userOrigin && next.origin.plugin === 'engine' && e.text.trim()) {
       learning.turnRequested = true
-      await collectLearning($, learning, 'user', e.text)
+      try {
+        await collectLearning($, learning, 'user', e.text)
+      } catch (error) {
+        $.ui.log(`could not collect session learning for this prompt: ${message(error)}`)
+      }
       if (learning.enabled && learning.root) {
         try {
           const now = await $.clock.now()
@@ -3330,13 +3768,15 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('agent.spawn', async ($, e, next) => {
+    // A resume (an answered node question, a SendMessage) may only be refused: a changed prompt is ignored and reported.
+    if (e.resume) return next(e)
     if (e.parentAgentId && learning.agents.has(e.parentAgentId)) return { deny: 'Session learning returns proposals without spawning agents.' }
     if (learning.spawning && e.name === learning.spawnName) {
       const result = await next({ ...e, background: true })
       if (result.agentId) learning.agents.add(result.agentId)
       return result
     }
-    if (!learning.enabled || !learning.root || eligibleSkills(learning.library, projectRoot).length === 0) return next(e)
+    if (e.workflow || !learning.enabled || !learning.root || eligibleSkills(learning.library, projectRoot).length === 0) return next(e)
     return next({ ...e, prompt: `${e.prompt}\n\n${learningCatalog(learning.library, projectRoot, learning.skillsDir)}` })
   })
 
@@ -3351,6 +3791,12 @@ export function register(on: On, options: PluginOptions) {
   })
 
   on('tool.check', async ($, e, next) => {
+    // Observation only: no verdict below depends on this line.
+    if (!e.agentId && gatesMainLoop(enforcement, turnMode) && typeof e.input === 'object' && e.input !== null) {
+      // SAFETY: the guard above proved e.input is a non-null object; the helper reads only string-keyed fields.
+      const disagreement = readOnlyDisagreement(e.tool, e.input as Readonly<Record<string, unknown>>, e.isReadOnly === true, extraAllowed)
+      if (disagreement) debug($, disagreement)
+    }
     const decided = await next(e)
     // Only the model's own main-conversation call went through the main-loop gate: a subagent's call, a plugin's call
     // (origin) and a $.tool.check query (no tool_use_id) did not, and a main_allowed_tools Bash skips the judge.
@@ -3362,7 +3808,13 @@ export function register(on: On, options: PluginOptions) {
     const worker = ownNodeOfAgent(e.agentId ?? call?.agentId)
     // The answer stays with the person: mark the node worker that will wait for it.
     const asked = async (why: string, verdict = decided) => {
-      if (call) await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+      if (call) {
+        try {
+          await markWaiting($, call.agentId, e.tool, e.tool_use_id)
+        } catch (error) {
+          $.ui.log(`could not record the permission wait for ${e.tool}: ${message(error)}`)
+        }
+      }
       if (!interactive && worker && noteAsk(worker.run.runId, worker.nodeId, worker.attempt, e.tool)) {
         $.ui.log(`${worker.run.runId}/${worker.nodeId}: ${headlessAskNote(e.tool, why)}`)
       }
@@ -3509,8 +3961,9 @@ export function register(on: On, options: PluginOptions) {
       endBackgroundWait(agentId)
       try {
         const reply = await call()
-        // Recorded once the call is answered: a refused call started nothing.
-        if (owner && reply.deny === undefined && startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) backgroundAgents.add(agentId)
+        // Recorded once the call is answered: a refused call started nothing, and neither did one that errored, which is
+        // also how a refusal by the host permission gate (beneath this hook) arrives.
+        if (owner && reply.deny === undefined && reply.isError !== true && startsBackgroundWork(e.tool, e as Readonly<Record<string, unknown>>)) backgroundAgents.add(agentId)
         return reply
       } finally {
         if (nodeSkillLoad) nodePlanningCalls -= 1
@@ -3623,10 +4076,11 @@ export function register(on: On, options: PluginOptions) {
   on('command.run', { command: 'dag' }, async ($, e) => {
     const [verb, setting] = splitArgs(e.args ?? '')
     // Approving is the person's call: the model could otherwise approve its own run, or switch the gate off.
-    const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || (verb === 'approval' && setting !== undefined)
+    const userOnly = verb === 'handoff' || verb === 'accept' || verb === 'note' || verb === 'approve' || verb === 'reject' || verb === 'answer' || (verb === 'approval' && setting !== undefined)
     if (userOnly && e.origin.kind !== 'composer') return { text: USER_ONLY }
     const fromComposer = e.origin.kind === 'composer'
-    const starts = verb === 'run' || verb === 'retry' || verb === 'approve'
+    // An answer that cannot reach its agent starts a new attempt.
+    const starts = verb === 'run' || verb === 'retry' || verb === 'approve' || verb === 'answer'
     if (!mainTurnBusy || !starts) {
       const out = await serialized(() => runCommand($, e.args ?? '', fromComposer))
       if (starts) openHeldTurn($)

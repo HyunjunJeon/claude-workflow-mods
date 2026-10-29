@@ -1,0 +1,171 @@
+# Improvement P14: eval accuracy (B4, B10) from docs/improvement-backlog.md, decisions D8 in docs/improvement-plan.md.
+# B4: a direct scenario never matched under strict enforcement, starts and refusals were counted per transcript block
+# instead of per tool_use id, and the refusal column had one number with no tool or reason. B10: one sample per scenario
+# cannot tell a shape change from planner noise. D8: the new rules apply from the next baseline (old tables are not
+# recomputed) and this run starts no real-model evaluation.
+#
+# PREREQUISITE: `git status --short` prints nothing.
+# Run it with:  /dag run flows/improvement/p14-eval-accuracy.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves):
+#   wave 1: eval-scoring (moves transcript counting and matching into eval/report.ts)
+#   wave 2: eval-repeat (adds --repeat on top of the moved functions; same files, so serial)
+#   wave 3: eval-docs (documents the flags and columns eval-repeat reports in its Output)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: standard for the two code nodes (they change scoring rules the baselines rely on); writing for the doc.
+# Edges: eval-scoring -> eval-repeat carries the new function names; eval-repeat -> eval-docs carries the flag names,
+# the guard message and the report columns.
+
+key: improve-p14-eval-accuracy-1
+name: P14 - eval accuracy
+goal: >
+  bun eval/run.ts scores a direct scenario as matched under strict enforcement when every run it made has one node,
+  counts DAG starts, AskUserQuestion calls and refusals once per tool_use id, reports refusals by tool and reason,
+  and takes --repeat k (default 1; above 3 it refuses to start without --confirm-usage) with a per-scenario match rate
+  and time range; the logic is pure functions tested over fixture transcripts with duplicated rows; docs/development.md
+  documents it; no real-model evaluation runs.
+review:
+  request: |
+    다음단계 계속 진행.
+    The phase is P14 of docs/improvement-plan.md (B4, B10) with decision D8:
+    - B4: under --enforcement strict, a scenario that expects direct counts as matched when every run it produced has
+      exactly one node; the starts, AskUserQuestion and refusal counters dedupe by tool_use id so a transcript that
+      repeats a row is counted once; refusals are reported per tool and refusal reason.
+    - B10: --repeat k runs each scenario k times (default 1), refuses k above 3 unless --confirm-usage is given, and
+      the report gives each scenario's match rate and time range across its samples.
+    - Unit tests over fixture transcripts with duplicated rows; bun eval/run.ts --list exits 0.
+    - D8: no real-model evaluation in this phase; old baselines are not recomputed.
+  rules:
+    - AGENTS.md
+commit:
+  - message: |
+      feat(eval): score strict direct runs, dedupe transcript counts and repeat scenarios
+
+      A direct scenario under strict enforcement now matches when its runs have one node, starts, questions and
+      refusals are counted once per tool_use id, refusals are split by tool and reason, and --repeat k reports a
+      match rate and time range per scenario (k above 3 needs --confirm-usage).
+    paths:
+      - eval/run.ts
+      - eval/report.ts
+      - eval/options.ts
+      - tests/shape.test.ts
+      - docs/development.md
+      - flows/improvement/p14-eval-accuracy.yaml
+nodes:
+  - id: eval-scoring
+    label: Score strict direct runs and count transcript blocks once
+    category: standard
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes: [eval/report.ts, eval/run.ts, tests/shape.test.ts]
+    verify:
+      - kind: file
+        path: eval/report.ts
+        matches: "^export function transcriptCounts\\("
+      - kind: file
+        path: eval/report.ts
+        matches: "^export function scenarioMatched\\("
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: >
+      TASK: Make the shape evaluation's scores and counters trustworthy (backlog B4 in docs/improvement-backlog.md).
+      Today eval/run.ts is a script with top-level execution, so its transcript parsing (readTranscript) and the match
+      rule inside markdown() cannot be unit tested. (1) Move the per-row counting out of readTranscript into an exported
+      pure function `transcriptCounts(lines: readonly string[])` in eval/report.ts that takes the JSONL lines of the
+      main session transcript and returns what TranscriptReport holds today without the path (skillBeforeStart,
+      starts, askUserQuestions and the ToolResultCounts). It must count each tool_use block once per its id and each
+      tool_result once per its tool_use_id, so a transcript that repeats a row (the same message written twice) gives
+      the same numbers as one that does not; keep skipping sidechain rows and keep the skill-before-start ordering
+      rule. readTranscript keeps finding the newest file and calls it. (2) Split the refusal counter: keep
+      planningRefusals, verificationRequired and invalidVerification, keep toolDenials as the total, and add
+      `denials`, a list of `{ tool, reason, count }` parsed from the host refusal text that hooks/engine/policy.ts
+      denyMessage builds ("dag-workflow refused <tool> in the main conversation: <reason>."). In the Markdown table,
+      the refusals column shows planning/total and a new column lists each tool and reason with its count, or "-".
+      (3) Add an exported pure function `scenarioMatched(expect, runs, enforcement)` in eval/report.ts and use it in
+      markdown(): a scenario expecting "direct" matches when it made no run, or, only when enforcement is "strict",
+      when it made at least one run and every run has exactly one node; any other expectation matches as today (a run
+      whose shape or producerShape equals it). Under auto enforcement a one-node run still does not match direct.
+      DELIVERABLE: the two functions in eval/report.ts, eval/run.ts using them, and tests in tests/shape.test.ts:
+      a fixture transcript (JSONL lines built in the test) whose dag start, AskUserQuestion and a refused Bash
+      tool_result rows each appear twice counts each once; two refusals with different tools or reasons are listed
+      separately; scenarioMatched for direct with no run, with a one-node run under strict and under auto, and with a
+      two-node run under strict. Write each test so it fails on the current code first.
+      SCOPE: edit only eval/report.ts, eval/run.ts and tests/shape.test.ts; do not run bun eval/run.ts without --list
+      (that spends real model usage); do not touch eval/baselines or eval/results.
+      VERIFY: run claude plugin test . and bunx -p typescript@5 tsc -p . --noEmit; run bun eval/run.ts --list.
+      STOP WHEN: the tests pass and the checks pass. In Output, give the exported function names and signatures, the
+      new TranscriptReport/ToolResultCounts fields, and the new and renamed Markdown column headers.
+
+  - id: eval-repeat
+    label: Repeat each scenario and report its match rate and time range
+    category: standard
+    slice: true
+    dependsOn: [eval-scoring]
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes: [eval/options.ts, eval/run.ts, eval/report.ts, tests/shape.test.ts]
+    verify:
+      - kind: file
+        path: eval/options.ts
+        matches: "^export function parseArgs\\("
+      - kind: file
+        path: tests/shape.test.ts
+        contains: "--confirm-usage"
+      - kind: command
+        argv: [bun, eval/run.ts, --list]
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+    prompt: >
+      TASK: Add repeated sampling to the shape evaluation (backlog B10 in docs/improvement-backlog.md), on top of the
+      functions eval-scoring moved into eval/report.ts (see its Output). (1) Move parseArgs and the Options type out of
+      eval/run.ts into a new eval/options.ts so they can be tested, and add `--repeat k`: a positive integer, default 1;
+      a value that is not a positive integer is an error. When k is above 3, parseArgs reports an error naming
+      --confirm-usage unless that flag is given, because each sample is a real claude -p session on the user's account.
+      eval/run.ts prints the error to stderr and exits 1 before creating any fixture or spawning anything; --list still
+      lists and exits 0 without needing the flag. (2) eval/run.ts runs every selected scenario k times through the
+      existing pool; with k above 1 each sample gets its own fixture directory `<root>/<id>-<n>` (n from 1) and output
+      file, so transcripts do not mix; with k = 1 paths stay as they are. (3) Add an exported pure function in
+      eval/report.ts that takes the samples (scenario id, whether it matched by scenarioMatched, its shape, its seconds)
+      and returns per scenario: samples, matched count, the distinct shapes seen, and the minimum, median and maximum
+      seconds. The Markdown report states `Repeats: k.` in its header, keeps one table row per sample (the scenario
+      cell gets `#n` when k is above 1), its overall match line counts samples, and when k is above 1 it adds a section
+      "## Across repeats" with one row per scenario: matched/samples, shapes seen, and seconds as min-median-max.
+      The JSON result keeps every sample with its repeat number.
+      DELIVERABLE: eval/options.ts, the changes in eval/run.ts and eval/report.ts, and tests in tests/shape.test.ts for
+      parseArgs (default 1, --repeat 2 accepted, --repeat 4 refused with a message naming --confirm-usage, --repeat 4
+      --confirm-usage accepted, --repeat 0 and --repeat x refused, --list with --repeat 4 not refused) and for the
+      summary function over samples with mixed matches and seconds.
+      SCOPE: edit only eval/options.ts, eval/run.ts, eval/report.ts and tests/shape.test.ts; never run bun eval/run.ts
+      without --list (real model usage); do not touch eval/baselines or eval/results.
+      VERIFY: run claude plugin test ., bunx -p typescript@5 tsc -p . --noEmit and bun eval/run.ts --list.
+      STOP WHEN: tests and checks pass. In Output, give the exact usage line of eval/run.ts with every flag, the exact
+      error text for k above 3, the header line and section title the report adds, and the columns of both tables.
+
+  - id: eval-docs
+    label: Document the scoring rules and the repeat flag
+    category: writing
+    dependsOn: [eval-scoring, eval-repeat]
+    writes: [docs/development.md]
+    verify:
+      - kind: file
+        path: docs/development.md
+        matches: "bun eval/run\\.ts \\[[^\\n]*--repeat"
+      - kind: file
+        path: docs/development.md
+        contains: "--confirm-usage"
+      - kind: command
+        argv: [git, diff, --check, --, docs/development.md]
+    prompt: >
+      TASK: Update the shape-evaluation section of docs/development.md (Korean prose, like the rest of the file) to
+      match what eval-scoring and eval-repeat report in their Outputs. DELIVERABLE: (1) the usage block line for
+      bun eval/run.ts shows the new flags exactly as eval-repeat's usage line; (2) a paragraph on --repeat k: default 1,
+      each sample is a real claude -p session, k above 3 needs --confirm-usage, per-sample fixture directories, and the
+      "## Across repeats" section with its columns; (3) the paragraph that says a direct scenario matches only when no
+      run was made gains the strict rule (every run has one node) and says the auto rule is unchanged; (4) the
+      results-table description says counters are deduplicated by tool_use id and names the refusal columns by their
+      new headers; (5) one sentence that results before this change (old baselines) were counted the old way and are
+      not recomputed. SCOPE: edit only docs/development.md; do not describe behavior the Outputs do not state.
+      VERIFY: run git diff --check -- docs/development.md and reread each changed sentence against the Outputs.
+      STOP WHEN: every item is written.

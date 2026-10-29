@@ -1,3 +1,4 @@
+import type { On } from 'claude-code'
 import { expect, test, type Engine, type Mounted, type Plugin } from 'claude-code/testing'
 import { parseDefinition } from '../hooks/engine/definition.ts'
 import { createRun, rejectRun, requestApproval } from '../hooks/engine/run.ts'
@@ -102,6 +103,32 @@ test('a node with background work whose answer ends with a status line finishes 
 
   expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'completed', verification: { status: 'passed' } })
   expect(h.spawns).toHaveLength(2)
+})
+
+// The host's permission gate runs beneath the plugin's tool.call, so a refused call reaches the plugin as an errored
+// result rather than a deny; it started nothing, and neither did one the tool itself failed.
+test('a background call the host permission gate refuses is no background work, so the node finishes at once', async ($, on) => {
+  on('tool.check', { tool: 'Bash' }, () => ({ decision: 'deny', reason: 'background commands are not allowed' }))
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, CHAIN)
+  await workerCall($, { tool: 'Bash', command: 'bun eval/run.ts', run_in_background: true })
+  await endTurn($, h, 'The eval could not start.')
+
+  expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'completed', verification: { status: 'passed' } })
+  expect(h.logs).not.toContain(WAITING_LOG)
+})
+
+test('an Agent call that fails to start is no background work, so the node finishes at once', async ($, on) => {
+  on('tool.call', { tool: 'Agent' }, () => ({ result: 'Error: agent limit reached', isError: true }))
+  const h = harness(on)
+  await boot($)
+  const runId = await start($, CHAIN)
+  await workerCall($, { tool: 'Agent', description: 'Run the eval', prompt: 'Run the eval' })
+  await endTurn($, h, 'The eval could not start.')
+
+  expect(checkpoint(h, runId).nodes[0]).toMatchObject({ state: 'completed', verification: { status: 'passed' } })
+  expect(h.logs).not.toContain(WAITING_LOG)
 })
 
 // A status line is the last line of the answer, which is where parseOutcome reads it. A sentence that only names the line
@@ -552,4 +579,93 @@ test('a user node\'s file in the reviewers\' folder is left alone when the defin
   expect(noteRemovals(h)).toEqual([])
   expect(h.files.get(OWN)).toBe('## Findings\nnone')
   expect(checkpoint(h, runId).nodes[0]).toMatchObject({ id: 'a', state: 'completed', verification: { status: 'passed' } })
+})
+
+// Storage failures inside the gating hooks: the host fails a throwing prompt.submit or tool.check hook open by itself,
+// but the hook's own work (the turn's context, the handoff notice, the verdict) must not be lost with it.
+
+// The harness's own handler for one host event, made to throw while `broken.on` is set: the test kit's stores are frozen.
+function breakable(on: On, event: 'store.set' | 'clock.now', message: string) {
+  const broken = { on: false }
+  // SAFETY: only the registration of `event` is wrapped; the handler keeps the arguments and result the host contract gives it.
+  const wrapped = ((name: string, ...args: unknown[]) => {
+    const handler = args.at(-1) as (...call: unknown[]) => unknown
+    const guarded = (...call: unknown[]) => {
+      if (broken.on) throw new Error(message)
+      return handler(...call)
+    }
+    return (on as (...call: unknown[]) => unknown)(name, ...(name === event ? [...args.slice(0, -1), guarded] : args))
+  }) as unknown as On
+  return { broken, wrapped }
+}
+
+const SUBMIT = { text: 'Fix the typo in the README', wait: false, origin: { kind: 'composer' } } as const
+
+test('prompt.submit lets the user turn through when the context store write fails', async ($, on) => {
+  const h = harness(on)
+  await boot($)
+  await start($, CHAIN)
+  h.writeErrors.set(`${ROOT}/context/source.json`, 'context store unavailable')
+
+  await $.prompt.submit(SUBMIT)
+
+  expect(h.submits.map(submit => submit.text)).toEqual([SUBMIT.text])
+  expect(h.logs.some(text => text.startsWith('could not save the workflow context'))).toBe(true)
+  expect(h.submits[0]?.context[0]).toContain('[dag-workflow]')
+})
+
+test('session.receive passes a handoff delivery on when the session refresh fails', async ($, on) => {
+  const { broken, wrapped } = breakable(on, 'store.set', 'session store unavailable')
+  const h = harness(wrapped)
+  await boot($)
+  broken.on = true
+
+  const reply = await $.session.receive({ origin: { kind: 'peer' }, text: '[dag-handoff] dag_none' })
+
+  expect(reply).toEqual({ consumed: 'test host received' })
+  expect(h.logs.some(text => text.startsWith('could not refresh sessions'))).toBe(true)
+  expect(h.toasts).toEqual([])
+})
+
+test('tool.check keeps the engine verdict when recording the permission wait fails', async ($, on) => {
+  // The host's own gate lets the call in; the check made while it runs is the one left at ask.
+  let gate: 'allow' | 'ask' = 'allow'
+  on('tool.check', () => ({ decision: gate }))
+  const { broken, wrapped } = breakable(on, 'clock.now', 'clock unavailable')
+  let verdict: unknown
+  on('tool.call', { tool: 'ExitPlanMode' }, async () => {
+    gate = 'ask'
+    broken.on = true
+    verdict = await $.tool.check({ tool: 'ExitPlanMode', input: {}, tool_use_id: 'plan-call', agentId: 'agent-1' })
+    broken.on = false
+    return { result: 'stopped' }
+  })
+  const h = harness(wrapped)
+  await boot($)
+  await start($, CHAIN)
+
+  await $.tool.call({ tool: 'ExitPlanMode', agentId: 'agent-1', tool_use_id: 'plan-call' } as never)
+
+  expect(verdict).toEqual({ decision: 'ask' })
+  expect(h.logs.some(text => text.startsWith('could not record the permission wait'))).toBe(true)
+})
+
+test('a turn decision that throws keeps the DAG gate closed', async ($, on) => {
+  const { broken, wrapped } = breakable(on, 'clock.now', 'clock unavailable')
+  // The decision reads the transcript first; from there on the clock fails, so the decision throws after the turn was set to dag.
+  on('session.messages', () => {
+    broken.on = true
+    return { value: [] }
+  })
+  const h = harness(wrapped)
+  await boot($, null)
+
+  await $.prompt.submit({ text: 'Add a settings page with its API, tests and docs', wait: false, origin: { kind: 'composer' } })
+  broken.on = false
+
+  expect(h.submits).toHaveLength(1)
+  expect(h.submits[0]?.context[0]).toContain('DAG orchestration')
+  const edit = await $.tool.call({ tool: 'Edit', file_path: '/work/a.ts', old_string: 'a', new_string: 'b' })
+  expect(edit.deny).toContain('dag-workflow refused Edit in the main conversation')
+  expect(h.logs.some(text => text.startsWith('could not decide the turn mode'))).toBe(true)
 })

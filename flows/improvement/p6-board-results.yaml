@@ -27,8 +27,8 @@
 # prompt's context); writing for the Korean README and docs.
 # Wave-1 checks are file checks only: the full suite and tsc cover every file, so they would fail on a sibling lane's
 # half-written work (this is what failed board-view in the P1 run). result-host runs them once all lanes are done.
-# Expected lint warning: chip-view owns more than three files; it is one vertical slice (the model, its type and the
-# client that draws it). result-host may extend tests/control-harness.ts: the chip tests need $.prompt.fill to be
+# chip-view declares `slice: true` (the model, its type and the client that draws it), so check-definition prints a note
+# instead of the files warning. result-host may extend tests/control-harness.ts: the chip tests need $.prompt.fill to be
 # observable and to report isFilled, and the harness had no fill support when this was written.
 key: improve-p6-board-results-1
 name: Board P3 - result board on settle and block chips
@@ -185,6 +185,7 @@ nodes:
   - id: chip-view
     label: Block headers in the Board section become chip buttons
     category: standard
+    slice: true
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop

@@ -32,7 +32,7 @@
 # Outcome: the run died at board-engine when the headless host killed background agents 10 minutes after the last turn
 # (CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS). The four completed lanes' files landed in a292671; the host wiring, the
 # session check on trace runs, the truncated-trace marker, docs and the commit were finished by hand after that.
-# Expected lint warnings: "one producer owns 3 files" on board-engine and board-render; each is one slice.
+# board-engine and board-render each declare `slice: true`, so check-definition prints a note for each.
 # Note on the type union: board-contract widens Block/BlockInput, so the whole project cannot typecheck until both
 # board.ts (board-engine) and board-model.ts (board-render) handle the new members. No node before board-host gets a
 # whole-project tsc check; the suite stays green throughout because it exercises behaviour, not types.
@@ -118,6 +118,7 @@ nodes:
   - id: board-engine
     label: Code/trace validation, tracesNeeded and the tool spec
     category: standard
+    slice: true
     dependsOn:
       - board-contract
     load_skills:
@@ -196,6 +197,7 @@ nodes:
   - id: board-render
     label: Terminal renderers for code and trace
     category: trivial
+    slice: true
     dependsOn:
       - board-contract
     load_skills:

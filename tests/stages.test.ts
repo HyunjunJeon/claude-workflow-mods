@@ -266,6 +266,13 @@ test('review-spec prompt carries the request verbatim, the goal, the change, the
   ]) expect({ text, found: prompt.includes(text) }).toEqual({ text, found: true })
 })
 
+test('review-spec tells the reviewer a requested REPORT/SUMMARY/FINDINGS/ANALYSIS Markdown file is written by the main conversation, and review-standards does not', () => {
+  const definition = parse({ review: { request: REQUEST } })
+  const phrase = 'the host refuses that write to subagents'
+  expect(node(definition, 'review-spec').prompt).toContain(phrase)
+  expect(node(definition, 'review-standards').prompt).not.toContain(phrase)
+})
+
 test('both reviewers keep their notes terse and the spec audit caps its own probes', () => {
   const definition = parse({ review: { request: REQUEST } })
   const spec = node(definition, 'review-spec').prompt

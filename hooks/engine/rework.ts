@@ -1,4 +1,4 @@
-import { isVerificationNode, normalizePath } from './lint.ts'
+import { externalWord, isVerificationNode, normalizePath } from './lint.ts'
 import { verdictFailure } from './recovery.ts'
 import { isSettled } from './run.ts'
 import { downstream } from './graph.ts'
@@ -18,17 +18,6 @@ export type ReworkPlan = { reviewers: string[]; producers: string[]; note: strin
 // Why a run that failed only on FAIL verdicts got no round: the main conversation reviews the findings and, for work
 // outside the project, asks the person how to fix it.
 export type ReworkSkip = { skip: string }
-
-// Words in a node's id, label or summary that name work outside the project's files, or on its history: a rerun would push,
-// deploy, upload, migrate, delete or commit again. Matched per word, so "deploy-preview" and "commitPush" count and
-// "product" does not; a false match only hands the FAIL to the main conversation, as before the round existed.
-const EXTERNAL_PREFIXES = ['push', 'deploy', 'publish', 'releas', 'upload', 'migrat', 'delet', 'truncat', 'provision', 'rotat', 'revok', 'commit', 'rebase', 'revert', 'stash', 'notif', 'email']
-const EXTERNAL_WORDS = new Set(['prod', 'production', 'apply', 'drop', 'seed', 'send', 'reset', 'merge', 'tag', 'sms'])
-
-export function externalWord(def: NodeDef): string | undefined {
-  const words = [def.id, def.label, def.task_summary].flatMap(text => (text ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/))
-  return words.find(word => word !== '' && (EXTERNAL_WORDS.has(word) || EXTERNAL_PREFIXES.some(prefix => word.startsWith(prefix))))
-}
 
 // Why a node that already completed must not run again unattended, or undefined when a rerun only rewrites project files
 // (a producer with declared writes) or judges them (a verifier). In real runs every node that changed something outside the

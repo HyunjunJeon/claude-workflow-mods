@@ -1,11 +1,11 @@
 import { edgesOf, layers, upstream } from './graph.ts'
-import { isFinalAudit, lintDefinition, normalizePath } from './lint.ts'
+import { isFinalAudit, lintDefinition, lintNotes, normalizePath } from './lint.ts'
 import { CATEGORIES, spawnTarget } from './node-prompt.ts'
 import type { Definition, NodeDef } from './types.ts'
 
 export type PreviewNode = { id: string; wave: number; category: string; model: 'sonnet' | 'opus'; agent: string; depends_on: string[]; checks: number; writes: string[] | null; load_skills: string[] }
 export type WriteConflict = { a: string; b: string; paths: string[] }
-export type Preview = { node_count: number; waves: string[][]; critical_path: string[]; widest_wave: number; max_concurrent: number; nodes: PreviewNode[]; write_conflicts: WriteConflict[]; unchecked_writes: string[]; routing_note: string; warnings: string[] }
+export type Preview = { node_count: number; waves: string[][]; critical_path: string[]; widest_wave: number; max_concurrent: number; nodes: PreviewNode[]; write_conflicts: WriteConflict[]; unchecked_writes: string[]; routing_note: string; warnings: string[]; notes: string[] }
 
 const ROUTING_NOTE = 'category and model are the definition\'s proposal after the final-audit rule; Jev may reroute a node when the run starts.'
 
@@ -129,5 +129,6 @@ export function previewDefinition(definition: Definition, options: { maxConcurre
     unchecked_writes: uncheckedWrites(definition, pairs),
     routing_note: ROUTING_NOTE,
     warnings: [...lintDefinition(definition), ...unknownCategoryWarnings(nodes)],
+    notes: lintNotes(definition),
   }
 }

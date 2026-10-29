@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { parseDefinition } from '../hooks/engine/definition.ts'
-import { isBlockedReportPath, isVerificationNode, lintDefinition, notesNameFor } from '../hooks/engine/lint.ts'
+import { nodeFingerprint, parseDefinition } from '../hooks/engine/definition.ts'
+import { absentOccurrenceWarnings, containsPrecisionWarnings, deliverablePaths, isBlockedReportPath, isVerificationNode, lintDefinition, lintNotes, notesNameFor } from '../hooks/engine/lint.ts'
 import type { ReviewStage } from '../hooks/engine/types.ts'
 import { verificationProblem } from '../hooks/engine/verification.ts'
 
@@ -342,4 +342,124 @@ test('review.request does not ask who may act under review.security for a local 
 
 test('review.request still asks who may act under review.security for an endpoint', async () => {
   expect(requestWarnings(reviewLint(review(KIT_REQUEST, ['kisa'])))).toContain(NO_ACCESS_RULE)
+})
+
+const threeFiles = { writes: ['src/a.ts', 'src/b.ts', 'src/c.ts'] }
+const sliceNode = (extra: Record<string, unknown>) => ({ id: 'api', prompt: full, ...threeFiles, ...extra })
+
+const pathCases: [string, Record<string, unknown>, string[]][] = [
+  ['./src/ and src are one spelling', { writes: ['./src/', 'src'] }, ['src']],
+  ['a backslash path folds to a slash path', { writes: ['src\\a.ts', 'src/a.ts'] }, ['src/a.ts']],
+  ['a folder and a file inside it count as the file', { writes: ['src', 'src/a.ts'] }, ['src/a.ts']],
+  ['a tests folder and test files do not count', { writes: ['tests/', 'src/a.test.ts', 'src/a.ts'] }, ['src/a.ts']],
+  ['an absolute check path is not a project file', { writes: ['a.ts'], verify: [{ kind: 'file', path: '/tmp/n.md', contains: 'x' }] }, ['a.ts']],
+  ['a checked file inside a written folder counts as the file', { writes: ['src'], verify: [{ kind: 'file', path: './src/a.ts', contains: 'x' }] }, ['src/a.ts']],
+  ['a duplicate spelling counts once', { writes: ['a.ts', './a.ts', 'a.ts'] }, ['a.ts']],
+]
+
+for (const [name, extra, expected] of pathCases) {
+  test(`deliverablePaths: ${name}`, async () => {
+    const node = def([{ id: 'x', prompt: full, ...extra }]).nodes[0]!
+    expect(deliverablePaths(node)).toEqual(expected)
+  })
+}
+
+test('slice: true turns the files warning into a note and slice: false keeps the warning', async () => {
+  const sliced = def([sliceNode({ slice: true })])
+  expect(lintDefinition(sliced).filter(w => w.includes('one producer owns'))).toEqual([])
+  expect(lintNotes(sliced)).toEqual(['node "api": declared a vertical slice that owns 3 files (src/a.ts, src/b.ts, src/c.ts) - the files warning is expected'])
+  const plain = def([sliceNode({ slice: false })])
+  expect(lintDefinition(plain).some(w => w.includes('one producer owns 3 files'))).toBe(true)
+  expect(lintNotes(plain)).toEqual([])
+})
+
+test('a slice that owns fewer than three files gets neither warning nor note', async () => {
+  const small = def([sliceNode({ slice: true, writes: ['src/a.ts'] })])
+  expect(lintDefinition(small)).toEqual([])
+  expect(lintNotes(small)).toEqual([])
+})
+
+test('slice must be a boolean', async () => {
+  const r = parseDefinition({ key: 'k', nodes: [sliceNode({ slice: 'yes' })] })
+  expect(r.ok).toBe(false)
+})
+
+test('two definitions that differ only in slice give the same node fingerprint', async () => {
+  const [a, b] = [true, false].map(slice => def([sliceNode({ slice })]).nodes[0]!)
+  expect(nodeFingerprint(a!)).toBe(nodeFingerprint(b!))
+})
+
+const clauseWarnings = (request: string) => lintDefinition({ ...def([{ id: 'x', prompt: full }]), review: { request, notes: '/tmp/n', category: 'standard' } })
+  .filter(w => w.startsWith('review.request: "'))
+
+test('a clause that starts with a bare article states behavior and is not taken for a deliverable', async () => {
+  expect(clauseWarnings('a run started in a board turn gets board lines in its settle message instead')).toEqual([])
+  expect(clauseWarnings('Add a thing that does X, and a re-settle after a retry updates the same board')).toHaveLength(1)
+  expect(clauseWarnings('and a re-settle after a retry updates the same board')).toEqual([])
+})
+
+test('a clause that starts with a deliverable verb still warns', async () => {
+  expect(clauseWarnings('Add a /health endpoint')).toHaveLength(1)
+})
+
+const LONG = 'the exact sentence a worker could never guess'
+const containsWarnings = (contains: string, prompt: string, texts: ReadonlyMap<string, string> = new Map()) =>
+  containsPrecisionWarnings(def([{ id: 'x', prompt, verify: [{ kind: 'file', path: 'out.md', contains }] }]), texts)
+
+test('a long contains that the prompt does not repeat warns with its length', () => {
+  expect(LONG).toHaveLength(45)
+  expect(containsWarnings(LONG, full)).toEqual([`node "x": check 1 contains a 45-character exact text that the prompt does not give the worker - quote it in the prompt or check a shorter stable phrase`])
+})
+
+test('a 40-character contains that the prompt repeats does not warn', () => {
+  const forty = 'x'.repeat(40)
+  expect(containsWarnings(forty, `${full} The file holds ${forty}.`)).toEqual([])
+})
+
+test('a long contains that the target file lacks warns, and one the file already holds does not', () => {
+  expect(containsWarnings(LONG, full, new Map([['out.md', 'something else entirely']]))).toHaveLength(1)
+  expect(containsWarnings(LONG, full, new Map([['out.md', `before ${LONG} after`]]))).toEqual([])
+})
+
+test('lintDefinition alone no longer judges a long contains', () => {
+  expect(lintDefinition(def([{ id: 'x', prompt: full, verify: [{ kind: 'file', path: 'out.md', contains: LONG }] }])).filter(warning => warning.includes('exact text'))).toEqual([])
+})
+
+test('a 39-character contains does not warn even when the prompt lacks it', () => {
+  expect(containsWarnings('x'.repeat(39), full)).toEqual([])
+})
+
+test('a 40-character contains the prompt lacks warns', () => {
+  expect(containsWarnings('x'.repeat(40), full)).toHaveLength(1)
+})
+
+const absentDef = def([{ id: 'edit', prompt: full, verify: [{ kind: 'command', argv: ['true'] }, { kind: 'file', path: 'a.txt', absent: 'old' }] }])
+
+test('an absent string that already occurs twice warns with its count and path', () => {
+  expect(absentOccurrenceWarnings(absentDef, new Map([['a.txt', 'old and old']]))).toEqual(['node "edit": check 2 absent "old" already occurs 2 times in a.txt - narrow the string or the path, or the check may never pass'])
+})
+
+test('an absent string found once, or in a file that was not read, does not warn', () => {
+  expect(absentOccurrenceWarnings(absentDef, new Map([['a.txt', 'one old only']]))).toEqual([])
+  expect(absentOccurrenceWarnings(absentDef, new Map())).toEqual([])
+})
+
+const reviewFixWarnings = (fields: Record<string, unknown>, withReview = true) =>
+  lintDefinition({ ...def([{ id: 'api', prompt: full, writes: ['src/api.ts'], ...fields }]), ...(withReview ? { review: review('Add the endpoints, each returns 200.') } : {}) })
+    .filter(warning => warning.includes('review-fix'))
+
+test('a review definition warns about a producer labelled with a word the review-fix round skips', () => {
+  expect(reviewFixWarnings({ label: 'Add avatar and delete endpoints' })).toEqual(['node "api": its name contains "delete", so the automatic review-fix round would not rerun it after a FAIL verdict - rename it (id, label or task_summary) unless it really works outside the project files'])
+})
+
+test('the same producer without review does not warn about the review-fix round', () => {
+  expect(reviewFixWarnings({ label: 'Add avatar and delete endpoints' }, false)).toEqual([])
+})
+
+test('a producer that declares external: true does not warn about the review-fix round', () => {
+  expect(reviewFixWarnings({ label: 'Add avatar and delete endpoints', external: true })).toEqual([])
+})
+
+test('a producer labelled "Document the notify setting" does not warn about the review-fix round', () => {
+  expect(reviewFixWarnings({ label: 'Document the notify setting' })).toEqual([])
 })

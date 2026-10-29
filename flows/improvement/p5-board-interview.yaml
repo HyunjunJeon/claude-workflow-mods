@@ -17,8 +17,8 @@
 #   then:   review-spec, review-standards, commit (generated)
 # Categories: writing for the two skill files and the docs (model-facing and user-facing prose); standard for
 # board-host-p2 (two small host behaviours in register.ts plus one pure UI change, with tests).
-# Expected lint warning: board-host-p2 owns more than three files; it is one slice (both behaviours meet in register.ts
-# and i18n.ts) and stays one node.
+# board-host-p2 declares `slice: true` (both behaviours meet in register.ts and i18n.ts; one node), so check-definition
+# prints a note instead of the files warning.
 key: improve-p5-board-interview-1
 name: Board P2 - interview and pm draw on the board
 goal: >
@@ -120,6 +120,7 @@ nodes:
   - id: board-host-p2
     label: Keep the DAG in front during a run and point the approval block at the board
     category: standard
+    slice: true
     load_skills:
       - dag-workflow:testing
       - dag-workflow:anti-slop

@@ -14,7 +14,7 @@ export const DEFINITION_FOLDERS: readonly string[] = ['flows', 'eval/fixtures']
 // The extensions /dag run reads: YAML for .yaml and .yml in any case, JSON for the rest (register.ts readDefinitionFile).
 const DEFINITION_FILE = /\.(ya?ml|json)$/i
 const FILE_VERBS: ReadonlySet<string> = new Set(['run', 'preview'])
-const RUN_VERBS: ReadonlySet<string> = new Set(['status', 'cancel', 'retry', 'approve', 'reject', 'handoff', 'accept'])
+const RUN_VERBS: ReadonlySet<string> = new Set(['status', 'cancel', 'retry', 'approve', 'reject', 'answer', 'handoff', 'accept'])
 // The draft up to the token must be `/dag <subcommand> ` and nothing else, so only the subcommand's first argument matches.
 const ARGUMENT_HEAD = /^\/dag[ \t]+([a-z]+)[ \t]+$/
 

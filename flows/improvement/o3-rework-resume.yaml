@@ -1,0 +1,124 @@
+# O3: the automatic review-fix round resumes each producer's own agent with the findings instead of spawning a fresh one,
+# and spawns as today when the resume is not delivered. Design: docs/design/node-questions.md (`## O3`), with the resume
+# path O1 proved (aaacbbe; headless end-to-end run 2026-10-28: $.session.send to a finished subagent resumed it under the
+# same agentId with its earlier context).
+# Model: rework never promoted the model; startNode spawns with `node.recovery?.model ?? target.model`, and a resumed
+# agent keeps the model it last ran on, so resuming changes no model choice.
+#
+# PREREQUISITE: `git status --short` prints nothing but this file.
+# Run it with:  /dag run flows/improvement/o3-rework-resume.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves): one chain, because the implementation verifies with the whole suite.
+#   wave 1: resume (engine field and transitions, startNode resume branch, message text, tests)
+#   wave 2: docs   (reference: the review-fix round paragraph)
+#   then:   review-spec, review-standards, commit (generated)
+# Categories: hard for resume (an async branch in startNode with a fallback, and rework state across persistence);
+# writing for docs. Edge: resume -> docs carries the exact behavior and log lines.
+
+key: improve-o3-rework-resume-1
+name: O3 - resume producers in the review-fix round
+goal: >
+  When the automatic review-fix round reruns a completed producer, the plugin first sends the findings to that
+  producer's own agent with $.session.send and, if delivered, runs the node's next attempt on the same agentId; when
+  the send is not delivered or throws it spawns a fresh agent with the findings in its prompt exactly as before;
+  reviewers and other downstream nodes still start fresh; a retry, an amend or a new start never resumes; docs describe
+  it; the plugin tests, tsc and validate pass.
+review:
+  request: |
+    권장안대로 진행.
+    O3 from docs/external-benchmark-plan.md and docs/design/node-questions.md (`## O3`): in the automatic review-fix
+    round, try to resume each producer's own agent first and spawn a new one, as today, only when the resume message is
+    not delivered. The resumed producer keeps the model it ran on. Reviewers and other downstream nodes still start
+    fresh. Retry, amend and a new start never resume. docs/reference.md describes it.
+  rules:
+    - AGENTS.md
+    - hooks/AGENTS.md
+commit:
+  - message: |
+      feat(rework): resume each producer's own agent in the review-fix round
+
+      The round sends the findings to the producer's finished agent with $.session.send, so it fixes its change with
+      its own context, and spawns a fresh agent as before when the message is not delivered.
+    paths:
+      - hooks
+      - tests
+      - docs/reference.md
+      - flows/improvement/o3-rework-resume.yaml
+nodes:
+  - id: resume
+    label: Resume the producer agent in the review-fix round
+    category: hard
+    slice: true
+    load_skills: [dag-workflow:anti-slop, dag-workflow:testing]
+    writes:
+      - hooks/engine/types.ts
+      - hooks/engine/run.ts
+      - hooks/engine/format.ts
+      - hooks/register.ts
+      - tests/rework-resume.test.ts
+      - tests/rework.test.ts
+      - tests/ledger-runtime.test.ts
+      - tests/scenario-lifecycle.test.ts
+    verify:
+      - kind: file
+        path: tests/rework-resume.test.ts
+        contains: "isDelivered"
+      - kind: command
+        argv: [claude, plugin, test, "."]
+      - kind: command
+        argv: [bunx, -p, typescript@5, tsc, -p, ., --noEmit]
+      - kind: command
+        argv: [claude, plugin, validate, "."]
+    prompt: |
+      TASK: Make the automatic review-fix round resume each producer's own finished agent instead of spawning a new one.
+      CONTEXT: reworkRun in hooks/engine/run.ts resets each producer to pending, deletes its agentId and appends the
+      findings note (reworkNote in hooks/engine/rework.ts) to its promptOverride; tick then calls startNode in
+      hooks/register.ts, which spawns a fresh agent with buildNodePrompt and the ledger section (ledgerSection) when the
+      review ledger is on. O1 (answerNode in hooks/register.ts) already resumes a finished node agent with
+      `$.session.send({ to: { agentId }, text })`: when delivered, the agent's next turn end arrives under the same id
+      and is claimed through agentRuns and nodeForAgent. A real headless run confirmed that resume; the agent.spawn hook
+      does not fire for it.
+      DELIVERABLE:
+      (1) hooks/engine/types.ts and run.ts: reworkRun records, for each producer only, the finished agent to resume and
+          the note it gets (for example `NodeRun.resume?: { agentId, note }`); downstream nodes get none. retryRun,
+          amendRun, recovery and a fresh start clear it, so only the review-fix round resumes. markRunning clears it.
+      (2) hooks/register.ts startNode: when the node has that resume record, build the resume text (a format.ts function:
+          the findings note, the ledger section when ledgerSection returns one, and the reminder to end with the
+          "## Output" section and one DAG_NODE_STATUS line, like answerMessage), register agentRuns, call
+          $.session.send to the recorded agentId, and on `isDelivered: true` record the node.start trajectory event with
+          the reused agentId and mark the node running on that agentId (a new attempt number, as a rework is); on
+          `isDelivered: false` or a throw, log one line and fall through to the existing spawn with the promptOverride
+          that already carries the note. Keep the clearStaleNotes and fork checks before either path.
+      (3) Tests, red before green, in tests/rework-resume.test.ts through the control harness (its session.send mock and
+          the review-fix setup existing rework runtime tests use): a FAIL verdict reruns the producer by session.send to
+          its first agentId with the findings in the text and spawns no new agent for it, the reviewers are spawned
+          fresh, the producer's next turn end under the same agentId is verified and completes it, and the reviewers then
+          pass; a send that is not delivered spawns the producer as before with the findings in its prompt; retry and amend
+          after a settled run spawn fresh. Existing tests that assert a producer spawn in a review-fix round now see a
+          send: update each such assertion to the new behavior and list every changed test with the reason in Output; do
+          not weaken any assertion that is not about how the producer is started.
+      SCOPE: edit only the files in writes; no change to reworkPlan, rerunRisk or the round count.
+      VERIFY: run claude plugin test ., bunx -p typescript@5 tsc -p . --noEmit and claude plugin validate .
+      STOP WHEN: the checks pass. In Output, give the new field, the resume text format, the log line for a send that
+      was not delivered, and every existing test you changed with why.
+
+  - id: docs
+    label: Document producer resume in the review-fix round
+    category: writing
+    dependsOn: [resume]
+    writes: [docs/reference.md]
+    verify:
+      - kind: file
+        path: docs/reference.md
+        matches: "리뷰 수정 라운드[^\\n]*session\\.send"
+      - kind: command
+        argv: [git, diff, --check, --, docs/reference.md]
+    prompt: |
+      TASK: Update the review-fix round paragraph of docs/reference.md (the automatic recovery section; Korean prose) to
+      match the resume node's Output exactly: the round first sends the findings to the producer's own agent with
+      $.session.send so it continues with its context and its model, falls back to a fresh agent with the findings in
+      its prompt when the message is not delivered (give the log line), reviewers still start fresh, and retry, amend and
+      new starts never resume. Link docs/design/node-questions.md (`## O3`) as the design record.
+      SCOPE: edit only docs/reference.md; describe only what the Output states.
+      VERIFY: run git diff --check -- docs/reference.md and reread each changed sentence against the Output.
+      STOP WHEN: the paragraph is updated.

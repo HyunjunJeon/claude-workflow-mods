@@ -1,0 +1,148 @@
+# External benchmark X4: design research for O1 (node questions), O2 (node isolation) and O3 (reusing a finished node's
+# agent for rework), from docs/external-benchmark-plan.md. Read-only for code: the deliverables are two design documents.
+# Decision D-X4: O1 before O2, because O1 adds one state and one answer path while O2 changes merge, verification and review.
+# O3 depends on the same host question as O1's resume step (can the plugin message an agent that already ended?), so the
+# node-questions document answers it too.
+#
+# PREREQUISITE: `git status --short` prints nothing but this file.
+# Run it with:  /dag run flows/improvement/x4-design.yaml   (a rerun after it settles needs a new key)
+#
+# Run plan (components -> waves):
+#   wave 1: node-questions (docs/design/node-questions.md), node-isolation (docs/design/node-isolation.md) - disjoint files
+#   wave 2: verify-claims (re-checks every host API claim in both documents against the type declarations)
+#   then:   commit (generated)
+# Categories: architect for both documents (each compares designs against the engine, the runtime and the host API and
+# recommends one); standard for verify-claims (line-by-line checking, no design judgment).
+# Edges: both documents -> verify-claims carry each document's list of API claims with their declaration line numbers.
+
+key: improve-x4-design-1
+name: X4 - design research for node questions and node isolation
+goal: >
+  docs/design/node-questions.md compares how a running node could ask a blocking question and resume (O1) and whether a
+  finished node's agent can be reused for rework (O3), and docs/design/node-isolation.md compares the two ways to give a
+  node its own git worktree (O2); each recommends one design with its API evidence, changes needed and open decisions,
+  every host API claim in both is confirmed against .claude-plugin/types/claude-code/index.d.ts, and no code changes.
+commit:
+  - message: |
+      docs(design): compare node questions, rework reuse and worktree isolation
+
+      Design research for X4 (O1, O2, O3 in docs/external-benchmark-plan.md); every host API claim is checked
+      against the type declarations. No code changes.
+    paths:
+      - docs/design/node-questions.md
+      - docs/design/node-isolation.md
+      - flows/improvement/x4-design.yaml
+nodes:
+  - id: node-questions
+    label: Design how a node asks a blocking question and resumes
+    category: architect
+    writes: [docs/design/node-questions.md]
+    verify:
+      - kind: file
+        path: docs/design/node-questions.md
+        matches: "^## 권장안"
+      - kind: file
+        path: docs/design/node-questions.md
+        matches: "^## API 근거"
+      - kind: file
+        path: docs/design/node-questions.md
+        matches: "^## O3"
+      - kind: file
+        path: docs/design/node-questions.md
+        matches: "index\\.d\\.ts:[0-9]+"
+      - kind: command
+        argv: [git, diff, --check]
+    prompt: |
+      TASK: Write a design comparison, in Korean like the other docs/*.md files, for letting a running DAG node ask a
+      blocking question and continue once it is answered (O1 in docs/external-benchmark-plan.md, inspired by Orca's
+      `orchestration ask` and decision gates), and answer O3 (whether the review-fix round can reuse a finished
+      producer's agent instead of spawning a fresh one).
+      CONTEXT: today a node cannot ask. When scope is unclear it guesses or ends with `DAG_NODE_STATUS: failed: ...`, Jev
+      may classify that as `clarification` (no automatic retry, hooks/engine/recovery.ts), and a person amends or retries.
+      Read: hooks/engine/types.ts (NodeRun states), hooks/engine/run.ts (transitions), the outcome parsing and the
+      `send`, `retry` and recovery paths in hooks/register.ts (search parseOutcome, `input.action === 'send'`,
+      attemptRecovery, claimCompletion), the board approval blocks (hooks/engine/board*.ts, mcp__dag-workflow__board),
+      the pane's approval flow (/dag approve), Jev (hooks/engine/jev.ts) and the host types in
+      .claude-plugin/types/claude-code/index.d.ts (the `agent` namespace: spawn, list, and anything that sends to, resumes
+      or continues an agent; `session.send`; `ui.ask`; how a subagent's turn ends). Count from the decision logs
+      (.claude/dag/decisions/*.json) and run checkpoints (.claude/dag/runs/*.json) how many recovery decisions chose
+      clarification or missing-input, as the size of the problem.
+      DELIVERABLE: docs/design/node-questions.md with these sections in order: `## 문제` (with the counts), `## 선택지`
+      (at least (a) a final line `DAG_NODE_STATUS: blocked: <question>` read as a new node state, and (b) a node-callable
+      `ask` action on the dag tool or another tool the node agent can reach; say for each whether a node subagent can call
+      it at all, with evidence), `## 답하는 경로` (person in the pane or a board approval block, Jev, a timeout default;
+      what happens when nobody answers), `## 이어가기` (resume the same agent if the host allows it, else a new attempt whose
+      prompt carries the question and the answer; what the attempt counter, recovery budget, review-fix round and
+      fingerprint do), `## 권장안` (one design, the files it changes, the tests it needs, and what it deliberately leaves
+      out), `## O3: 재작업에 끝난 에이전트 재사용` (exists or not, with evidence; if not, record it as held),
+      `## API 근거` (a list: every host API claim the document makes, each with `index.d.ts:<line>` of the declaration you
+      read), `## 결정할 것` (numbered questions for the person, each with a recommended answer).
+      SCOPE: write only docs/design/node-questions.md; read anything; change no code; never run claude -p or eval/run.ts.
+      VERIFY: reread every API claim against the declaration line you cite; run git diff --check.
+      STOP WHEN: the document is written. In Output, give the recommended design in two sentences, the O3 verdict, and
+      the full `## API 근거` list (claim and line number) for the verification node.
+
+  - id: node-isolation
+    label: Design per-node git worktree isolation
+    category: architect
+    writes: [docs/design/node-isolation.md]
+    verify:
+      - kind: file
+        path: docs/design/node-isolation.md
+        matches: "^## 권장안"
+      - kind: file
+        path: docs/design/node-isolation.md
+        matches: "^## API 근거"
+      - kind: file
+        path: docs/design/node-isolation.md
+        matches: "index\\.d\\.ts:[0-9]+"
+      - kind: command
+        argv: [git, diff, --check]
+    prompt: |
+      TASK: Write a design comparison, in Korean like the other docs/*.md files, for running each DAG node in its own git
+      worktree (O2 in docs/external-benchmark-plan.md, inspired by Orca's `worker-start --worktree` and `worktree ps`).
+      CONTEXT: today every node shares one working tree; the definition lint (hooks/engine/lint.ts) and the planning
+      doctrine (skills/planning/references/planning.md, "Disjoint write scopes or serialize" and the whole-suite bullet)
+      keep parallel lanes off each other's files, and on 2026-10-28 three lanes still failed checks on each other's
+      half-done edits. Two designs to compare: (a) the plugin ships an agent definition with `isolation: 'worktree'` and
+      spawns nodes with it; (b) the plugin runs `git worktree add` itself and spawns with `$.agent.spawn({ cwd })`. Read the
+      host types in .claude-plugin/types/claude-code/index.d.ts (agent definitions and isolation, AgentSpawnArgs and its
+      cwd, process.run), the spawn path in hooks/register.ts (startNode), verification (commandCheckResult runs from
+      projectRoot), the generated review and commit nodes (hooks/engine/stages.ts), the review-fix ledger
+      (hooks/engine/ledger.ts) and docs/external-benchmark-plan.md (the 2.1.311 fix for a background subagent's worktree
+      being deleted is a risk for (a)).
+      DELIVERABLE: docs/design/node-isolation.md with these sections in order: `## 문제`, `## 선택지` ((a) and (b), and a
+      (c) "keep the shared tree" baseline), `## 비교` (a table over: merge order back into the main tree, what happens on a
+      conflict, what diff review-spec and review-standards read, where verify commands run, how dependents see a
+      producer's files, cleanup time and crash recovery, cost on disk and time, what changes for users), `## 권장안` (one
+      option, or "not now" with the condition that would change it; the files it changes and the tests it needs),
+      `## API 근거` (every host API claim with `index.d.ts:<line>`), `## 결정할 것` (numbered questions for the person, each
+      with a recommended answer).
+      SCOPE: write only docs/design/node-isolation.md; read anything; change no code; never run git worktree, claude -p or
+      eval/run.ts.
+      VERIFY: reread every API claim against the declaration line you cite; run git diff --check.
+      STOP WHEN: the document is written. In Output, give the recommendation in two sentences and the full `## API 근거`
+      list (claim and line number) for the verification node.
+
+  - id: verify-claims
+    label: Verify every host API claim in both design documents
+    category: standard
+    dependsOn: [node-questions, node-isolation]
+    writes: []
+    verify:
+      - kind: file
+        path: /tmp/dag-design/improve-x4-design-1/verify-claims-notes.md
+        lastLine: "Claims audit: PASS"
+    prompt: |
+      TASK: Independently check every host API claim in docs/design/node-questions.md and docs/design/node-isolation.md.
+      For each item in each document's `## API 근거` list, and for any other sentence in the documents that states what the
+      host can or cannot do (spawn, resume, message or stop an agent, worktree isolation, cwd, ask the user), open
+      .claude-plugin/types/claude-code/index.d.ts at the cited line and confirm the declaration says what the document
+      claims. A claim that something does not exist needs a search of the whole file (grep for the likely names) recorded
+      in the notes. Also confirm each plugin-code claim (a function name or behavior in hooks/) by reading that code.
+      DELIVERABLE: /tmp/dag-design/improve-x4-design-1/verify-claims-notes.md (create the folder with mkdir -p): one line
+      per claim, `OK` or `WRONG: <what the declaration actually says>` with the line; then a line `Wrong claims: <n>`;
+      the last line `Claims audit: PASS` only when n is 0, else `Claims audit: FAIL`.
+      SCOPE: read only; write only that notes file; do not edit the documents.
+      VERIFY: recount the WRONG lines before writing the verdict.
+      STOP WHEN: every claim is checked. In Output, list the WRONG claims, if any, with the document and section.
