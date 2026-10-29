@@ -12,7 +12,7 @@ import { acceptHandoff, cancelHandoff, offerHandoff, parseSession, projectSessio
 import { hash, stableStringify } from './engine/hash.ts'
 import { recoverNode, recoveryKind, MAX_AUTO_RECOVERIES, verdictFailure } from './engine/recovery.ts'
 import { CHECK_DEFECT, commandDetail, exitProblem, isCheckDefect, missingProgram, textProblem } from './engine/check-eval.ts'
-import { DEFAULT_COMMAND_TIMEOUT_MS, projectPath, readOnlyAbsolutePath, timeoutAdvice, verificationProblem } from './engine/verification.ts'
+import { checkLoosening, DEFAULT_COMMAND_TIMEOUT_MS, projectPath, readOnlyAbsolutePath, timeoutAdvice, verificationProblem } from './engine/verification.ts'
 import { commandPrograms, missingProgramsMessage } from './engine/programs.ts'
 import { findingSections, reworkPlan, withReworkSkip } from './engine/rework.ts'
 import { fixDiffText, isLedgerReviewer, ledgerBlock } from './engine/ledger.ts'
@@ -51,7 +51,7 @@ import { familiesOf, RULE_FILES, scanSlop, slopNote } from './engine/slop-scan.t
 import { autocompleteRows, autocompleteWant } from './engine/autocomplete.ts'
 import { killByName, killRefusal } from './engine/kill-guard.ts'
 import { applyEdit, semgrepNote, semgrepRefusal, semgrepTarget, type SemgrepHit } from './engine/semgrep.ts'
-import { addUsage, cut, settleRecord } from './engine/trajectory.ts'
+import { addUsage, cut, settleRecord, type RunAmendEvent } from './engine/trajectory.ts'
 import { failedCheckFingerprint, repeatCheck, REPEAT_CHECK_NOTE, verificationCommand, type RepeatedCheck } from './engine/tool-repeat.ts'
 import { parseYaml } from './engine/yaml.ts'
 import { DEFAULT_HOLD_PERCENT, parseHoldPercent, resetMinutes, usageHold, usageHoldField, usageLimitReason, type UsageHold, type UsageHoldField } from './engine/usage.ts'
@@ -2499,16 +2499,20 @@ async function handleTool($: EngineInterface, input: ToolInput, by: 'model' | 'u
     if (!parsed.ok) return err(parsed.error)
     const problem = verificationProblem(parsed.value) ?? await missingProgramProblem($, parsed.value, rootOf(run))
     if (problem) return err(problem)
+    // Read before amendRun, which drops the verification of every node it reruns. A warning only: the amend still applies.
+    const loosened = checkLoosening(run, parsed.value)
     const amended = amendRun(run, parsed.value, now)
     if (!amended.ok) return err(amended.error)
     const routed = await routeRun($, amended.value.run, amended.value.rerun)
     dropQuestionWaits(run, routed)
     runs.set(run.runId, routed)
-    await recordTrajectory($, trajectory, trajectoryCalls($), { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition })
+    const event: RunAmendEvent = { kind: 'run.amend', runId: run.runId, rerun: amended.value.rerun, definition: routed.definition }
+    if (loosened.length) event.loosened = loosened
+    await recordTrajectory($, trajectory, trajectoryCalls($), event)
     return ok({
       rerun: amended.value.rerun,
       snapshot: snapshotOf((await tick($, run.runId)) ?? routed, 0),
-      warnings: lintDefinition(parsed.value),
+      warnings: [...lintDefinition(parsed.value), ...loosened],
     })
   }
   if (input.action === 'send') {
