@@ -335,6 +335,7 @@ type TestCall = {
   readonly start: number
   readonly end: number
   readonly skipped: boolean
+  readonly focused: boolean
   readonly body: string
   readonly bodyStart: number
 }
@@ -353,7 +354,7 @@ function closing(code: string, start: number, open: string, close: string): numb
 // parameterized tests and arbitrary control flow need review, not a heuristic warning after every edit.
 function testCalls(scan: Scan): TestCall[] {
   const calls: TestCall[] = []
-  const header = /^[ \t]*(test|it|describe|xtest|xit|xdescribe)(\s*\.\s*(?:skip|todo|only)|\s*\.\s*(?:skipIf\s*\(\s*true\s*\)|runIf\s*\(\s*false\s*\)))?\s*\(\s*(['"])[^'"\n]*\3/gm
+  const header = /^[ \t]*(test|it|describe|xtest|xit|xdescribe|fit|fdescribe)(\s*\.\s*(?:skip|todo|only)|\s*\.\s*(?:skipIf\s*\(\s*true\s*\)|runIf\s*\(\s*false\s*\)))?\s*\(\s*(['"])[^'"\n]*\3/gm
   for (const match of scan.code.matchAll(header)) {
     const start = match.index + match[0].search(/\S/)
     const titleEnd = match.index + match[0].length
@@ -361,13 +362,14 @@ function testCalls(scan: Scan): TestCall[] {
     const rest = scan.code.slice(titleEnd)
     const callback = /^\s*,\s*(?:\{([^{}]*)\}\s*,\s*)?(?:async\s+)?(?:(?:\([^()]*\)|[\w$]+)\s*=>|function(?:\s+[\w$]+)?\s*\([^()]*\))\s*\{/.exec(rest)
     const skipped = /^x/.test(match[1] ?? '') || /skip|todo|runIf/.test(match[2] ?? '') || /\bskip\s*:\s*true\b/.test(callback?.[1] ?? '')
+    const focused = /^f/.test(match[1] ?? '') || /only/.test(match[2] ?? '')
     if (!callback && !/^\s*\)/.test(rest)) continue
     const bodyStart = callback ? titleEnd + callback[0].length : titleEnd
     const bodyEnd = callback ? closing(scan.code, bodyStart - 1, '{', '}') : titleEnd
     if (bodyEnd < 0 || (callback && !/^\s*\)/.test(scan.code.slice(bodyEnd + 1)))) continue
     calls.push({
-      key: `${(match[1] ?? '').replace(/^x/, '')}:${scan.raw.slice(titleOpen, titleEnd)}`,
-      start, end: bodyEnd, skipped,
+      key: `${(match[1] ?? '').replace(/^[xf](?=it$|describe$|test$)/, '')}:${scan.raw.slice(titleOpen, titleEnd)}`,
+      start, end: bodyEnd, skipped, focused,
       body: callback ? scan.code.slice(bodyStart, bodyEnd) : '',
       bodyStart,
     })
@@ -442,15 +444,19 @@ function testWeakening(before: Scan, after: Scan, added: ReadonlySet<number>, sk
     const prior = previous.length === 1 && current.filter(candidate => candidate.key === call.key).length === 1 ? previous[0] : undefined
     const line = lineAt(after.starts, call.start)
     const touched = [...added].some(addedLine => addedLine >= line && addedLine <= lineAt(after.starts, call.end))
-    const report = (pattern: string, at: number) => {
+    const report = (pattern: string, at: number, fix = 'restore the executable test and its meaningful assertions, or name the documented exemption') => {
       if (skip.has(pattern)) return
       const hitLine = lineAt(after.starts, at)
-      hits.push({ line: hitLine, pattern, text: lineText(after, hitLine).trim().slice(0, 120), fix: 'restore the executable test and its meaningful assertions, or name the documented exemption' })
+      hits.push({ line: hitLine, pattern, text: lineText(after, hitLine).trim().slice(0, 120), fix })
     }
     const kind = call.key.slice(0, call.key.indexOf(':') + 1)
     const addedSkip = current.filter(candidate => candidate.skipped && candidate.key.startsWith(kind)).length >
       old.filter(candidate => candidate.skipped && candidate.key.startsWith(kind)).length
     if (call.skipped && touched && !prior?.skipped && addedSkip) report('test-skip', call.start)
+    // A focused test silently narrows what runs; only a focus this edit adds counts.
+    const addedFocus = current.filter(candidate => candidate.focused && candidate.key.startsWith(kind)).length >
+      old.filter(candidate => candidate.focused && candidate.key.startsWith(kind)).length
+    if (call.focused && touched && !prior?.focused && addedFocus) report('test-focus', call.start, 'remove the focus (.only, fit, fdescribe) so the whole suite runs, or name the documented exemption')
     if (!prior || call.skipped || prior.skipped || /^describe:/.test(call.key)) continue
     const previousAssertions = testAssertions(prior.body, before.raw.slice(prior.bodyStart, prior.end))
     const assertions = testAssertions(call.body, after.raw.slice(call.bodyStart, call.end))
@@ -489,6 +495,20 @@ function testWeakening(before: Scan, after: Scan, added: ReadonlySet<number>, sk
         if (assertion.tautology && added.has(lineAt(after.starts, at)) && !previousAssertions.some(oldAssertion => oldAssertion.text === assertion.text)) report('test-tautology', at)
       }
     }
+  }
+  return hits
+}
+
+// An unconditional pytest/unittest skip decorator added to a Python test file. A skipif/skipIf condition is dynamic and no hit.
+// The code view blanks strings and comments, so a decorator quoted in either never matches.
+const PY_TEST_FILE = /(?:^|[/\\])(?:test_[^/\\]*|[^/\\]*_test)\.py$/i
+const PY_SKIP_DECORATOR = /^[ \t]*@(?:pytest\.mark\.skip|unittest\.skip)(?:[ \t]*\([^()]*\))?[ \t]*$/gm
+
+function pythonSkips(scan: Scan, added: ReadonlySet<number>): SlopHit[] {
+  const hits: SlopHit[] = []
+  for (const match of scan.code.matchAll(PY_SKIP_DECORATOR)) {
+    const line = lineAt(scan.starts, match.index + match[0].search(/\S/))
+    if (added.has(line)) hits.push({ line, pattern: 'test-skip', text: lineText(scan, line).trim().slice(0, 120), fix: 'restore the executable test, or use a skipif with a real condition' })
   }
   return hits
 }
@@ -559,6 +579,9 @@ export function scanSlop(path: string, before: string, after: string, skip: Read
       !skip.has('requirement-substitution')) {
       for (const hit of requirementSubstitution(previous, scan, added, request)) found.set(`${hit.line}:${hit.pattern}`, hit)
     }
+  }
+  if (PY_TEST_FILE.test(path) && !skip.has('test-skip')) {
+    for (const hit of pythonSkips(scan, added)) found.set(`${hit.line}:${hit.pattern}`, hit)
   }
   for (const rule of RULES) {
     if (skip.has(rule.pattern) || !rule.in.some(family => families.includes(family))) continue
