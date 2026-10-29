@@ -1,0 +1,1789 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dag-workflow 시스템 구성</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@400&display=swap" rel="stylesheet">
+<style>
+  /* Layout: one long editorial column on white paper; three parts (overview, detailed architecture, Claude Mod);
+     each section = prose lead, full-width diagram in a local scroller, then cards or a table. */
+  :root {
+    --paper: #ffffff; --paper-2: #f5f5f5; --node: #ffffff; --card: #ffffff; --band: #fafafa;
+    --ink: #2d3142; --muted: #4f5d75; --soft: #5a6580;
+    --accent: #bf4520; --accent-tint: rgba(191,69,32,0.08); --accent-50: rgba(191,69,32,0.50);
+    --link: #2e5aa8;
+    --ink-02: rgba(45,49,66,0.02); --ink-03: rgba(45,49,66,0.03); --ink-05: rgba(45,49,66,0.05);
+    --ink-06: rgba(45,49,66,0.06); --ink-10: rgba(45,49,66,0.10); --ink-12: rgba(45,49,66,0.12);
+    --ink-20: rgba(45,49,66,0.20); --ink-22: rgba(45,49,66,0.22); --ink-30: rgba(45,49,66,0.30);
+    --ink-40: rgba(45,49,66,0.40); --muted-10: rgba(79,93,117,0.10);
+    --sans: 'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+    --mono: 'Geist Mono', 'Noto Sans Mono CJK KR', ui-monospace, Menlo, monospace;
+    --serif: 'Instrument Serif', 'Noto Serif KR', 'Times New Roman', serif;
+    color-scheme: light;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.65;
+    padding-block: 3rem 4rem;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  .page { max-width: 1120px; margin: 0 auto; display: grid; gap: 4rem; }
+  .eyebrow { font-family: var(--mono); font-size: 0.68rem; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.75rem; }
+  h1 { font-family: var(--serif); font-weight: 400; font-size: clamp(2rem, 3.4vw + 1rem, 3rem); letter-spacing: -0.02em; line-height: 1.08; margin: 0 0 0.75rem; text-wrap: balance; }
+  h2 { font-family: var(--serif); font-weight: 400; font-size: clamp(1.6rem, 2vw + 1rem, 2.1rem); letter-spacing: -0.01em; line-height: 1.15; margin: 0 0 0.5rem; text-wrap: balance; }
+  h3 { font-size: 0.92rem; font-weight: 600; margin: 0; }
+  p { margin: 0; max-width: 72ch; }
+  .lead { color: var(--muted); font-size: 1.02rem; max-width: 70ch; }
+  code, .mono { font-family: var(--mono); font-size: 0.84em; }
+  code { background: var(--ink-05); border-radius: 3px; padding: 0.05em 0.3em; overflow-wrap: anywhere; }
+  .src { font-family: var(--mono); font-size: 0.72rem; color: var(--soft); letter-spacing: 0.02em; }
+  a { color: var(--link); }
+  a:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
+  header.hero { display: grid; gap: 1.5rem; border-bottom: 1px solid var(--ink-12); padding-bottom: 2.5rem; }
+  .facts { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; font-family: var(--mono); font-size: 0.75rem; color: var(--soft); }
+  .facts b { color: var(--ink); font-weight: 500; }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0.35rem 1.5rem; counter-reset: toc; }
+  nav.toc li { counter-increment: toc; font-size: 0.9rem; }
+  nav.toc li::before { content: counter(toc, decimal-leading-zero); font-family: var(--mono); font-size: 0.7rem; color: var(--soft); margin-right: 0.6rem; }
+  nav.toc a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--ink-20); }
+  nav.toc a:hover { border-bottom-color: var(--accent); }
+
+  section { display: grid; gap: 1.25rem; scroll-margin-top: 1rem; }
+  section > header { display: grid; gap: 0.25rem; }
+  .num { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.16em; color: var(--accent); }
+
+  .diagram-container { width: 100%; overflow-x: auto; border-top: 1px solid var(--ink-10); border-bottom: 1px solid var(--ink-10); padding-block: 0.5rem; }
+  .diagram-container svg { width: 100%; display: block; height: auto; }
+  @media print { .diagram-container { overflow-x: visible; } .diagram-container svg { min-width: 0 !important; } }
+
+  .cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .cards.w3 { grid-template-columns: 1.15fr 1fr 0.9fr; }
+  .cards.w2 { grid-template-columns: 1.2fr 1fr; }
+  @media (max-width: 860px) { .cards.w3, .cards.w2 { grid-template-columns: 1fr; } }
+  .cards > * { min-width: 0; }
+  .card { background: var(--card); border: 1px solid var(--ink-12); border-radius: 6px; padding: 1.15rem 1.25rem; min-width: 0; }
+  .card-header { display: flex; align-items: center; gap: 0.6rem; padding-bottom: 0.7rem; margin-bottom: 0.7rem; border-bottom: 1px solid var(--ink-10); }
+  .card-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .card-dot.coral { background: var(--accent); } .card-dot.ink { background: var(--ink); } .card-dot.muted { background: var(--muted); } .card-dot.link { background: var(--link); }
+  .card ul, .card ol { margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 0.86rem; line-height: 1.6; display: grid; gap: 0.35rem; }
+  .card li { padding-left: 0.95rem; position: relative; }
+  .card ul li::before { content: '—'; position: absolute; left: 0; color: var(--ink-30); font-size: 0.75rem; }
+  .card ol { counter-reset: st; }
+  .card ol li { counter-increment: st; padding-left: 1.6rem; }
+  .card ol li::before { content: counter(st); position: absolute; left: 0; font-family: var(--mono); font-size: 0.7rem; color: var(--soft); top: 0.15em; }
+  .card li code { font-size: 0.8em; }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--ink-12); border-radius: 6px; background: var(--card); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; min-width: 640px; }
+  th, td { text-align: left; vertical-align: top; padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--ink-10); }
+  th { font-family: var(--mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); background: var(--ink-03); }
+  tr:last-child td { border-bottom: 0; }
+  td { color: var(--muted); }
+  td:first-child { color: var(--ink); }
+  td.num-cell { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+
+  .note { border-left: 2px solid var(--accent); padding: 0.2rem 0 0.2rem 1rem; color: var(--muted); font-family: var(--serif); font-style: italic; font-size: 1.1rem; max-width: 70ch; }
+
+  footer.colophon { border-top: 1px solid var(--ink-10); padding-top: 1.25rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; font-family: var(--mono); font-size: 0.72rem; color: var(--soft); letter-spacing: 0.04em; }
+
+  /* ── SVG roles ───────────────────────────────── */
+  .bg, .mask { fill: var(--paper); }
+  .nb { stroke-width: 1; }
+  .nb-backend { fill: var(--node); stroke: var(--ink); }
+  .nb-focal { fill: var(--accent-tint); stroke: var(--accent); }
+  .nb-store { fill: var(--ink-05); stroke: var(--muted); }
+  .nb-external { fill: var(--ink-03); stroke: var(--ink-30); }
+  .nb-input { fill: var(--muted-10); stroke: var(--soft); }
+  .nb-optional { fill: var(--ink-02); stroke: var(--ink-30); stroke-dasharray: 4 3; }
+  .tag, .badge { fill: none; stroke-width: 0.8; }
+  .tag-backend { stroke: var(--ink-40); } .tag-focal { stroke: var(--accent-50); } .tag-store { stroke: var(--muted); }
+  .tag-external, .tag-input, .tag-optional, .badge { stroke: var(--ink-30); }
+  .tg { font: 500 7px var(--mono); letter-spacing: 0.08em; }
+  .tg-backend { fill: var(--ink); } .tg-focal { fill: var(--accent); } .tg-store { fill: var(--muted); }
+  .tg-external, .tg-input, .tg-optional, .tg-badge { fill: var(--soft); }
+  .nn { font: 600 12px var(--sans); fill: var(--ink); }
+  .sl { font: 400 9px var(--mono); fill: var(--muted); }
+  .ln { fill: none; stroke-width: 1.2; }
+  .ln-muted { stroke: var(--muted); } .ln-accent { stroke: var(--accent); } .ln-link { stroke: var(--link); }
+  .dash { stroke-dasharray: 5 4; }
+  .mk-muted { fill: var(--muted); } .mk-accent { fill: var(--accent); } .mk-link { fill: var(--link); }
+  .mk-open { fill: none; stroke: var(--muted); stroke-width: 1.2; }
+  .al { font: 400 8px var(--mono); letter-spacing: 0.06em; }
+  .al-ko { font: 500 12px var(--sans); }
+  .al-soft { fill: var(--soft); } .al-accent { fill: var(--accent); } .al-link { fill: var(--link); }
+  .life { stroke: var(--ink-20); stroke-width: 1; stroke-dasharray: 3 3; }
+  .act { fill: var(--ink-06); stroke: var(--muted); stroke-width: 0.8; }
+  .frame { fill: var(--ink-02); stroke: var(--ink-22); stroke-width: 1; }
+  .frame-tab { fill: var(--paper); stroke: var(--ink-22); stroke-width: 1; }
+  .guard { font: 400 8px var(--mono); letter-spacing: 0.04em; fill: var(--muted); }
+  .dot { fill: var(--ink); }
+  .co { font: italic 400 14px var(--serif); fill: var(--muted); }
+  .hair { stroke: var(--ink-10); stroke-width: 0.8; }
+  .lg-h { font: 500 8px var(--mono); letter-spacing: 0.14em; fill: var(--muted); }
+  .lg { font: 500 12px var(--sans); fill: var(--muted); }
+  .part { display: grid; gap: 0.6rem; padding: 2.25rem 0 0; border-top: 2px solid var(--ink); }
+  .part-no { font-family: var(--mono); font-size: 0.72rem; font-weight: 500; letter-spacing: 0.22em; color: var(--accent); }
+  .part-title { font-family: var(--serif); font-weight: 400; font-size: clamp(2.2rem, 3vw + 1.2rem, 3rem); line-height: 1.05; margin: 0; letter-spacing: -0.02em; }
+  .part p { color: var(--muted); max-width: 70ch; font-size: 1.02rem; }
+  .ly { fill: var(--paper); stroke: var(--ink-12); stroke-width: 1; }
+  .ly-alt { fill: var(--paper-2); stroke: var(--ink-12); stroke-width: 1; }
+  .ly-frame { fill: none; stroke: var(--ink); stroke-width: 1; }
+  .lyt { font: 600 8px var(--mono); letter-spacing: 0.14em; fill: var(--muted); }
+  .lyt-accent { fill: var(--accent); }
+  .lyn { font: 600 14px var(--sans); fill: var(--ink); }
+  .sl10 { font-size: 10px; }
+  .divider { stroke: var(--ink-20); stroke-width: 1; stroke-dasharray: 4 3; }
+  .grp td:first-child { white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+<header class="hero">
+  <div>
+    <p class="eyebrow">Architecture · claude-workflow-mods · 2026-10-29</p>
+    <h1>dag-workflow 시스템 구성</h1>
+    <p class="lead">Claude Code Mod <code>dag-workflow</code>를 세 부분으로 설명합니다. 1부는 구성 요소와 저장소 구조, 2부는 요청이 DAG가 되어 실행·검사·복구·표시되기까지의 세부 로직, 3부는 이 플러그인이 Claude Code의 Mod API 위에 어떻게 올라가 있는지입니다. 모든 단계에 근거 파일과 줄 번호를 붙였습니다.</p>
+  </div>
+  <div class="facts">
+    <span><b>commit</b> dfff36f (main)</span>
+    <span><b>host</b> Claude Code ≥ 2.1.299 (types 2.1.312)</span>
+    <span><b>entry</b> hooks/hooks.json → register.ts</span>
+    <span><b>size</b> hooks/ 약 15,900줄 · register.ts 4,246줄</span>
+  </div>
+  <nav class="toc" aria-label="목차">
+    <ol>
+      <li><a href="#s-arch">1부 · 구성 요소와 호출 관계</a></li>
+      <li><a href="#s-repo">1부 · 저장소 구성</a></li>
+      <li><a href="#s-mode">2부 · 턴 모드 결정</a></li>
+      <li><a href="#s-gate">2부 · 메인 루프 도구 게이트</a></li>
+      <li><a href="#s-pipeline">2부 · 정의에서 실행까지</a></li>
+      <li><a href="#s-seq">2부 · 한 번의 실행 시퀀스</a></li>
+      <li><a href="#s-state">2부 · 노드 상태 기계</a></li>
+      <li><a href="#s-recover">2부 · 완료 처리와 자동 복구</a></li>
+      <li><a href="#s-stages">2부 · 자동 생성 검토 단계</a></li>
+      <li><a href="#s-pane">2부 · 패널 렌더링</a></li>
+      <li><a href="#s-store">2부 · 저장소 레이아웃</a></li>
+      <li><a href="#s-jev">2부 · Jev 판단 지점</a></li>
+      <li><a href="#s-const">2부 · 핵심 상수와 소스 지도</a></li>
+      <li><a href="#s-mod">3부 · Claude Code Mod란</a></li>
+      <li><a href="#s-hooks">3부 · 한 턴의 훅 지점</a></li>
+      <li><a href="#s-chain">3부 · 훅 미들웨어 체인</a></li>
+      <li><a href="#s-api">3부 · 호스트 API와 UI 표면</a></li>
+      <li><a href="#s-verify">3부 · Mod 검증과 지켜야 할 규칙</a></li>
+    </ol>
+  </nav>
+</header>
+
+<div class="part" id="part-1">
+  <span class="part-no">PART I</span>
+  <h2 class="part-title">전체 구성</h2>
+  <p>무엇이 어디에 있고 누가 누구를 부르는지부터 봅니다. 세부 로직은 2부, Claude Code와의 접점은 3부에서 다룹니다.</p>
+</div>
+
+<!-- 01 ─────────────────────────────────────────────── -->
+<section id="s-arch">
+  <header>
+    <span class="num">01 · ARCHITECTURE</span>
+    <h2>구성 요소와 호출 관계</h2>
+    <p class="lead">모든 호스트 연동은 <code>register.ts</code> 한 곳에 모여 있고, 상태 전이는 호스트를 모르는 순수 함수인 <code>hooks/engine</code>이 맡습니다. 메인 모델은 직접 편집하지 않고 <code>dag</code> 도구로 런타임에 실행을 맡기며, 실제 작업은 런타임이 띄운 노드 워커가 합니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 640" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="arch-title arch-desc">
+<title id="arch-title">dag-workflow 구성 요소</title>
+<desc id="arch-desc">메인 Claude 루프가 dag 도구로 런타임을 부르고, 런타임이 엔진·워커·패널·저장소·Jev·학습 스킬과 주고받는 관계를 보여 줍니다.</desc>
+<defs>
+<marker id="arch-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="arch-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="arch-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="arch-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g transform="translate(20,0)">
+<path d="M120 136 L120 264" class="ln ln-muted" marker-end="url(#arch-arrow-muted)"/>
+<path d="M200 288 L400 288" class="ln ln-muted" marker-end="url(#arch-arrow-muted)"/>
+<path d="M400 316 L200 316" class="ln ln-muted dash" marker-end="url(#arch-arrow-muted)"/>
+<path d="M480 256 L480 136" class="ln ln-muted" marker-end="url(#arch-arrow-muted)"/>
+<path d="M600 256 V112 Q600 104 608 104 H840" class="ln ln-link" marker-end="url(#arch-arrow-link)"/>
+<path d="M640 288 L840 288" class="ln ln-accent" marker-end="url(#arch-arrow-accent)"/>
+<path d="M840 316 L640 316" class="ln ln-muted dash" marker-end="url(#arch-arrow-muted)"/>
+<path d="M520 344 L520 460" class="ln ln-muted" marker-end="url(#arch-arrow-muted)"/>
+<path d="M440 344 V392 Q440 400 432 400 H128 Q120 400 120 408 V460" class="ln ln-muted" marker-end="url(#arch-arrow-muted)"/>
+<path d="M600 344 V392 Q600 400 608 400 H912 Q920 400 920 408 V460" class="ln ln-muted dash" marker-end="url(#arch-arrow-muted)"/>
+<rect x="128" y="194" width="40" height="12" rx="2" class="mask"/>
+<text x="148" y="203" text-anchor="middle" class="al al-soft">PROMPT</text>
+<rect x="276" y="270" width="48" height="12" rx="2" class="mask"/>
+<text x="300" y="279" text-anchor="middle" class="al al-soft">DAG TOOL</text>
+<rect x="268" y="322" width="64" height="12" rx="2" class="mask"/>
+<text x="300" y="331" text-anchor="middle" class="al al-soft">SETTLE NOTE</text>
+<rect x="488" y="190" width="60" height="12" rx="2" class="mask"/>
+<text x="518" y="199" text-anchor="middle" class="al al-soft">TRANSITION</text>
+<rect x="702" y="86" width="36" height="12" rx="2" class="mask"/>
+<text x="720" y="95" text-anchor="middle" class="al al-link">JUDGE</text>
+<rect x="722" y="270" width="36" height="12" rx="2" class="mask"/>
+<text x="740" y="279" text-anchor="middle" class="al al-accent">SPAWN</text>
+<rect x="702" y="322" width="76" height="12" rx="2" class="mask"/>
+<text x="740" y="331" text-anchor="middle" class="al al-soft">TURN.COMPLETE</text>
+<rect x="528" y="424" width="44" height="12" rx="2" class="mask"/>
+<text x="550" y="433" text-anchor="middle" class="al al-soft">PERSIST</text>
+<rect x="270" y="382" width="40" height="12" rx="2" class="mask"/>
+<text x="290" y="391" text-anchor="middle" class="al al-soft">RENDER</text>
+<rect x="742" y="382" width="36" height="12" rx="2" class="mask"/>
+<text x="760" y="391" text-anchor="middle" class="al al-soft">LEARN</text>
+<rect x="40" y="72" width="160" height="64" rx="6" class="mask"/>
+<rect x="40" y="72" width="160" height="64" rx="6" class="nb nb-input"/>
+<rect x="48" y="78" width="28" height="12" rx="2" class="tag tag-input"/>
+<text x="62" y="87" text-anchor="middle" class="tg tg-input">USER</text>
+<text x="120" y="108.5" text-anchor="middle" class="nn">사용자</text>
+<text x="120" y="122.5" text-anchor="middle" class="sl">composer · /dag</text>
+<rect x="40" y="264" width="160" height="72" rx="6" class="mask"/>
+<rect x="40" y="264" width="160" height="72" rx="6" class="nb nb-backend"/>
+<rect x="48" y="270" width="28" height="12" rx="2" class="tag tag-backend"/>
+<text x="62" y="279" text-anchor="middle" class="tg tg-backend">LOOP</text>
+<text x="120" y="304.5" text-anchor="middle" class="nn">메인 Claude 루프</text>
+<text x="120" y="318.5" text-anchor="middle" class="sl">main model turn</text>
+<rect x="400" y="72" width="160" height="64" rx="6" class="mask"/>
+<rect x="400" y="72" width="160" height="64" rx="6" class="nb nb-backend"/>
+<rect x="408" y="78" width="28" height="12" rx="2" class="tag tag-backend"/>
+<text x="422" y="87" text-anchor="middle" class="tg tg-backend">PURE</text>
+<text x="480" y="108.5" text-anchor="middle" class="nn">DAG 엔진</text>
+<text x="480" y="122.5" text-anchor="middle" class="sl">hooks/engine</text>
+<rect x="400" y="256" width="240" height="88" rx="6" class="mask"/>
+<rect x="400" y="256" width="240" height="88" rx="6" class="nb nb-focal"/>
+<rect x="408" y="262" width="28" height="12" rx="2" class="tag tag-focal"/>
+<text x="422" y="271" text-anchor="middle" class="tg tg-focal">HOOK</text>
+<text x="520" y="298" text-anchor="middle" class="nn">런타임 register.ts</text>
+<text x="520" y="312" text-anchor="middle" class="sl">hooks · tools · commands</text>
+<text x="520" y="325" text-anchor="middle" class="sl">serialized queue</text>
+<rect x="840" y="72" width="160" height="64" rx="6" class="mask"/>
+<rect x="840" y="72" width="160" height="64" rx="6" class="nb nb-external"/>
+<rect x="848" y="78" width="24" height="12" rx="2" class="tag tag-external"/>
+<text x="860" y="87" text-anchor="middle" class="tg tg-external">API</text>
+<text x="920" y="108.5" text-anchor="middle" class="nn">Jev 판단</text>
+<text x="920" y="122.5" text-anchor="middle" class="sl">api.typesafe.ai</text>
+<rect x="840" y="264" width="160" height="72" rx="6" class="mask"/>
+<rect x="840" y="264" width="160" height="72" rx="6" class="nb nb-backend"/>
+<rect x="848" y="270" width="32" height="12" rx="2" class="tag tag-backend"/>
+<text x="864" y="279" text-anchor="middle" class="tg tg-backend">AGENT</text>
+<text x="920" y="298" text-anchor="middle" class="nn">노드 워커</text>
+<text x="920" y="312" text-anchor="middle" class="sl">$.agent.spawn</text>
+<text x="920" y="325" text-anchor="middle" class="sl">max 8 concurrent</text>
+<rect x="40" y="460" width="160" height="64" rx="6" class="mask"/>
+<rect x="40" y="460" width="160" height="64" rx="6" class="nb nb-backend"/>
+<rect x="48" y="466" width="20" height="12" rx="2" class="tag tag-backend"/>
+<text x="58" y="475" text-anchor="middle" class="tg tg-backend">UI</text>
+<text x="120" y="496.5" text-anchor="middle" class="nn">DAG 패널 · 밴드</text>
+<text x="120" y="510.5" text-anchor="middle" class="sl">hooks/ui</text>
+<rect x="440" y="460" width="160" height="64" rx="6" class="mask"/>
+<rect x="440" y="460" width="160" height="64" rx="6" class="nb nb-store"/>
+<rect x="448" y="466" width="20" height="12" rx="2" class="tag tag-store"/>
+<text x="458" y="475" text-anchor="middle" class="tg tg-store">FS</text>
+<text x="520" y="496.5" text-anchor="middle" class="nn">체크포인트</text>
+<text x="520" y="510.5" text-anchor="middle" class="sl">.claude/dag/</text>
+<rect x="840" y="460" width="160" height="64" rx="6" class="mask"/>
+<rect x="840" y="460" width="160" height="64" rx="6" class="nb nb-store"/>
+<rect x="848" y="466" width="20" height="12" rx="2" class="tag tag-store"/>
+<text x="858" y="475" text-anchor="middle" class="tg tg-store">FS</text>
+<text x="920" y="496.5" text-anchor="middle" class="nn">학습 스킬</text>
+<text x="920" y="510.5" text-anchor="middle" class="sl">~/.claude/skills</text>
+<line x1="40" y1="576" x2="1020" y2="576" class="hair"/>
+<text x="40" y="596" class="lg-h">LEGEND</text>
+<rect x="112" y="587" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="132" y="596" class="lg">초점</text>
+<rect x="180" y="587" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="200" y="596" class="lg">처리 모듈</text>
+<rect x="279" y="587" width="14" height="10" rx="2" class="nb nb-store"/>
+<text x="299" y="596" class="lg">저장소</text>
+<rect x="359" y="587" width="14" height="10" rx="2" class="nb nb-external"/>
+<text x="379" y="596" class="lg">외부 API</text>
+<rect x="455" y="587" width="14" height="10" rx="2" class="nb nb-input"/>
+<text x="475" y="596" class="lg">사람</text>
+<line x1="523" y1="592" x2="543" y2="592" class="ln ln-accent" marker-end="url(#arch-arrow-accent)"/>
+<text x="551" y="596" class="lg">워커 생성</text>
+<line x1="630" y1="592" x2="650" y2="592" class="ln ln-link" marker-end="url(#arch-arrow-link)"/>
+<text x="658" y="596" class="lg">외부 호출</text>
+<line x1="737" y1="592" x2="757" y2="592" class="ln ln-muted dash" marker-end="url(#arch-arrow-muted)"/>
+<text x="765" y="596" class="lg">반환 · 비동기</text>
+</g>
+</svg></div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>런타임 register.ts가 하는 일</h3></div>
+      <ul>
+        <li>호스트 이벤트 훅 30여 개를 <code>register(on, options)</code> 안에서 등록 <span class="src">register.ts:3363</span></li>
+        <li>MCP 도구 <code>dag</code>·<code>board</code>와 <code>/dag</code>, <code>/dag-ping</code> 명령 등록 <span class="src">:3443, :3511</span></li>
+        <li>공유 상태 변경은 모두 단일 프라미스 큐 <code>serialized</code>로 직렬화 <span class="src">:411</span></li>
+        <li><code>$.agent.spawn</code>, <code>$.prompt.submit</code> 같은 호스트 호출은 이 파일에만 둠</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>엔진의 계약</h3></div>
+      <ul>
+        <li>전이 함수는 run을 복제해 새 값을 돌려주고, 저장은 런타임이 함 <span class="src">run.ts:31</span></li>
+        <li>시간은 호출자가 넘김. 테스트는 <code>mock.clock</code>으로 재현</li>
+        <li>의존 노드가 모두 완료돼야 예약, 하나라도 실패·취소면 하위는 건너뜀 <span class="src">run.ts:77</span></li>
+        <li>같은 key + 같은 정의 해시면 기존 run 재사용 <span class="src">run.ts:507</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot link"></span><h3>바깥 경계</h3></div>
+      <ul>
+        <li>Jev: <code>TYPESAFE_API_KEY</code>가 있으면 HTTP, 없거나 실패하면 Sonnet 저노력 폴백 <span class="src">:513–565</span></li>
+        <li>체크포인트는 소비 프로젝트의 <code>.claude/dag/</code> 아래에 첫 쓰기 때 생성</li>
+        <li>학습 스킬은 <code>~/.claude/skills/dag-learned-*</code>로 저장</li>
+        <li>사용자의 <code>/dag</code> 명령은 메인 모델을 거치지 않고 런타임으로 바로 감</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 02 ─────────────────────────────────────────────── -->
+<section id="s-repo">
+  <header>
+    <span class="num">02 · REPOSITORY</span>
+    <h2>저장소 구성</h2>
+    <p class="lead">이 저장소는 npm 애플리케이션이 아니라 플러그인 체크아웃입니다. Claude Code가 매니페스트와 훅 모듈 목록을 읽어 <code>register.ts</code>를 불러오고, 나머지 파일은 그 모듈이 <code>import</code>로 가져옵니다.</p>
+  </header>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>경로</th><th>역할</th><th>비고</th></tr></thead>
+      <tbody>
+        <tr><td><code>.claude-plugin/plugin.json</code></td><td>이름·버전·설명과 <code>userConfig</code> 설정 33개의 스키마</td><td>사용자가 고른 값이 <code>register(on, options)</code>의 <code>options</code>로 들어옴</td></tr>
+        <tr><td><code>hooks/hooks.json</code></td><td>불러올 훅 모듈 목록 <code>["./register.ts"]</code></td><td>Mod의 진입점</td></tr>
+        <tr><td><code>hooks/register.ts</code></td><td>이벤트 훅 30개, MCP 도구 2개, 명령 2개 등록과 모든 <code>$</code> 호출</td><td>4,246줄</td></tr>
+        <tr><td><code>hooks/host/</code></td><td>학습·보드·실행 기록·스캔 하위 시스템</td><td><code>createLearning(host)</code>처럼 <code>$</code>를 넘겨받아 만듦</td></tr>
+        <tr><td><code>hooks/engine/</code></td><td>정의, 상태 전이, 정책, Jev 요청, 검사 판정 등 순수 모듈 41개</td><td><code>$</code>를 쓰지 않음</td></tr>
+        <tr><td><code>hooks/ui/</code></td><td>패널 모델, 레이아웃, Client 모듈, 밴드, 인스펙터 19개</td><td>Client 모듈만 표면 API 사용</td></tr>
+        <tr><td><code>skills/</code></td><td>planning, anti-slop, testing, debugging, review-standards, secure-coding, interview, pm</td><td>planning은 첫 <code>start</code> 전에 필수</td></tr>
+        <tr><td><code>types/index.d.ts</code></td><td><code>PluginState</code> 확장: <code>$.state</code>의 <code>planningLoaded</code></td><td>재로드 뒤에도 유지</td></tr>
+        <tr><td><code>.claude-plugin/types/</code></td><td>엔진이 Mod를 불러올 때 써 주는 호스트 타입 선언</td><td>생성 파일, <code>tsconfig.json</code>이 확장</td></tr>
+        <tr><td><code>tests/</code>, <code>eval/</code></td><td><code>claude-code/testing</code> 단위·런타임 테스트, 실제 모델 형태 평가</td><td>평가는 계정 사용량을 씀</td></tr>
+        <tr><td><code>statusline/</code></td><td>플러그인과 따로 쓰는 상태줄 HUD 스크립트</td><td>플러그인은 메인 상태줄을 정할 수 없어 사용자 설정에 등록</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="part" id="part-2">
+  <span class="part-no">PART II</span>
+  <h2 class="part-title">세부 아키텍처</h2>
+  <p>사용자 프롬프트가 들어와 DAG 턴으로 판정되고, 정의가 검사를 거쳐 run이 되고, 노드가 실행·검사·복구되어 정착하기까지를 단계별로 따라갑니다.</p>
+</div>
+
+<!-- 03 ─────────────────────────────────────────────── -->
+<section id="s-mode">
+  <header>
+    <span class="num">03 · TURN ROUTING</span>
+    <h2>턴 모드 결정</h2>
+    <p class="lead">사용자 프롬프트마다 <code>prompt.submit</code> 훅이 이번 턴을 DAG로 처리할지 직접 처리할지 정합니다. 기본 강제 수준은 <code>auto</code>이고, 이때만 Jev 판단이 개입합니다. 결정 결과는 이번 턴 동안 메인 루프 도구 게이트를 켜거나 끕니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 600" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mode-title mode-desc">
+<title id="mode-title">턴 모드 결정</title>
+<desc id="mode-desc">프롬프트가 들어오면 강제 수준, 소유한 진행 중 run, Jev 판단 순서로 DAG 턴과 직접 턴을 가르는 흐름입니다.</desc>
+<defs>
+<marker id="mode-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="mode-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="mode-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="mode-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g transform="translate(20,0)">
+<path d="M520 80 L520 116" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M630 160 H852 Q860 160 860 168 V276" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M520 204 L520 256" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M410 160 H188 Q180 160 180 168 V276" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M630 300 L760 300" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M520 344 L520 396" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M630 440 H852 Q860 440 860 432 V324" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<path d="M410 440 H188 Q180 440 180 432 V324" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<rect x="725" y="142" width="40" height="12" rx="2" class="mask"/>
+<text x="745" y="151" text-anchor="middle" class="al al-soft">STRICT</text>
+<rect x="528" y="224" width="28" height="12" rx="2" class="mask"/>
+<text x="542" y="233" text-anchor="middle" class="al al-soft">AUTO</text>
+<rect x="263" y="142" width="64" height="12" rx="2" class="mask"/>
+<text x="295" y="151" text-anchor="middle" class="al al-soft">GUIDE · OFF</text>
+<rect x="683" y="282" width="24" height="12" rx="2" class="mask"/>
+<text x="695" y="291" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="528" y="364" width="20" height="12" rx="2" class="mask"/>
+<text x="538" y="373" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="717" y="422" width="56" height="12" rx="2" class="mask"/>
+<text x="745" y="431" text-anchor="middle" class="al al-soft">YES ≥ 0.8</text>
+<rect x="263" y="422" width="64" height="12" rx="2" class="mask"/>
+<text x="295" y="431" text-anchor="middle" class="al al-soft">NO · NO JEV</text>
+<rect x="420" y="32" width="200" height="48" rx="20" class="mask"/>
+<rect x="420" y="32" width="200" height="48" rx="20" class="nb nb-external"/>
+<text x="520" y="53.5" text-anchor="middle" class="nn">사용자 프롬프트</text>
+<text x="520" y="67.5" text-anchor="middle" class="sl">prompt.submit</text>
+<polygon points="520,116 630,160 520,204 410,160" class="mask"/>
+<polygon points="520,116 630,160 520,204 410,160" class="nb nb-backend"/>
+<text x="520" y="159" text-anchor="middle" class="nn">강제 수준</text>
+<text x="520" y="173" text-anchor="middle" class="sl">enforcement</text>
+<polygon points="520,256 630,300 520,344 410,300" class="mask"/>
+<polygon points="520,256 630,300 520,344 410,300" class="nb nb-backend"/>
+<text x="520" y="299" text-anchor="middle" class="nn">소유 run 진행 중?</text>
+<text x="520" y="313" text-anchor="middle" class="sl">unsettled run</text>
+<polygon points="520,396 630,440 520,484 410,440" class="mask"/>
+<polygon points="520,396 630,440 520,484 410,440" class="nb nb-backend"/>
+<text x="520" y="439" text-anchor="middle" class="nn">Jev가 DAG로 판단?</text>
+<text x="520" y="453" text-anchor="middle" class="sl">mode · 8 s budget</text>
+<rect x="760" y="276" width="200" height="48" rx="6" class="mask"/>
+<rect x="760" y="276" width="200" height="48" rx="6" class="nb nb-focal"/>
+<text x="860" y="297.5" text-anchor="middle" class="nn">DAG 턴</text>
+<text x="860" y="311.5" text-anchor="middle" class="sl">main-loop gate ON</text>
+<rect x="80" y="276" width="200" height="48" rx="6" class="mask"/>
+<rect x="80" y="276" width="200" height="48" rx="6" class="nb nb-backend"/>
+<text x="180" y="297.5" text-anchor="middle" class="nn">직접 턴</text>
+<text x="180" y="311.5" text-anchor="middle" class="sl">main-loop gate OFF</text>
+<text x="80" y="516" text-anchor="start" class="co">직접 턴이라도 AskUserQuestion 답을 받은 뒤 다시 판정해</text>
+<text x="80" y="536" text-anchor="start" class="co">DAG 턴으로 바뀔 수 있습니다 (reconsiderAfterAnswer).</text>
+<line x1="40" y1="552" x2="1020" y2="552" class="hair"/>
+<text x="40" y="572" class="lg-h">LEGEND</text>
+<rect x="112" y="563" width="14" height="10" rx="2" class="nb nb-external"/>
+<text x="132" y="572" class="lg">시작</text>
+<rect x="180" y="563" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="200" y="572" class="lg">단계 · 판정</text>
+<rect x="293" y="563" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="313" y="572" class="lg">게이트가 켜지는 결과</text>
+<line x1="459" y1="568" x2="479" y2="568" class="ln ln-muted" marker-end="url(#mode-arrow-muted)"/>
+<text x="487" y="572" class="lg">분기</text>
+</g>
+</svg></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>강제 수준</th><th>메인 루프 게이트</th><th>planning 게이트</th><th>설명</th></tr></thead>
+      <tbody>
+        <tr><td><code>strict</code></td><td>항상 켬</td><td>켬</td><td>모든 턴을 DAG로 처리. 메인 모델은 읽기·계획·dag 도구만 씀</td></tr>
+        <tr><td><code>auto</code> (기본)</td><td>DAG 턴일 때만</td><td>켬</td><td>소유한 미정착 run이 있으면 바로 DAG. 아니면 Jev가 <code>dag</code>를 0.8 이상으로 판단할 때만 DAG <span class="src">register.ts:718–737, jev.ts:137</span></td></tr>
+        <tr><td><code>guide</code></td><td>끔</td><td>끔</td><td>라우팅 안내 문구만 컨텍스트에 넣음 <span class="src">policy.ts:421–459</span></td></tr>
+        <tr><td><code>off</code></td><td>끔</td><td>끔</td><td>안내 문구도 넣지 않음</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">gatesMainLoop = strict || (auto &amp;&amp; turnMode === 'dag') · policy.ts:13 — gatesPlanning = strict || auto · policy.ts:19 — Jev 모드 판정 전체 예산 MODE_BUDGET_MS 8 s · register.ts:152</p>
+</section>
+
+<!-- 03 ─────────────────────────────────────────────── -->
+<section id="s-gate">
+  <header>
+    <span class="num">04 · ENFORCEMENT</span>
+    <h2>메인 루프 도구 게이트</h2>
+    <p class="lead">게이트는 <code>agentId</code>가 없는 엔진 발신 호출, 즉 메인 모델의 도구 호출에만 적용됩니다. 노드 워커는 이 게이트를 받지 않습니다. 판정은 <code>mainLoopVerdict</code>가 하고, 거부되면 DAG로 일을 넘기라는 안내가 결과로 돌아갑니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 800" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="gate-title gate-desc">
+<title id="gate-title">메인 루프 도구 게이트</title>
+<desc id="gate-desc">DAG 턴에서 메인 모델의 도구 호출을 허용 목록, 읽기 전용 Bash, 보고서 쓰기 순서로 판정하고 나머지를 거부하는 흐름입니다.</desc>
+<defs>
+<marker id="gate-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="gate-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="gate-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="gate-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g transform="translate(40,0)">
+<path d="M400 80 L400 116" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M530 160 L720 160" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M400 204 L400 246" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M530 290 L720 290" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M400 334 L400 376" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M530 420 L720 420" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M400 464 L400 506" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M530 550 L720 550" class="ln ln-muted" marker-end="url(#gate-arrow-muted)"/>
+<path d="M400 594 L400 652" class="ln ln-accent" marker-end="url(#gate-arrow-accent)"/>
+<rect x="615" y="142" width="20" height="12" rx="2" class="mask"/>
+<text x="625" y="151" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="408" y="219" width="24" height="12" rx="2" class="mask"/>
+<text x="420" y="228" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="613" y="272" width="24" height="12" rx="2" class="mask"/>
+<text x="625" y="281" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="408" y="349" width="20" height="12" rx="2" class="mask"/>
+<text x="418" y="358" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="613" y="402" width="24" height="12" rx="2" class="mask"/>
+<text x="625" y="411" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="408" y="479" width="20" height="12" rx="2" class="mask"/>
+<text x="418" y="488" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="613" y="532" width="24" height="12" rx="2" class="mask"/>
+<text x="625" y="541" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="408" y="617" width="20" height="12" rx="2" class="mask"/>
+<text x="418" y="626" text-anchor="middle" class="al al-accent">NO</text>
+<rect x="300" y="32" width="200" height="48" rx="20" class="mask"/>
+<rect x="300" y="32" width="200" height="48" rx="20" class="nb nb-external"/>
+<text x="400" y="53.5" text-anchor="middle" class="nn">메인 루프 도구 호출</text>
+<text x="400" y="67.5" text-anchor="middle" class="sl">tool.call</text>
+<polygon points="400,116 530,160 400,204 270,160" class="mask"/>
+<polygon points="400,116 530,160 400,204 270,160" class="nb nb-backend"/>
+<text x="400" y="159" text-anchor="middle" class="nn">게이트 대상인가?</text>
+<text x="400" y="173" text-anchor="middle" class="sl">!agentId · gatesMainLoop</text>
+<polygon points="400,246 530,290 400,334 270,290" class="mask"/>
+<polygon points="400,246 530,290 400,334 270,290" class="nb nb-backend"/>
+<text x="400" y="289" text-anchor="middle" class="nn">허용 목록 도구?</text>
+<text x="400" y="303" text-anchor="middle" class="sl">MAIN_LOOP_TOOLS</text>
+<polygon points="400,376 530,420 400,464 270,420" class="mask"/>
+<polygon points="400,376 530,420 400,464 270,420" class="nb nb-backend"/>
+<text x="400" y="419" text-anchor="middle" class="nn">읽기 전용 Bash?</text>
+<text x="400" y="433" text-anchor="middle" class="sl">readOnlyBashProblem</text>
+<polygon points="400,506 530,550 400,594 270,550" class="mask"/>
+<polygon points="400,506 530,550 400,594 270,550" class="nb nb-backend"/>
+<text x="400" y="549" text-anchor="middle" class="nn">보고서 .md 쓰기?</text>
+<text x="400" y="563" text-anchor="middle" class="sl">REPORT · SUMMARY …</text>
+<rect x="720" y="136" width="200" height="440" rx="6" class="mask"/>
+<rect x="720" y="136" width="200" height="440" rx="6" class="nb nb-backend"/>
+<text x="820" y="353.5" text-anchor="middle" class="nn">허용</text>
+<text x="820" y="367.5" text-anchor="middle" class="sl">tool runs as called</text>
+<rect x="300" y="652" width="200" height="56" rx="6" class="mask"/>
+<rect x="300" y="652" width="200" height="56" rx="6" class="nb nb-focal"/>
+<text x="400" y="671" text-anchor="middle" class="nn">거부</text>
+<text x="400" y="685" text-anchor="middle" class="sl">denyMessage</text>
+<text x="400" y="698" text-anchor="middle" class="sl">Edit · Agent · TodoWrite …</text>
+<text x="540" y="676" text-anchor="start" class="co">dag start · amend는 별도 훅이 먼저</text>
+<text x="540" y="696" text-anchor="start" class="co">planning 스킬 로드 여부를 확인합니다 (strict·auto).</text>
+<line x1="40" y1="752" x2="1000" y2="752" class="hair"/>
+<text x="40" y="772" class="lg-h">LEGEND</text>
+<rect x="112" y="763" width="14" height="10" rx="2" class="nb nb-external"/>
+<text x="132" y="772" class="lg">시작</text>
+<rect x="180" y="763" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="200" y="772" class="lg">판정 · 결과</text>
+<rect x="293" y="763" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="313" y="772" class="lg">거부</text>
+<line x1="361" y1="768" x2="381" y2="768" class="ln ln-accent" marker-end="url(#gate-arrow-accent)"/>
+<text x="389" y="772" class="lg">거부 경로</text>
+</g>
+</svg></div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>허용 목록과 읽기 전용 Bash</h3></div>
+      <ul>
+        <li><code>MAIN_LOOP_TOOLS</code>: dag, board, Read, LSP, WebFetch, WebSearch, ToolSearch, AskUserQuestion, Skill, 계획 모드, Task 조회·중지, MCP 리소스 읽기 등 <span class="src">policy.ts:42–73</span></li>
+        <li>설정 <code>main_allowed_tools</code>로 추가 가능</li>
+        <li>Bash는 <code>readOnlyBashProblem</code>이 문제를 찾지 못할 때만 허용. 치환, 리다이렉션, 환경 변수 대입, 허용되지 않은 명령은 거부하고 git·uv·sed는 하위 규칙 적용 <span class="src">policy.ts:329</span></li>
+        <li>Write는 REPORT·SUMMARY·FINDINGS·ANALYSIS <code>.md</code>만 허용 <span class="src">policy.ts:382</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>planning 게이트</h3></div>
+      <ul>
+        <li>메인 루프의 첫 <code>start</code>·<code>amend</code>는 <code>dag-workflow:planning</code> 스킬을 먼저 로드해야 함. 아니면 <code>planning_skill_required</code> <span class="src">register.ts:4058–4060</span></li>
+        <li>로드 표시는 <code>skill.prompt</code> 훅에서 켜고 컨텍스트 파일에 보존 <span class="src">:3662–3672</span></li>
+        <li><code>/dag run</code>은 사람이 직접 넣은 정의라 이 게이트를 거치지 않음 <span class="src">:2839</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>모든 호출에 붙는 보조 훅</h3></div>
+      <ul>
+        <li><b>kill-guard</b>: 소유 run이 돌 때 pkill·killall 등 이름 기반 종료 거부 <span class="src">:4178</span></li>
+        <li><b>semgrep</b>: Edit·Write 전에 편집을 메모리에 적용해 KISA 규칙 스캔, <code>block</code> 등급이면 거부 <span class="src">:4188</span></li>
+        <li><b>anti-slop</b>: Edit·Write 뒤 파일 전후 비교로 무의미 코드 경고 <span class="src">:4151</span></li>
+        <li><b>tool-repeat</b>: 같은 실패 검사 명령을 두 번째 실행하면 안내 한 번 덧붙임 <span class="src">:3875–3919</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 04 ─────────────────────────────────────────────── -->
+<section id="s-pipeline">
+  <header>
+    <span class="num">05 · DEFINITION</span>
+    <h2>정의에서 실행까지</h2>
+    <p class="lead">메인 모델의 <code>start</code>든 사람의 <code>/dag run</code>이든 정의는 같은 검사 순서를 거칩니다. 구조 검증과 단계 확장은 <code>parseDefinition</code> 한 함수 안에서 일어나고, 이미 같은 정의로 만든 run이 있으면 검증 의무 확인을 건너뛰고 그 run을 돌려줍니다. 린트는 경고만 남기고 막지 않습니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 460" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pipeline-title pipeline-desc">
+<title id="pipeline-title">정의에서 실행까지</title>
+<desc id="pipeline-desc">DAG 정의가 읽기, 구조 검증, 단계 확장, 재사용 확인, 검증 의무 확인을 거쳐 실행으로 만들어지고 실패하면 오류 코드로 거부되는 파이프라인입니다.</desc>
+<defs>
+<marker id="pipeline-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="pipeline-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="pipeline-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="pipeline-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<path d="M180 132 L212 132" class="ln ln-muted" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M352 132 L384 132" class="ln ln-muted" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M524 132 L556 132" class="ln ln-muted" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M696 132 L728 132" class="ln ln-muted" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M868 132 L900 132" class="ln ln-muted" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M626 96 V56 Q626 48 634 48 H962 Q970 48 970 56 V96" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M110 168 L110 296" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M282 168 L282 296" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M454 168 L454 296" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M626 168 L626 296" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M798 168 L798 296" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<path d="M970 168 L970 296" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<rect x="770" y="30" width="56" height="12" rx="2" class="mask"/>
+<text x="798" y="39" text-anchor="middle" class="al al-soft">SAME HASH</text>
+<rect x="118" y="226" width="64" height="12" rx="2" class="mask"/>
+<text x="150" y="235" text-anchor="middle" class="al al-soft">PARSE ERROR</text>
+<rect x="290" y="226" width="44" height="12" rx="2" class="mask"/>
+<text x="312" y="235" text-anchor="middle" class="al al-soft">INVALID</text>
+<rect x="462" y="226" width="64" height="12" rx="2" class="mask"/>
+<text x="494" y="235" text-anchor="middle" class="al al-soft">RESERVED ID</text>
+<rect x="634" y="226" width="68" height="12" rx="2" class="mask"/>
+<text x="668" y="235" text-anchor="middle" class="al al-soft">HASH CHANGED</text>
+<rect x="806" y="226" width="56" height="12" rx="2" class="mask"/>
+<text x="834" y="235" text-anchor="middle" class="al al-soft">NO VERIFY</text>
+<rect x="934" y="226" width="28" height="12" rx="2" class="mask"/>
+<text x="948" y="235" text-anchor="middle" class="al al-soft">WARN</text>
+<rect x="40" y="96" width="140" height="72" rx="6" class="mask"/>
+<rect x="40" y="96" width="140" height="72" rx="6" class="nb nb-backend"/>
+<rect x="48" y="102" width="20" height="12" rx="2" class="tag tag-backend"/>
+<text x="58" y="111" text-anchor="middle" class="tg tg-backend">IN</text>
+<text x="110" y="130" text-anchor="middle" class="nn">정의 읽기</text>
+<text x="110" y="144" text-anchor="middle" class="sl">inline · path</text>
+<text x="110" y="157" text-anchor="middle" class="sl">JSON · YAML</text>
+<rect x="212" y="96" width="140" height="72" rx="6" class="mask"/>
+<rect x="212" y="96" width="140" height="72" rx="6" class="nb nb-backend"/>
+<rect x="220" y="102" width="32" height="12" rx="2" class="tag tag-backend"/>
+<text x="236" y="111" text-anchor="middle" class="tg tg-backend">CHECK</text>
+<text x="282" y="130" text-anchor="middle" class="nn">구조 검증</text>
+<text x="282" y="144" text-anchor="middle" class="sl">parseDefinition</text>
+<text x="282" y="157" text-anchor="middle" class="sl">id · deps · cycle</text>
+<rect x="384" y="96" width="140" height="72" rx="6" class="mask"/>
+<rect x="384" y="96" width="140" height="72" rx="6" class="nb nb-backend"/>
+<rect x="392" y="102" width="32" height="12" rx="2" class="tag tag-backend"/>
+<text x="408" y="111" text-anchor="middle" class="tg tg-backend">STAGE</text>
+<text x="454" y="130" text-anchor="middle" class="nn">단계 확장</text>
+<text x="454" y="144" text-anchor="middle" class="sl">expandStages</text>
+<text x="454" y="157" text-anchor="middle" class="sl">review · commit</text>
+<rect x="556" y="96" width="140" height="72" rx="6" class="mask"/>
+<rect x="556" y="96" width="140" height="72" rx="6" class="nb nb-backend"/>
+<rect x="564" y="102" width="24" height="12" rx="2" class="tag tag-backend"/>
+<text x="576" y="111" text-anchor="middle" class="tg tg-backend">KEY</text>
+<text x="626" y="130" text-anchor="middle" class="nn">재사용 확인</text>
+<text x="626" y="144" text-anchor="middle" class="sl">findReusable</text>
+<text x="626" y="157" text-anchor="middle" class="sl">key + hash</text>
+<rect x="728" y="96" width="140" height="72" rx="6" class="mask"/>
+<rect x="728" y="96" width="140" height="72" rx="6" class="nb nb-backend"/>
+<rect x="736" y="102" width="28" height="12" rx="2" class="tag tag-backend"/>
+<text x="750" y="111" text-anchor="middle" class="tg tg-backend">GATE</text>
+<text x="798" y="130" text-anchor="middle" class="nn">검증 의무</text>
+<text x="798" y="144" text-anchor="middle" class="sl">verify per node</text>
+<text x="798" y="157" text-anchor="middle" class="sl">PATH programs</text>
+<rect x="900" y="96" width="140" height="72" rx="6" class="mask"/>
+<rect x="900" y="96" width="140" height="72" rx="6" class="nb nb-focal"/>
+<rect x="908" y="102" width="24" height="12" rx="2" class="tag tag-focal"/>
+<text x="920" y="111" text-anchor="middle" class="tg tg-focal">RUN</text>
+<text x="970" y="130" text-anchor="middle" class="nn">실행 생성</text>
+<text x="970" y="144" text-anchor="middle" class="sl">createRun</text>
+<text x="970" y="157" text-anchor="middle" class="sl">routeRun → tick</text>
+<rect x="40" y="296" width="828" height="56" rx="6" class="mask"/>
+<rect x="40" y="296" width="828" height="56" rx="6" class="nb nb-external"/>
+<text x="454" y="321.5" text-anchor="middle" class="nn">거부 · 오류 코드 반환</text>
+<text x="454" y="335.5" text-anchor="middle" class="sl">invalid_definition · invalid_node · cycle · definition_conflict · verification_required · invalid_verification</text>
+<rect x="900" y="296" width="140" height="56" rx="6" class="mask"/>
+<rect x="900" y="296" width="140" height="56" rx="6" class="nb nb-optional"/>
+<text x="970" y="321.5" text-anchor="middle" class="nn">린트 경고</text>
+<text x="970" y="335.5" text-anchor="middle" class="sl">advisory only</text>
+<line x1="40" y1="396" x2="1040" y2="396" class="hair"/>
+<text x="40" y="416" class="lg-h">LEGEND</text>
+<rect x="112" y="407" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="132" y="416" class="lg">검사 단계</text>
+<rect x="211" y="407" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="231" y="416" class="lg">실행 생성</text>
+<rect x="310" y="407" width="14" height="10" rx="2" class="nb nb-external"/>
+<text x="330" y="416" class="lg">거부</text>
+<rect x="378" y="407" width="14" height="10" rx="2" class="nb nb-optional"/>
+<text x="398" y="416" class="lg">경고만</text>
+<line x1="458" y1="412" x2="478" y2="412" class="ln ln-muted dash" marker-end="url(#pipeline-arrow-muted)"/>
+<text x="486" y="416" class="lg">우회 · 실패 경로</text>
+</g>
+</svg></div>
+  <div class="cards w2">
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>노드 필드 <span class="src">types.ts:55–76</span></h3></div>
+      <ul>
+        <li><code>id</code> <code>^[A-Za-z0-9_.-]{1,64}$</code>, <code>prompt</code> 필수, <code>dependsOn</code>은 중복 제거 <span class="src">definition.ts:7–29</span></li>
+        <li><code>category</code>가 모델을 정함: hard·reasoning·creative·crux·architect → <b>opus</b>, 나머지 → <b>sonnet</b> <span class="src">node-prompt.ts:28–49</span></li>
+        <li><code>agent</code>(기본 general-purpose, <code>fork</code> 금지), <code>load_skills</code>, <code>writes</code>, <code>external</code>, <code>slice</code></li>
+        <li><code>verify</code>: 1–16개 검사. 파일 검사(contains·absent·matches·lastLine·equals)와 명령 검사(argv, exit, stdout, stderr, 1–600 s, 기본 30 s) <span class="src">verification.ts:18–25</span></li>
+        <li>노드 지문 = prompt·category·agent·정렬된 dependsOn·verify·writes의 해시 <span class="src">definition.ts:101–110</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>검사 순서와 오류 코드</h3></div>
+      <ol>
+        <li>YAML은 일부러 제한한 파서로, 그 밖은 JSON으로 읽음 <span class="src">register.ts:2333</span></li>
+        <li>중복 id <code>duplicate_node</code>, 없는 의존 <code>unknown_dependency</code>, 순환 <code>cycle</code> <span class="src">definition.ts:73–84</span></li>
+        <li><code>expandStages</code>가 검토·보안·커밋 노드를 덧붙임 <span class="src">stages.ts:602</span></li>
+        <li><code>findReusable</code>: 해시가 다르면 <code>definition_conflict</code> <span class="src">run.ts:511</span></li>
+        <li>검사 없는 노드 <code>verification_required</code>, PATH에 없는 프로그램 <code>invalid_verification</code> <span class="src">verification.ts:205, register.ts:2210</span></li>
+        <li><code>createRun</code> → Jev 경로 지정 <code>routeRun</code> → 필요하면 승인 대기 → <code>tick</code></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- 05 ─────────────────────────────────────────────── -->
+<section id="s-seq">
+  <header>
+    <span class="num">06 · SEQUENCE</span>
+    <h2>한 번의 실행 시퀀스</h2>
+    <p class="lead"><code>start</code>는 실행을 기다리지 않고 바로 스냅샷을 돌려줍니다. 이후 웨이브는 워커의 <code>turn.complete</code> 훅 안에서 이어서 띄웁니다. 타이머 콜백에서 띄운 워커는 플러그인이 이벤트를 받지 못하기 때문에, 후속 웨이브를 훅 프레임 안에서 띄우는 것이 설계상 필수입니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 772" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="seq-title seq-desc">
+<title id="seq-title">한 번의 실행 시퀀스</title>
+<desc id="seq-desc">메인 모델의 dag start부터 런타임, 엔진, 워커, 저장소가 메시지를 주고받아 웨이브를 반복하고 정착 요약을 돌려주는 순서입니다.</desc>
+<defs>
+<marker id="seq-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="seq-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="seq-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="seq-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<line x1="120" y1="88" x2="120" y2="712" class="life"/>
+<line x1="340" y1="88" x2="340" y2="712" class="life"/>
+<line x1="560" y1="88" x2="560" y2="712" class="life"/>
+<line x1="760" y1="88" x2="760" y2="712" class="life"/>
+<line x1="960" y1="88" x2="960" y2="712" class="life"/>
+<rect x="288" y="356" width="696" height="240" rx="4" class="frame"/>
+<rect x="288" y="356" width="40" height="16" rx="2" class="frame-tab"/>
+<text x="308" y="368" text-anchor="middle" class="lg-h">LOOP</text>
+<text x="352" y="368" class="guard">[until the run settles]</text>
+<rect x="336" y="120" width="8" height="560" class="act"/>
+<rect x="556" y="160" width="8" height="48" class="act"/>
+<rect x="556" y="480" width="8" height="32" class="act"/>
+<rect x="756" y="272" width="8" height="128" class="act"/>
+<rect x="756" y="560" width="8" height="36" class="act"/>
+<path d="M124 128 L336 128" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 168 L556 168" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M556 204 L344 204" class="ln ln-muted dash" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 240 L956 240" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 280 L756 280" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M336 320 L124 320" class="ln ln-muted dash" marker-end="url(#seq-arrow-muted)"/>
+<path d="M756 400 L344 400" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 432 H384 Q392 432 392 440 V448 Q392 456 384 456 H344" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 496 L556 496" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 536 L956 536" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M344 576 L756 576" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<path d="M336 648 L124 648" class="ln ln-accent" marker-end="url(#seq-arrow-accent)"/>
+<rect x="202" y="110" width="56" height="12" rx="2" class="mask"/>
+<text x="230" y="119" text-anchor="middle" class="al al-soft">DAG START</text>
+<rect x="422" y="150" width="56" height="12" rx="2" class="mask"/>
+<text x="450" y="159" text-anchor="middle" class="al al-soft">CREATERUN</text>
+<rect x="422" y="186" width="56" height="12" rx="2" class="mask"/>
+<text x="450" y="195" text-anchor="middle" class="al al-soft">SCHEDULED</text>
+<rect x="628" y="222" width="44" height="12" rx="2" class="mask"/>
+<text x="650" y="231" text-anchor="middle" class="al al-soft">PERSIST</text>
+<rect x="628" y="262" width="64" height="12" rx="2" class="mask"/>
+<text x="660" y="271" text-anchor="middle" class="al al-soft">AGENT.SPAWN</text>
+<rect x="196" y="302" width="68" height="12" rx="2" class="mask"/>
+<text x="230" y="311" text-anchor="middle" class="al al-soft">RUN SNAPSHOT</text>
+<rect x="622" y="382" width="76" height="12" rx="2" class="mask"/>
+<text x="660" y="391" text-anchor="middle" class="al al-soft">TURN.COMPLETE</text>
+<rect x="400" y="438" width="80" height="12" rx="2" class="mask"/>
+<text x="440" y="447" text-anchor="middle" class="al al-soft">PARSE + VERIFY</text>
+<rect x="416" y="478" width="68" height="12" rx="2" class="mask"/>
+<text x="450" y="487" text-anchor="middle" class="al al-soft">MARKFINISHED</text>
+<rect x="630" y="518" width="40" height="12" rx="2" class="mask"/>
+<text x="650" y="527" text-anchor="middle" class="al al-soft">REPORT</text>
+<rect x="632" y="558" width="56" height="12" rx="2" class="mask"/>
+<text x="660" y="567" text-anchor="middle" class="al al-soft">NEXT WAVE</text>
+<rect x="190" y="630" width="80" height="12" rx="2" class="mask"/>
+<text x="230" y="639" text-anchor="middle" class="al al-accent">SETTLE SUMMARY</text>
+<rect x="40" y="32" width="160" height="56" rx="6" class="mask"/>
+<rect x="40" y="32" width="160" height="56" rx="6" class="nb nb-backend"/>
+<text x="120" y="57.5" text-anchor="middle" class="nn">메인 모델</text>
+<text x="120" y="71.5" text-anchor="middle" class="sl">dag tool caller</text>
+<rect x="260" y="32" width="160" height="56" rx="6" class="mask"/>
+<rect x="260" y="32" width="160" height="56" rx="6" class="nb nb-focal"/>
+<text x="340" y="57.5" text-anchor="middle" class="nn">런타임</text>
+<text x="340" y="71.5" text-anchor="middle" class="sl">register.ts</text>
+<rect x="480" y="32" width="160" height="56" rx="6" class="mask"/>
+<rect x="480" y="32" width="160" height="56" rx="6" class="nb nb-backend"/>
+<text x="560" y="57.5" text-anchor="middle" class="nn">엔진</text>
+<text x="560" y="71.5" text-anchor="middle" class="sl">run.ts · pure</text>
+<rect x="680" y="32" width="160" height="56" rx="6" class="mask"/>
+<rect x="680" y="32" width="160" height="56" rx="6" class="nb nb-backend"/>
+<text x="760" y="57.5" text-anchor="middle" class="nn">노드 워커</text>
+<text x="760" y="71.5" text-anchor="middle" class="sl">subagent</text>
+<rect x="880" y="32" width="160" height="56" rx="6" class="mask"/>
+<rect x="880" y="32" width="160" height="56" rx="6" class="nb nb-store"/>
+<text x="960" y="57.5" text-anchor="middle" class="nn">저장소</text>
+<text x="960" y="71.5" text-anchor="middle" class="sl">.claude/dag/runs</text>
+<line x1="40" y1="716" x2="1040" y2="716" class="hair"/>
+<text x="40" y="736" class="lg-h">LEGEND</text>
+<line x1="112" y1="732" x2="132" y2="732" class="ln ln-muted" marker-end="url(#seq-arrow-muted)"/>
+<text x="140" y="736" class="lg">호출</text>
+<line x1="188" y1="732" x2="208" y2="732" class="ln ln-muted dash" marker-end="url(#seq-arrow-muted)"/>
+<text x="216" y="736" class="lg">반환</text>
+<line x1="264" y1="732" x2="284" y2="732" class="ln ln-accent" marker-end="url(#seq-arrow-accent)"/>
+<text x="292" y="736" class="lg">정착 요약</text>
+<rect x="371" y="727" width="14" height="10" rx="2" class="nb nb-store"/>
+<text x="391" y="736" class="lg">저장소</text>
+<rect x="451" y="727" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="471" y="736" class="lg">런타임</text>
+</g>
+</svg></div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>tick 루프 <span class="src">register.ts:1175</span></h3></div>
+      <ol>
+        <li><code>advance</code>로 대기 노드를 예약하거나 건너뜀</li>
+        <li>첫 생성 전에 <code>persist</code></li>
+        <li><code>nextToStart</code>: 승인 대기면 0개, 아니면 최대 동시 8 − 실행 중</li>
+        <li>사용량이 <code>usage_hold_percent</code>(90) 이상이면 생성 보류</li>
+        <li>노드마다 <code>startNode</code> 후 다시 <code>persist</code></li>
+        <li>판정 FAIL로만 실패해 정착하면 리뷰 수정 라운드 시도 후 반복</li>
+        <li>처음 정착하면 trajectory 기록, 알림, <code>announce</code></li>
+      </ol>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>startNode와 노드 프롬프트 <span class="src">:1096</span></h3></div>
+      <ul>
+        <li>직접 의존 노드의 출력을 각 최대 4,000자씩 <code>&lt;upstream_results&gt;</code>(신뢰하지 않는 데이터)로 넣음</li>
+        <li>프롬프트 순서: 헤더 → 목표 → 범위 규칙 → 스킬 → writes → 검사 → 상위 결과 → <code>&lt;task&gt;</code> → 확인 답 → 출력 계약 <span class="src">node-prompt.ts:176–210</span></li>
+        <li>워커는 <code>## Output</code>과 마지막 줄 <code>DAG_NODE_STATUS: completed | failed: … | blocked: …</code>로 답함</li>
+        <li>호출: <code>$.agent.spawn({prompt, subagentType, model, cwd})</code> <span class="src">:1124–1132</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>정착 알림</h3></div>
+      <ul>
+        <li><code>announce</code>는 <code>$.prompt.submit</code>을 큐 안에서 기다리지 않음 <span class="src">:1337–1343</span></li>
+        <li>제출 성공 뒤 별도 직렬 작업이 <code>settledNotified</code> 저장</li>
+        <li>세션 시작 시 못 보낸 요약을 다시 보냄 <span class="src">:3480</span></li>
+        <li>비대화형 세션은 소유 run이 끝날 때까지 메인 턴을 최대 60분 유지 <span class="src">:125, :3006</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 06 ─────────────────────────────────────────────── -->
+<section id="s-state">
+  <header>
+    <span class="num">07 · STATE MACHINE</span>
+    <h2>노드 상태 기계</h2>
+    <p class="lead">노드 상태는 9개이고 run 상태는 노드 상태에서 계산합니다. 모든 전이는 run을 복제해 돌려주는 순수 함수이며, 대부분 끝에서 <code>advance</code>를 다시 불러 의존 관계를 정리합니다. <code>markFinished</code>는 이미 실행 중이 아닌 노드의 완료를 무시합니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 580" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="state-title state-desc">
+<title id="state-title">노드 상태 기계</title>
+<desc id="state-desc">노드가 대기, 예약, 실행 중을 거쳐 완료나 실패에 이르고 질문, 일시정지, 복구, 리뷰 수정으로 되돌아가는 상태 전이입니다.</desc>
+<defs>
+<marker id="state-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="state-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="state-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="state-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g transform="translate(40,0)">
+<path d="M62 260 L96 260" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M224 260 L320 260" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M192 236 V128 Q192 120 200 120 H320" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M448 260 L544 260" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M672 260 L800 260" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M640 284 V396 Q640 404 648 404 H800" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M592 236 L592 144" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M624 144 L624 236" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M576 284 V396 Q576 404 568 404 H448" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M320 404 H168 Q160 404 160 396 V284" class="ln ln-muted" marker-end="url(#state-arrow-muted)"/>
+<path d="M864 428 V460 Q864 468 856 468 H136 Q128 468 128 460 V284" class="ln ln-accent" marker-end="url(#state-arrow-accent)"/>
+<path d="M928 260 H960 Q968 260 968 252 V64 Q968 56 960 56 H168 Q160 56 160 64 V236" class="ln ln-muted dash" marker-end="url(#state-arrow-muted)"/>
+<rect x="244" y="242" width="56" height="12" rx="2" class="mask"/>
+<text x="272" y="251" text-anchor="middle" class="al al-soft">DEPS DONE</text>
+<rect x="230" y="102" width="60" height="12" rx="2" class="mask"/>
+<text x="260" y="111" text-anchor="middle" class="al al-soft">DEP FAILED</text>
+<rect x="472" y="242" width="48" height="12" rx="2" class="mask"/>
+<text x="496" y="251" text-anchor="middle" class="al al-soft">SLOT ≤ 8</text>
+<rect x="704" y="242" width="64" height="12" rx="2" class="mask"/>
+<text x="736" y="251" text-anchor="middle" class="al al-soft">PASS VERIFY</text>
+<rect x="706" y="386" width="28" height="12" rx="2" class="mask"/>
+<text x="720" y="395" text-anchor="middle" class="al al-soft">FAIL</text>
+<rect x="560" y="184" width="24" height="12" rx="2" class="mask"/>
+<text x="572" y="193" text-anchor="middle" class="al al-soft">ASK</text>
+<rect x="632" y="184" width="40" height="12" rx="2" class="mask"/>
+<text x="652" y="193" text-anchor="middle" class="al al-soft">ANSWER</text>
+<rect x="486" y="386" width="44" height="12" rx="2" class="mask"/>
+<text x="508" y="395" text-anchor="middle" class="al al-soft">HANDOFF</text>
+<rect x="220" y="386" width="40" height="12" rx="2" class="mask"/>
+<text x="240" y="395" text-anchor="middle" class="al al-soft">RESUME</text>
+<rect x="464" y="450" width="64" height="12" rx="2" class="mask"/>
+<text x="496" y="459" text-anchor="middle" class="al al-accent">RECOVER ≤ 2</text>
+<rect x="520" y="38" width="80" height="12" rx="2" class="mask"/>
+<text x="560" y="47" text-anchor="middle" class="al al-soft">REWORK · AMEND</text>
+<rect x="96" y="236" width="128" height="48" rx="8" class="mask"/>
+<rect x="96" y="236" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="160" y="257.5" text-anchor="middle" class="nn">대기</text>
+<text x="160" y="271.5" text-anchor="middle" class="sl">pending</text>
+<rect x="320" y="236" width="128" height="48" rx="8" class="mask"/>
+<rect x="320" y="236" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="384" y="257.5" text-anchor="middle" class="nn">예약</text>
+<text x="384" y="271.5" text-anchor="middle" class="sl">scheduled</text>
+<rect x="544" y="236" width="128" height="48" rx="8" class="mask"/>
+<rect x="544" y="236" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="608" y="257.5" text-anchor="middle" class="nn">실행 중</text>
+<text x="608" y="271.5" text-anchor="middle" class="sl">running</text>
+<rect x="800" y="236" width="128" height="48" rx="8" class="mask"/>
+<rect x="800" y="236" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="864" y="257.5" text-anchor="middle" class="nn">완료</text>
+<text x="864" y="271.5" text-anchor="middle" class="sl">completed</text>
+<rect x="800" y="380" width="128" height="48" rx="8" class="mask"/>
+<rect x="800" y="380" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="864" y="401.5" text-anchor="middle" class="nn">실패</text>
+<text x="864" y="415.5" text-anchor="middle" class="sl">failed</text>
+<rect x="320" y="380" width="128" height="48" rx="8" class="mask"/>
+<rect x="320" y="380" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="384" y="401.5" text-anchor="middle" class="nn">일시정지</text>
+<text x="384" y="415.5" text-anchor="middle" class="sl">paused</text>
+<rect x="544" y="96" width="128" height="48" rx="8" class="mask"/>
+<rect x="544" y="96" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="608" y="117.5" text-anchor="middle" class="nn">질문 대기</text>
+<text x="608" y="131.5" text-anchor="middle" class="sl">blocked</text>
+<rect x="320" y="96" width="128" height="48" rx="8" class="mask"/>
+<rect x="320" y="96" width="128" height="48" rx="8" class="nb nb-backend"/>
+<text x="384" y="117.5" text-anchor="middle" class="nn">건너뜀</text>
+<text x="384" y="131.5" text-anchor="middle" class="sl">skipped</text>
+<rect x="800" y="96" width="128" height="48" rx="8" class="mask"/>
+<rect x="800" y="96" width="128" height="48" rx="8" class="nb nb-optional"/>
+<text x="864" y="117.5" text-anchor="middle" class="nn">취소</text>
+<text x="864" y="131.5" text-anchor="middle" class="sl">* → cancelRun</text>
+<circle cx="56" cy="260" r="6" class="dot"/>
+<line x1="40" y1="524" x2="1000" y2="524" class="hair"/>
+<text x="40" y="544" class="lg-h">LEGEND</text>
+<circle cx="118" cy="540" r="4" class="dot"/>
+<text x="128" y="544" class="lg">시작</text>
+<rect x="176" y="535" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="196" y="544" class="lg">상태</text>
+<rect x="244" y="535" width="14" height="10" rx="2" class="nb nb-optional"/>
+<text x="264" y="544" class="lg">어느 활성 상태에서나</text>
+<line x1="410" y1="540" x2="430" y2="540" class="ln ln-accent" marker-end="url(#state-arrow-accent)"/>
+<text x="438" y="544" class="lg">자동 복구</text>
+<line x1="517" y1="540" x2="537" y2="540" class="ln ln-muted dash" marker-end="url(#state-arrow-muted)"/>
+<text x="545" y="544" class="lg">되돌림</text>
+</g>
+</svg></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>함수</th><th>가드</th><th>결과</th></tr></thead>
+      <tbody>
+        <tr><td><code>advance</code> <span class="src">run.ts:77</span></td><td>pending만 대상</td><td>의존 중 failed·cancelled·skipped가 있으면 skipped, 모두 completed면 scheduled. 변화가 없을 때까지 반복</td></tr>
+        <tr><td><code>markRunning</code> <span class="src">:111</span></td><td>—</td><td>running, attempt + 1, 이전 답·검증 기록 비움</td></tr>
+        <tr><td><code>markFinished</code> <span class="src">:147</span></td><td>running일 때만</td><td>completed·failed·cancelled. blocked 결과는 <code>markBlocked</code>로</td></tr>
+        <tr><td><code>markBlocked</code> <span class="src">:177</span></td><td>질문 가능 노드, 시도당 2회까지</td><td>blocked. 넘치면 <code>clarification:</code>으로 실패. 대화형에서 15분 무응답이면 실패</td></tr>
+        <tr><td><code>retryRun</code> <span class="src">:339</span></td><td>run이 실행 중이 아님</td><td>대상과 그 아래 skipped·cancelled를 pending으로</td></tr>
+        <tr><td><code>reworkRun</code> <span class="src">:400</span></td><td>생산 노드가 completed</td><td>생산 노드와 하위를 pending으로, 이전 에이전트 재개 정보 첨부</td></tr>
+        <tr><td><code>amendRun</code> <span class="src">:469</span></td><td>key 일치, 실행 중 노드는 교체 불가</td><td>지문이 바뀐 노드와 그 하위만 새로 pending</td></tr>
+        <tr><td><code>cancelRun</code> <span class="src">:264</span></td><td>—</td><td>활성·일시정지 노드를 cancelled로, 실행 중 에이전트는 TaskStop</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">deriveStatus (run.ts:62): paused 하나라도 → paused · 활성(pending·blocked·scheduled·running) → running · cancelReason → cancelled · 전부 completed → completed · failed 있음 → failed · 그 밖 → cancelled</p>
+</section>
+
+<!-- 07 ─────────────────────────────────────────────── -->
+<section id="s-recover">
+  <header>
+    <span class="num">08 · COMPLETION</span>
+    <h2>완료 처리와 자동 복구</h2>
+    <p class="lead"><code>onAgentDone</code>은 완료를 직렬 큐에서 점유한 뒤, 보고서 쓰기와 검사는 큐 밖에서 하고 다시 큐 안에서 <code>applyCompletion</code>으로 반영합니다. 검사 결과는 통과, 실패, 실행 안 됨(not_run), 판정 불가(unknown)로 나뉘며 모두 통과해야 완료입니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 880" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="recover-title recover-desc">
+<title id="recover-title">완료 처리와 자동 복구</title>
+<desc id="recover-desc">워커 응답을 해석하고 검사를 실행해 통과하면 다음 웨이브로 가고, 실패하면 가드와 Jev 분류를 거쳐 재시도하거나 실패로 남기는 흐름입니다.</desc>
+<defs>
+<marker id="recover-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="recover-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="recover-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="recover-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<path d="M400 72 L400 108" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M400 188 L400 232" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M400 288 L400 332" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M520 372 L680 372" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M400 412 L400 432" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M280 148 H128 Q120 148 120 156 V428 Q120 436 128 436 H396" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M400 440 L400 460" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M400 540 L400 588" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M280 500 H176 Q168 500 168 508 V748 Q168 756 176 756 H300" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<path d="M520 628 L680 628" class="ln ln-accent" marker-end="url(#recover-arrow-accent)"/>
+<path d="M400 668 L400 732" class="ln ln-muted" marker-end="url(#recover-arrow-muted)"/>
+<rect x="408" y="204" width="56" height="12" rx="2" class="mask"/>
+<text x="436" y="213" text-anchor="middle" class="al al-soft">COMPLETED</text>
+<rect x="588" y="354" width="24" height="12" rx="2" class="mask"/>
+<text x="600" y="363" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="408" y="416" width="20" height="12" rx="2" class="mask"/>
+<text x="418" y="425" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="180" y="130" width="40" height="12" rx="2" class="mask"/>
+<text x="200" y="139" text-anchor="middle" class="al al-soft">FAILED</text>
+<rect x="408" y="558" width="24" height="12" rx="2" class="mask"/>
+<text x="420" y="567" text-anchor="middle" class="al al-soft">YES</text>
+<rect x="214" y="482" width="20" height="12" rx="2" class="mask"/>
+<text x="224" y="491" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="588" y="610" width="24" height="12" rx="2" class="mask"/>
+<text x="600" y="619" text-anchor="middle" class="al al-accent">YES</text>
+<rect x="408" y="694" width="20" height="12" rx="2" class="mask"/>
+<text x="418" y="703" text-anchor="middle" class="al al-soft">NO</text>
+<rect x="280" y="24" width="240" height="48" rx="20" class="mask"/>
+<rect x="280" y="24" width="240" height="48" rx="20" class="nb nb-external"/>
+<text x="400" y="45.5" text-anchor="middle" class="nn">워커 응답 해석</text>
+<text x="400" y="59.5" text-anchor="middle" class="sl">parseOutcome · last line</text>
+<polygon points="400,108 520,148 400,188 280,148" class="mask"/>
+<polygon points="400,108 520,148 400,188 280,148" class="nb nb-backend"/>
+<text x="400" y="147" text-anchor="middle" class="nn">완료로 보고?</text>
+<text x="400" y="161" text-anchor="middle" class="sl">DAG_NODE_STATUS</text>
+<rect x="300" y="232" width="200" height="56" rx="6" class="mask"/>
+<rect x="300" y="232" width="200" height="56" rx="6" class="nb nb-backend"/>
+<text x="400" y="257.5" text-anchor="middle" class="nn">검사 실행</text>
+<text x="400" y="271.5" text-anchor="middle" class="sl">verifyNode · 1–16 checks</text>
+<polygon points="400,332 520,372 400,412 280,372" class="mask"/>
+<polygon points="400,332 520,372 400,412 280,372" class="nb nb-backend"/>
+<text x="400" y="371" text-anchor="middle" class="nn">모든 검사 통과?</text>
+<text x="400" y="385" text-anchor="middle" class="sl">all passed</text>
+<rect x="680" y="348" width="240" height="48" rx="6" class="mask"/>
+<rect x="680" y="348" width="240" height="48" rx="6" class="nb nb-backend"/>
+<text x="800" y="369.5" text-anchor="middle" class="nn">완료 → 다음 웨이브</text>
+<text x="800" y="383.5" text-anchor="middle" class="sl">markFinished · advance · tick</text>
+<polygon points="400,460 520,500 400,540 280,500" class="mask"/>
+<polygon points="400,460 520,500 400,540 280,500" class="nb nb-backend"/>
+<text x="400" y="499" text-anchor="middle" class="nn">복구 시도 가능?</text>
+<text x="400" y="513" text-anchor="middle" class="sl">guards · used &lt; 2</text>
+<polygon points="400,588 520,628 400,668 280,628" class="mask"/>
+<polygon points="400,588 520,628 400,668 280,628" class="nb nb-backend"/>
+<text x="400" y="627" text-anchor="middle" class="nn">Jev 분류 확신?</text>
+<text x="400" y="641" text-anchor="middle" class="sl">≥ 0.9 · transient/impl</text>
+<rect x="680" y="604" width="240" height="48" rx="6" class="mask"/>
+<rect x="680" y="604" width="240" height="48" rx="6" class="nb nb-focal"/>
+<text x="800" y="625.5" text-anchor="middle" class="nn">재시도 예약</text>
+<text x="800" y="639.5" text-anchor="middle" class="sl">pending · impl → opus</text>
+<rect x="300" y="732" width="200" height="48" rx="6" class="mask"/>
+<rect x="300" y="732" width="200" height="48" rx="6" class="nb nb-backend"/>
+<text x="400" y="753.5" text-anchor="middle" class="nn">실패 유지</text>
+<text x="400" y="767.5" text-anchor="middle" class="sl">descendants → skipped</text>
+<circle cx="400" cy="436" r="4" class="dot"/>
+<text x="560" y="476" text-anchor="start" class="co">가드: auto_recovery 꺼짐, 이미 2회 사용,</text>
+<text x="560" y="496" text-anchor="start" class="co">check-defect, 검사 없음, 리뷰 판정 FAIL이면</text>
+<text x="560" y="516" text-anchor="start" class="co">복구하지 않습니다.</text>
+<text x="560" y="700" text-anchor="start" class="co">리뷰 판정 FAIL은 재시도 대신 run 정착 뒤</text>
+<text x="560" y="720" text-anchor="start" class="co">리뷰 수정 라운드(1회)로 생산 노드를 다시 돌립니다.</text>
+<line x1="40" y1="820" x2="1040" y2="820" class="hair"/>
+<text x="40" y="840" class="lg-h">LEGEND</text>
+<rect x="112" y="831" width="14" height="10" rx="2" class="nb nb-external"/>
+<text x="132" y="840" class="lg">시작</text>
+<rect x="180" y="831" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="200" y="840" class="lg">단계 · 판정</text>
+<circle cx="299" cy="836" r="4" class="dot"/>
+<text x="309" y="840" class="lg">합류</text>
+<rect x="357" y="831" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="377" y="840" class="lg">재시도</text>
+<line x1="437" y1="836" x2="457" y2="836" class="ln ln-accent" marker-end="url(#recover-arrow-accent)"/>
+<text x="465" y="840" class="lg">복구 경로</text>
+</g>
+</svg></div>
+  <div class="cards w2">
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>자동 복구 <span class="src">register.ts:1928, recovery.ts:37</span></h3></div>
+      <ul>
+        <li>Jev가 실패를 transient·implementation·missing-input·clarification·permanent로 분류</li>
+        <li><code>jev_recovery_confidence</code>(0.9) 이상인 transient·implementation만 재시도</li>
+        <li>implementation, 이전 시도나 원래 경로가 opus였으면 opus로 올림</li>
+        <li>재시도 프롬프트에 <code>[Recovery n/2]</code>, 검증 증거, 이전 시도의 <code>Next:</code>·<code>Tried and failed:</code> 첨부</li>
+        <li>노드당 최대 2회 (<code>MAX_AUTO_RECOVERIES</code>)</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>리뷰 수정 라운드 <span class="src">rework.ts:126</span></h3></div>
+      <ol>
+        <li>run이 판정 FAIL로만 실패해 정착했고 라운드가 아직 0회</li>
+        <li>각 리뷰어에서 위로 올라가 완료된 생산 노드를 찾고, 지적에 나온 경로가 <code>writes</code>에 들어가는 노드를 고름</li>
+        <li>외부 부작용 위험(external, 이름에 delete·commit·email 등, writes 없음)이 있으면 건너뜀</li>
+        <li>생산 노드는 원래 에이전트에 <code>$.session.send</code>로 지적을 보내 재개, 실패하면 새 에이전트</li>
+        <li>다시 실행된 리뷰어는 보낸 지적과 수정 diff(최대 12,000자) 원장을 받음 <span class="src">ledger.ts</span></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- 08 ─────────────────────────────────────────────── -->
+<section id="s-stages">
+  <header>
+    <span class="num">09 · STAGES</span>
+    <h2>자동 생성 검토 단계</h2>
+    <p class="lead">정의에 <code>review</code>나 <code>commit</code>을 넣으면 <code>expandStages</code>가 사용자 노드 뒤에 검토 노드를 덧붙입니다. 보안 렌즈가 찾은 후보마다 반박 검증 노드는 실행 중에 생기며, 이때 판정 노드가 아직 대기 상태여야 합니다. 그림의 화살표는 결과가 흐르는 방향입니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 580" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="stages-title stages-desc">
+<title id="stages-title">자동 생성되는 검토 단계</title>
+<desc id="stages-desc">사용자 작업 노드 뒤에 사양 검토, 표준 검토, 보안 렌즈와 반박 검증, 보안 판정, 커밋 노드가 붙고 리뷰 FAIL이 생산 노드로 한 번 되돌아가는 의존 그래프입니다.</desc>
+<defs>
+<marker id="stages-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="stages-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="stages-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="stages-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g transform="translate(40,0)">
+<path d="M500 96 V120 Q500 128 492 128 H248 Q240 128 240 136 V160" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M540 96 L540 160" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M580 96 V120 Q580 128 588 128 H832 Q840 128 840 136 V160" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M840 216 L840 280" class="ln ln-muted dash" marker-end="url(#stages-arrow-muted)"/>
+<path d="M840 336 L840 400" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M920 188 H952 Q960 188 960 196 V420 Q960 428 952 428 H920" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M240 216 V420 Q240 428 248 428 H460" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M540 216 L540 400" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M760 428 L620 428" class="ln ln-muted" marker-end="url(#stages-arrow-muted)"/>
+<path d="M160 188 H112 Q104 188 104 180 V76 Q104 68 112 68 H460" class="ln ln-accent dash" marker-end="url(#stages-arrow-accent)"/>
+<rect x="848" y="242" width="44" height="12" rx="2" class="mask"/>
+<text x="870" y="251" text-anchor="middle" class="al al-soft">RUNTIME</text>
+<rect x="242" y="50" width="76" height="12" rx="2" class="mask"/>
+<text x="280" y="59" text-anchor="middle" class="al al-accent">REVIEW FIX ×1</text>
+<rect x="460" y="40" width="160" height="56" rx="6" class="mask"/>
+<rect x="460" y="40" width="160" height="56" rx="6" class="nb nb-input"/>
+<rect x="584" y="46" width="28" height="12" rx="2" class="badge"/>
+<text x="598" y="55" text-anchor="middle" class="tg tg-badge">0 in</text>
+<text x="540" y="65.5" text-anchor="middle" class="nn">작업 노드 ×N</text>
+<text x="540" y="79.5" text-anchor="middle" class="sl">your definition</text>
+<rect x="160" y="160" width="160" height="56" rx="6" class="mask"/>
+<rect x="160" y="160" width="160" height="56" rx="6" class="nb nb-backend"/>
+<rect x="284" y="166" width="28" height="12" rx="2" class="badge"/>
+<text x="298" y="175" text-anchor="middle" class="tg tg-badge">1 in</text>
+<text x="240" y="185.5" text-anchor="middle" class="nn">사양 검토</text>
+<text x="240" y="199.5" text-anchor="middle" class="sl">review-spec</text>
+<rect x="460" y="160" width="160" height="56" rx="6" class="mask"/>
+<rect x="460" y="160" width="160" height="56" rx="6" class="nb nb-backend"/>
+<rect x="584" y="166" width="28" height="12" rx="2" class="badge"/>
+<text x="598" y="175" text-anchor="middle" class="tg tg-badge">1 in</text>
+<text x="540" y="185.5" text-anchor="middle" class="nn">표준 검토</text>
+<text x="540" y="199.5" text-anchor="middle" class="sl">review-standards</text>
+<rect x="760" y="160" width="160" height="56" rx="6" class="mask"/>
+<rect x="760" y="160" width="160" height="56" rx="6" class="nb nb-backend"/>
+<rect x="884" y="166" width="28" height="12" rx="2" class="badge"/>
+<text x="898" y="175" text-anchor="middle" class="tg tg-badge">1 in</text>
+<text x="840" y="185.5" text-anchor="middle" class="nn">보안 렌즈 ×7</text>
+<text x="840" y="199.5" text-anchor="middle" class="sl">security-&lt;lens&gt;</text>
+<rect x="760" y="280" width="160" height="56" rx="6" class="mask"/>
+<rect x="760" y="280" width="160" height="56" rx="6" class="nb nb-optional"/>
+<rect x="884" y="286" width="28" height="12" rx="2" class="badge"/>
+<text x="898" y="295" text-anchor="middle" class="tg tg-badge">1 in</text>
+<text x="840" y="305.5" text-anchor="middle" class="nn">반박 검증 ×n</text>
+<text x="840" y="319.5" text-anchor="middle" class="sl">security-verify-*</text>
+<rect x="760" y="400" width="160" height="56" rx="6" class="mask"/>
+<rect x="760" y="400" width="160" height="56" rx="6" class="nb nb-backend"/>
+<rect x="884" y="406" width="28" height="12" rx="2" class="badge"/>
+<text x="898" y="415" text-anchor="middle" class="tg tg-badge">2 in</text>
+<text x="840" y="425.5" text-anchor="middle" class="nn">보안 판정</text>
+<text x="840" y="439.5" text-anchor="middle" class="sl">review-security</text>
+<rect x="460" y="400" width="160" height="56" rx="6" class="mask"/>
+<rect x="460" y="400" width="160" height="56" rx="6" class="nb nb-backend"/>
+<rect x="584" y="406" width="28" height="12" rx="2" class="badge"/>
+<text x="598" y="415" text-anchor="middle" class="tg tg-badge">3 in</text>
+<text x="540" y="425.5" text-anchor="middle" class="nn">커밋</text>
+<text x="540" y="439.5" text-anchor="middle" class="sl">commit · git checks</text>
+<line x1="40" y1="512" x2="1000" y2="512" class="hair"/>
+<text x="40" y="532" class="lg-h">LEGEND</text>
+<rect x="112" y="523" width="14" height="10" rx="2" class="nb nb-input"/>
+<text x="132" y="532" class="lg">사용자 노드</text>
+<rect x="223" y="523" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="243" y="532" class="lg">정의 시 생성</text>
+<rect x="341" y="523" width="14" height="10" rx="2" class="nb nb-optional"/>
+<text x="361" y="532" class="lg">실행 중 생성</text>
+<line x1="459" y1="528" x2="479" y2="528" class="ln ln-accent dash" marker-end="url(#stages-arrow-accent)"/>
+<text x="487" y="532" class="lg">리뷰 수정 라운드</text>
+</g>
+</svg></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>생성 노드</th><th>의존</th><th>통과 조건 (마지막 줄 · 포함)</th></tr></thead>
+      <tbody>
+        <tr><td><code>review-spec</code></td><td>모든 사용자 노드</td><td><code>Spec verdict: PASS</code> · <code>## Findings</code></td></tr>
+        <tr><td><code>review-standards</code></td><td>모든 사용자 노드</td><td><code>Standards verdict: PASS</code> · <code>## Rule breaches</code>, review-standards·anti-slop 스킬 로드</td></tr>
+        <tr><td><code>security-&lt;lens&gt;</code> ×7</td><td>모든 사용자 노드</td><td><code>Security lens: done</code> · <code>## Candidates</code> (injection, resources, access, crypto, errors, memory, integrity)</td></tr>
+        <tr><td><code>security-verify-&lt;lens&gt;-&lt;n&gt;</code></td><td>실행 중 생성, 렌즈당 후보 최대 8</td><td><code>Candidate verdict: CONFIRMED|REFUTED</code> · <code>## Evidence</code></td></tr>
+        <tr><td><code>review-security</code></td><td>렌즈 7개 + 검증 노드</td><td><code>Security verdict: PASS</code> · <code>## Breaches</code>, CONFIRMED 후보가 없어야 함</td></tr>
+        <tr><td><code>commit</code></td><td>리뷰어들, 리뷰가 없으면 사용자 노드</td><td>커밋 최대 5개 · 경로 50개, 제목·잔여 변경·<code>git status</code> 검사</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">stages.ts:425–471, 566–599 · 보안 가이드 kisa · owasp · agent (stages.ts:22–26)</p>
+</section>
+
+<!-- 09 ─────────────────────────────────────────────── -->
+<section id="s-pane">
+  <header>
+    <span class="num">10 · UI</span>
+    <h2>패널 렌더링</h2>
+    <p class="lead">패널은 순수 모델(<code>buildPane</code>)과 레이아웃 함수, 그리고 호스트 클라이언트 표면에서 실제 폭을 재는 <code>GraphClient</code>로 나뉩니다. 자동 보기는 그래프가 폭에 맞으면 그래프, 아니면 레인을 고르고 타임라인은 직접 고를 때만 씁니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 400" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pane-title pane-desc">
+<title id="pane-title">패널 렌더링 경로</title>
+<desc id="pane-desc">실행 상태가 패널 모델로 바뀌고 보기 선택에 따라 그래프, 레인, 타임라인 레이아웃을 거쳐 GraphClient가 그리며 키 입력이 런타임으로 돌아오는 경로입니다.</desc>
+<defs>
+<marker id="pane-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="pane-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="pane-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="pane-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<path d="M180 152 L212 152" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M372 152 L404 152" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M500 112 V76 Q500 68 508 68 H660" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M596 152 L660 152" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M500 192 V228 Q500 236 508 236 H660" class="ln ln-muted dash" marker-end="url(#pane-arrow-muted)"/>
+<path d="M820 68 H856 Q864 68 864 76 V120 Q864 128 872 128 H880" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M820 152 L880 152" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M820 236 H836 Q844 236 844 228 V184 Q844 176 852 176 H880" class="ln ln-muted" marker-end="url(#pane-arrow-muted)"/>
+<path d="M960 192 V292 Q960 300 952 300 H760" class="ln ln-muted dash" marker-end="url(#pane-arrow-muted)"/>
+<rect x="548" y="50" width="64" height="12" rx="2" class="mask"/>
+<text x="580" y="59" text-anchor="middle" class="al al-soft">AUTO · FITS</text>
+<rect x="614" y="134" width="28" height="12" rx="2" class="mask"/>
+<text x="628" y="143" text-anchor="middle" class="al al-soft">AUTO</text>
+<rect x="560" y="218" width="40" height="12" rx="2" class="mask"/>
+<text x="580" y="227" text-anchor="middle" class="al al-soft">CHOSEN</text>
+<rect x="830" y="282" width="60" height="12" rx="2" class="mask"/>
+<text x="860" y="291" text-anchor="middle" class="al al-soft">KEY · VIEW</text>
+<rect x="40" y="120" width="140" height="64" rx="6" class="mask"/>
+<rect x="40" y="120" width="140" height="64" rx="6" class="nb nb-store"/>
+<text x="110" y="149.5" text-anchor="middle" class="nn">실행 상태</text>
+<text x="110" y="163.5" text-anchor="middle" class="sl">runs · activity</text>
+<rect x="212" y="120" width="160" height="64" rx="6" class="mask"/>
+<rect x="212" y="120" width="160" height="64" rx="6" class="nb nb-backend"/>
+<text x="292" y="149.5" text-anchor="middle" class="nn">패널 모델</text>
+<text x="292" y="163.5" text-anchor="middle" class="sl">buildPane</text>
+<polygon points="500,112 596,152 500,192 404,152" class="mask"/>
+<polygon points="500,112 596,152 500,192 404,152" class="nb nb-backend"/>
+<text x="500" y="151" text-anchor="middle" class="nn">보기 선택</text>
+<text x="500" y="165" text-anchor="middle" class="sl">activeView</text>
+<rect x="660" y="40" width="160" height="56" rx="6" class="mask"/>
+<rect x="660" y="40" width="160" height="56" rx="6" class="nb nb-backend"/>
+<text x="740" y="65.5" text-anchor="middle" class="nn">그래프</text>
+<text x="740" y="79.5" text-anchor="middle" class="sl">graph-layout</text>
+<rect x="660" y="124" width="160" height="56" rx="6" class="mask"/>
+<rect x="660" y="124" width="160" height="56" rx="6" class="nb nb-backend"/>
+<text x="740" y="149.5" text-anchor="middle" class="nn">레인</text>
+<text x="740" y="163.5" text-anchor="middle" class="sl">lane-layout</text>
+<rect x="660" y="208" width="160" height="56" rx="6" class="mask"/>
+<rect x="660" y="208" width="160" height="56" rx="6" class="nb nb-optional"/>
+<text x="740" y="233.5" text-anchor="middle" class="nn">타임라인</text>
+<text x="740" y="247.5" text-anchor="middle" class="sl">timeline-layout</text>
+<rect x="880" y="112" width="160" height="80" rx="6" class="mask"/>
+<rect x="880" y="112" width="160" height="80" rx="6" class="nb nb-focal"/>
+<text x="960" y="143" text-anchor="middle" class="nn">GraphClient</text>
+<text x="960" y="157" text-anchor="middle" class="sl">surface.columns</text>
+<text x="960" y="170" text-anchor="middle" class="sl">ui/graph-client.ts</text>
+<rect x="560" y="276" width="200" height="48" rx="6" class="mask"/>
+<rect x="560" y="276" width="200" height="48" rx="6" class="nb nb-backend"/>
+<text x="660" y="297.5" text-anchor="middle" class="nn">키 · 보기 처리</text>
+<text x="660" y="311.5" text-anchor="middle" class="sl">handlePaneKey · setView</text>
+<line x1="40" y1="344" x2="1040" y2="344" class="hair"/>
+<text x="40" y="364" class="lg-h">LEGEND</text>
+<rect x="112" y="355" width="14" height="10" rx="2" class="nb nb-store"/>
+<text x="132" y="364" class="lg">상태</text>
+<rect x="180" y="355" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="200" y="364" class="lg">모델 · 레이아웃</text>
+<rect x="317" y="355" width="14" height="10" rx="2" class="nb nb-optional"/>
+<text x="337" y="364" class="lg">직접 고를 때만</text>
+<rect x="447" y="355" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="467" y="364" class="lg">클라이언트 표면</text>
+<line x1="582" y1="360" x2="602" y2="360" class="ln ln-muted dash" marker-end="url(#pane-arrow-muted)"/>
+<text x="610" y="364" class="lg">선택 · 입력</text>
+</g>
+</svg></div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>레이아웃 규칙</h3></div>
+      <ul>
+        <li>그래프 상자 폭 26–34칸, 최대 6행, 행 건너뛰는 간선은 왼쪽 거터 레인 최대 4개 <span class="src">graph-layout.ts:4–17</span></li>
+        <li>폭은 <code>surface.columns</code>로 잼. 훅 이벤트의 뷰포트는 패널 폭이 아님</li>
+        <li>키 입력은 <code>{ key, shift }</code>, 탭 버튼은 <code>{ view }</code>로 <code>ui.message</code>에 전달 <span class="src">register.ts:4224</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>프롬프트 위 밴드</h3></div>
+      <ul>
+        <li><code>AbovePrompt</code>에 최근 미정착 run 요약, 최대 3행 <span class="src">band.ts:23</span></li>
+        <li>숫자 0은 패널 열기, 1..n은 실패 &gt; 대기 &gt; 실행 순 긴급 노드</li>
+        <li>권한 대기는 상태줄·토스트·밴드로 표시해 패널 포커스 없이도 보임</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>활동과 정체 감지</h3></div>
+      <ul>
+        <li>1순위는 <code>turn.step</code> 스트림, 이벤트가 없으면 2초마다 트랜스크립트 폴링 <span class="src">register.ts:2987</span></li>
+        <li>정체 기준: 토큰 30 s, 대기 90 s, 거친 관측 300 s, 도구 실행은 제외 <span class="src">activity.ts:19–21</span></li>
+        <li>보드는 같은 인스펙터 클라이언트로 그림, 페이지당 60줄</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 10 ─────────────────────────────────────────────── -->
+<section id="s-store">
+  <header>
+    <span class="num">11 · STORAGE</span>
+    <h2>저장소 레이아웃</h2>
+    <p class="lead">모든 실행 기록은 소비 프로젝트의 <code>.claude/dag/</code> 아래에 있고, 첫 쓰기 때 <code>*</code>만 담은 <code>.gitignore</code>와 함께 만들어집니다. run 파일은 임시 파일에 쓴 뒤 <code>mv -f</code>로 원자적으로 교체합니다.</p>
+  </header>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>경로</th><th>내용</th><th>근거</th></tr></thead>
+      <tbody>
+        <tr><td><code>runs/&lt;runId&gt;.json</code></td><td>run 체크포인트. id 형식 <code>dag_&lt;base36 시각&gt;_&lt;난수&gt;</code></td><td class="src">register.ts:928, :2282</td></tr>
+        <tr><td><code>runs/&lt;runId&gt;/&lt;node&gt;.md</code></td><td>노드 보고서와 시도별 사본</td><td class="src">:2159–2181</td></tr>
+        <tr><td><code>runs/&lt;runId&gt;/&lt;node&gt;.verification.&lt;n&gt;.json</code></td><td>시도별 검사 증거</td><td class="src">:2148</td></tr>
+        <tr><td><code>runs/&lt;runId&gt;/review-fix-&lt;n&gt;/before/</code></td><td>리뷰 수정 전 파일 스냅샷</td><td class="src">:1831</td></tr>
+        <tr><td><code>runs/.&lt;runId&gt;.handoff-lock</code></td><td>세션 간 인계 잠금. 60초가 지나면 회수</td><td class="src">:2589</td></tr>
+        <tr><td><code>context/&lt;sessionId&gt;.json</code></td><td>요청, 고정 노트, planning 로드 표시. run 소유·노트가 있을 때만 씀</td><td class="src">:803, :840</td></tr>
+        <tr><td><code>decisions/&lt;sessionId&gt;.json</code></td><td>Jev 판단 기록, 최대 200건</td><td class="src">decisions.ts:1</td></tr>
+        <tr><td><code>boards/&lt;sessionId&gt;.json</code></td><td>보드 블록</td><td class="src">host/boards.ts:47</td></tr>
+        <tr><td><code>trajectories/</code></td><td>opt-in 실행 기록. 이벤트별 JSONL, 정착 시 <code>&lt;runId&gt;.jsonl</code>로 합침</td><td class="src">trajectory.ts:11</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">세션 시작 시 retentionPlan(기본 14일)이 다른 세션의 만료 run, 짝 없는 dag_* 폴더, 오래된 context·decision·board 파일을 지움 · register.ts:990, retention.ts:45</p>
+</section>
+
+<!-- 11 ─────────────────────────────────────────────── -->
+<section id="s-jev">
+  <header>
+    <span class="num">12 · JEV</span>
+    <h2>Jev 판단 지점</h2>
+    <p class="lead">Jev는 확신이 기준을 넘을 때만 결과를 적용하고, 넘지 못하거나 응답이 없으면 기존 흐름을 유지합니다. 같은 요청이 진행 중이면 한 번만 호출하고, 세션당 호출은 <code>jev_max_calls</code>(기본 100)로 제한합니다.</p>
+  </header>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>판단</th><th>위치</th><th>기준</th><th>기준 미달일 때</th></tr></thead>
+      <tbody>
+        <tr><td>턴 모드 (dag / direct)</td><td class="src">judgeTurn · register.ts:737</td><td class="num-cell">0.8</td><td>직접 턴</td></tr>
+        <tr><td>답변 표면 (chat / board)</td><td class="src">judgeTurn</td><td class="num-cell">0.8</td><td>채팅으로 답함</td></tr>
+        <tr><td>노드 경로 (category → 모델)</td><td class="src">routeRun · :629</td><td class="num-cell">0.8</td><td>정의의 category 유지. 최종 감사는 항상 standard 이상</td></tr>
+        <tr><td>워커 권한 요청</td><td class="src">tool.check · :3843</td><td class="num-cell">0.9</td><td>사람에게 물음. AskUserQuestion·ExitPlanMode는 항상 사람</td></tr>
+        <tr><td>실패 분류와 복구</td><td class="src">attemptRecovery · :1946</td><td class="num-cell">0.9</td><td>재시도 안 함, 보류로 기록</td></tr>
+        <tr><td>비대화형 노드 질문</td><td class="src">decideUnattended · :1572</td><td class="num-cell">0.9</td><td>노드 실패</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 12 ─────────────────────────────────────────────── -->
+<section id="s-const">
+  <header>
+    <span class="num">13 · REFERENCE</span>
+    <h2>핵심 상수와 소스 지도</h2>
+  </header>
+  <div class="cards w2">
+    <div class="table-wrap">
+      <table style="min-width:420px">
+        <thead><tr><th>상수</th><th>값</th><th>위치</th></tr></thead>
+        <tbody>
+          <tr><td>최대 동시 노드</td><td class="num-cell">8</td><td class="src">register.ts:227</td></tr>
+          <tr><td>상위 출력 전달 한도</td><td class="num-cell">4,000자</td><td class="src">node-prompt.ts:12</td></tr>
+          <tr><td>저장 답변 한도 (앞 40% + 뒤)</td><td class="num-cell">20,000자</td><td class="src">run.ts:7</td></tr>
+          <tr><td>시도당 질문</td><td class="num-cell">2회</td><td class="src">node-prompt.ts:26</td></tr>
+          <tr><td>질문 응답 대기</td><td class="num-cell">15분</td><td class="src">register.ts:134</td></tr>
+          <tr><td>자동 복구</td><td class="num-cell">노드당 2회</td><td class="src">recovery.ts:9</td></tr>
+          <tr><td>리뷰 수정 라운드</td><td class="num-cell">run당 1회</td><td class="src">rework.ts:13</td></tr>
+          <tr><td>백그라운드 작업 대기</td><td class="num-cell">30분</td><td class="src">register.ts:131</td></tr>
+          <tr><td>비대화형 메인 턴 유지</td><td class="num-cell">60분</td><td class="src">register.ts:125</td></tr>
+          <tr><td>Jev HTTP / 모델 타임아웃</td><td class="num-cell">5 s / 10 s</td><td class="src">register.ts:142–146</td></tr>
+          <tr><td>세션 활성 판정 · 인계 잠금</td><td class="num-cell">60 s</td><td class="src">sessions.ts:37</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>소스 지도</h3></div>
+      <ul>
+        <li><code>hooks/register.ts</code> — 훅, 도구, 명령, 생성, 저장, 알림</li>
+        <li><code>engine/definition.ts</code>, <code>yaml.ts</code>, <code>stages.ts</code> — 정의 해석과 단계 확장</li>
+        <li><code>engine/run.ts</code>, <code>graph.ts</code> — 상태 전이와 그래프 탐색</li>
+        <li><code>engine/node-prompt.ts</code>, <code>format.ts</code> — 노드 프롬프트·출력 계약, 정착 메시지</li>
+        <li><code>engine/verification.ts</code>, <code>check-eval.ts</code> — 검사 정의와 판정</li>
+        <li><code>engine/recovery.ts</code>, <code>rework.ts</code>, <code>ledger.ts</code> — 복구와 리뷰 수정</li>
+        <li><code>engine/policy.ts</code>, <code>kill-guard.ts</code>, <code>semgrep.ts</code>, <code>slop-scan.ts</code> — 강제와 스캔</li>
+        <li><code>engine/jev.ts</code>, <code>decisions.ts</code>, <code>sessions.ts</code>, <code>learning.ts</code> — 판단, 기록, 인계, 학습</li>
+        <li><code>hooks/ui/*</code> — 패널 모델, 레이아웃, 클라이언트, 밴드, 인스펙터</li>
+        <li><code>engine/isolation.ts</code>, <code>worktree.ts</code> — 노드 격리 설계. 아직 런타임에 연결되지 않음, 모든 노드는 프로젝트 루트에서 실행</li>
+      </ul>
+    </div>
+  </div>
+  
+</section>
+
+<div class="part" id="part-3">
+  <span class="part-no">PART III</span>
+  <h2 class="part-title">Claude Code Mod로서의 dag-workflow</h2>
+  <p>Mod는 Claude Code 엔진 안에서 실행되는 훅 모듈을 가진 플러그인입니다. 엔진이 이벤트를 낼 때마다 Mod의 핸들러가 끼어들어 관찰하거나, 값을 바꾸거나, 흐름을 막습니다. dag-workflow의 모든 동작은 이 접점 위에 있습니다.</p>
+</div>
+
+<!-- 14 ─────────────────────────────────────────────── -->
+<section id="s-mod">
+  <header>
+    <span class="num">14 · MOD</span>
+    <h2>Claude Code Mod란</h2>
+    <p class="lead">엔진은 <code>hooks.json</code>에 적힌 모듈을 불러와 <code>register(on, options)</code>를 한 번 부릅니다. 모듈은 <code>on(event, filter?, handler)</code>로 핸들러를 등록하고, 핸들러는 <code>($, e, next)</code>를 받습니다. <code>$</code>는 호스트 API, <code>e</code>는 이벤트 값, <code>next</code>는 아래 훅과 엔진 코어로 넘기는 함수입니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 520" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="layers-title layers-desc">
+<title id="layers-title">dag-workflow Mod 계층</title>
+<desc id="layers-desc">Claude Code 엔진과 Mod API 위에 Mod 런타임, 순수 엔진, UI 모델, 스킬 같은 콘텐츠가 차례로 쌓인 계층 구조입니다.</desc>
+<defs>
+<marker id="layers-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="layers-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="layers-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="layers-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<path d="M96 424 L96 64" class="ln ln-muted" marker-end="url(#layers-arrow-muted)"/>
+<rect x="160" y="48" width="840" height="64" class="ly-alt"/>
+<text x="184" y="84" class="lyt">L5</text>
+<text x="260" y="85" class="lyn">콘텐츠</text>
+<text x="976" y="84" text-anchor="end" class="sl sl10">skills/ ×8 · statusline/ · flows/</text>
+<rect x="160" y="112" width="840" height="64" class="ly"/>
+<text x="184" y="148" class="lyt">L4</text>
+<text x="260" y="149" class="lyn">UI 모델 · 레이아웃</text>
+<text x="976" y="148" text-anchor="end" class="sl sl10">hooks/ui · 19 files · pure</text>
+<rect x="160" y="176" width="840" height="64" class="ly-alt"/>
+<text x="184" y="212" class="lyt">L3</text>
+<text x="260" y="213" class="lyn">순수 엔진</text>
+<text x="976" y="212" text-anchor="end" class="sl sl10">hooks/engine · 41 files · no $</text>
+<rect x="160" y="240" width="840" height="64" class="nb nb-focal"/>
+<text x="184" y="276" class="lyt lyt-accent">L2</text>
+<text x="260" y="277" class="lyn">Mod 런타임</text>
+<text x="976" y="276" text-anchor="end" class="sl sl10">hooks/register.ts · hooks/host/*</text>
+<rect x="160" y="304" width="840" height="64" class="ly-alt"/>
+<text x="184" y="340" class="lyt">L1</text>
+<text x="260" y="341" class="lyn">Mod API</text>
+<text x="976" y="340" text-anchor="end" class="sl sl10">on() · $ (21 namespaces) · UI surfaces</text>
+<rect x="160" y="368" width="840" height="64" class="ly"/>
+<text x="184" y="404" class="lyt">L0</text>
+<text x="260" y="405" class="lyn">Claude Code 엔진</text>
+<text x="976" y="404" text-anchor="end" class="sl sl10">events · tools · agents · permissions</text>
+<rect x="160" y="48" width="840" height="384" class="ly-frame"/>
+<text x="96" y="40" text-anchor="middle" class="lg-h">CONTENT</text>
+<text x="96" y="452" text-anchor="middle" class="lg-h">HOST</text>
+<text x="160" y="476" text-anchor="start" class="co">L3·L4는 $를 모르는 순수 코드라 claude plugin test에서 그대로 검증되고, 호스트 호출은 L2에만 있습니다.</text>
+</g>
+</svg></div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>매니페스트와 설정</h3></div>
+      <ul>
+        <li><code>.claude-plugin/plugin.json</code>의 <code>userConfig</code>가 설정 화면의 항목이 됨</li>
+        <li>값은 <code>options</code>로 들어오고 <code>register</code> 첫머리에서 범위를 검사해 읽음 <span class="src">register.ts:3363–3411</span></li>
+        <li>예: <code>enforcement</code>(기본 auto), <code>max_concurrent</code>(8), <code>jev_confidence</code>(0.9), <code>trajectory_log</code>(끔)</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>모듈이 도는 환경</h3></div>
+      <ul>
+        <li>DOM도 Node도 없는 별도 환경. ES 모듈만, <code>require</code>와 동적 <code>import()</code> 없음</li>
+        <li>파일·프로세스·네트워크는 모두 <code>$.fs</code>, <code>$.process</code>, <code>$.http</code>로만</li>
+        <li>렌더 요소(<code>Box</code>, <code>Text</code>, <code>Button</code>)는 전역이 아니라 <code>$.ui.resolve(e)</code>로 받음</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>상태와 재로드</h3></div>
+      <ul>
+        <li><code>/reload-plugins</code>는 모듈 변수를 모두 초기화함</li>
+        <li>그래서 planning 로드 표시는 <code>$.state</code>(PluginState)에 두어 재로드 뒤에도 유지 <span class="src">register.ts:194, 210</span></li>
+        <li>패널 선호와 세션 레지스트리는 프로젝트 범위 키로 <code>$.store</code>에, run은 파일로 저장</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 15 ─────────────────────────────────────────────── -->
+<section id="s-hooks">
+  <header>
+    <span class="num">15 · EVENTS</span>
+    <h2>한 턴의 훅 지점</h2>
+    <p class="lead">dag-workflow는 이벤트 22종에 훅 30개를 겁니다. 한 턴 안에서는 아래 순서로 지나가며, 흐름을 실제로 바꾸는 곳은 도구 호출(게이트·스캔)과 턴 완료(다음 웨이브 생성)입니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 400" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="hooks-title hooks-desc">
+<title id="hooks-title">한 턴의 훅 지점</title>
+<desc id="hooks-desc">프롬프트 제출부터 턴 완료까지 Claude Code가 부르는 이벤트와 각 지점에서 dag-workflow가 하는 일을 순서대로 보여 줍니다.</desc>
+<defs>
+<marker id="hooks-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="hooks-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="hooks-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="hooks-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<path d="M164 136 L196 136" class="ln ln-muted" marker-end="url(#hooks-arrow-muted)"/>
+<path d="M308 136 L340 136" class="ln ln-muted" marker-end="url(#hooks-arrow-muted)"/>
+<path d="M452 136 L484 136" class="ln ln-muted" marker-end="url(#hooks-arrow-muted)"/>
+<path d="M596 136 L628 136" class="ln ln-muted" marker-end="url(#hooks-arrow-muted)"/>
+<path d="M740 136 L772 136" class="ln ln-muted" marker-end="url(#hooks-arrow-muted)"/>
+<path d="M884 136 L916 136" class="ln ln-muted" marker-end="url(#hooks-arrow-muted)"/>
+<path d="M828 176 V224 Q828 232 820 232 H548 Q540 232 540 224 V176" class="ln ln-muted dash" marker-end="url(#hooks-arrow-muted)"/>
+<rect x="656" y="238" width="56" height="12" rx="2" class="mask"/>
+<text x="684" y="247" text-anchor="middle" class="al al-soft">NEXT STEP</text>
+<rect x="52" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="52" y="96" width="112" height="80" rx="6" class="nb nb-backend"/>
+<text x="108" y="127" text-anchor="middle" class="nn">프롬프트 제출</text>
+<text x="108" y="141" text-anchor="middle" class="sl">prompt.submit</text>
+<text x="108" y="154" text-anchor="middle" class="sl">mode · hint</text>
+<rect x="196" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="196" y="96" width="112" height="80" rx="6" class="nb nb-backend"/>
+<text x="252" y="127" text-anchor="middle" class="nn">컨텍스트</text>
+<text x="252" y="141" text-anchor="middle" class="sl">prompt.context</text>
+<text x="252" y="154" text-anchor="middle" class="sl">restore block</text>
+<rect x="340" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="340" y="96" width="112" height="80" rx="6" class="nb nb-backend"/>
+<text x="396" y="127" text-anchor="middle" class="nn">턴 시작</text>
+<text x="396" y="141" text-anchor="middle" class="sl">turn.start</text>
+<text x="396" y="154" text-anchor="middle" class="sl">main busy</text>
+<rect x="484" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="484" y="96" width="112" height="80" rx="6" class="nb nb-backend"/>
+<text x="540" y="127" text-anchor="middle" class="nn">모델 스트림</text>
+<text x="540" y="141" text-anchor="middle" class="sl">turn.step</text>
+<text x="540" y="154" text-anchor="middle" class="sl">activity</text>
+<rect x="628" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="628" y="96" width="112" height="80" rx="6" class="nb nb-focal"/>
+<text x="684" y="127" text-anchor="middle" class="nn">도구 호출</text>
+<text x="684" y="141" text-anchor="middle" class="sl">tool.call</text>
+<text x="684" y="154" text-anchor="middle" class="sl">gate · scans</text>
+<rect x="772" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="772" y="96" width="112" height="80" rx="6" class="nb nb-backend"/>
+<text x="828" y="127" text-anchor="middle" class="nn">권한 판정</text>
+<text x="828" y="141" text-anchor="middle" class="sl">tool.check</text>
+<text x="828" y="154" text-anchor="middle" class="sl">Jev permission</text>
+<rect x="916" y="96" width="112" height="80" rx="6" class="mask"/>
+<rect x="916" y="96" width="112" height="80" rx="6" class="nb nb-focal"/>
+<text x="972" y="127" text-anchor="middle" class="nn">턴 완료</text>
+<text x="972" y="141" text-anchor="middle" class="sl">turn.complete</text>
+<text x="972" y="154" text-anchor="middle" class="sl">onAgentDone</text>
+<text x="52" y="300" text-anchor="start" class="co">노드 워커(서브에이전트)의 턴도 같은 훅을 지나며, 훅은 e.agentId로 메인 턴과 구분합니다.</text>
+<line x1="40" y1="336" x2="1040" y2="336" class="hair"/>
+<text x="40" y="356" class="lg-h">LEGEND</text>
+<rect x="112" y="347" width="14" height="10" rx="2" class="nb nb-backend"/>
+<text x="132" y="356" class="lg">관찰 · 기록</text>
+<rect x="225" y="347" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="245" y="356" class="lg">흐름을 바꾸는 지점</text>
+<line x1="379" y1="352" x2="399" y2="352" class="ln ln-muted dash" marker-end="url(#hooks-arrow-muted)"/>
+<text x="407" y="356" class="lg">도구 결과 뒤 다음 스텝</text>
+</g>
+</svg></div>
+  <div class="table-wrap">
+    <table class="grp">
+      <thead><tr><th>분류</th><th>이벤트</th><th>dag-workflow가 하는 일</th></tr></thead>
+      <tbody>
+        <tr><td>세션</td><td><code>session.start</code></td><td>도구·명령 등록, run·보드 불러오기, 보존 기간 정리, 끊긴 run 복구, 1 s·10 s 타이머 시작 <span class="src">:3413</span></td></tr>
+        <tr><td></td><td><code>classic.SessionStart</code>, <code>session.end</code></td><td>/clear 시 planning 표시 해제, 세션 id 변경 시 run 재소유, 종료 시 학습 저장 <span class="src">:3521, :3581</span></td></tr>
+        <tr><td></td><td><code>session.measure</code>, <code>session.receive</code>, <code>session.compact</code></td><td>사용량 한도 갱신, 다른 세션의 인계 메시지 수신, 압축 뒤 컨텍스트 복원 문구 <span class="src">:3575–3639</span></td></tr>
+        <tr><td>프롬프트</td><td><code>prompt.submit</code></td><td>요청 기록, 턴 모드·표면 판정, 라우팅 안내·학습 스킬 목록 주입 <span class="src">:3696</span></td></tr>
+        <tr><td></td><td><code>prompt.context</code>, <code>prompt.edit</code>, <code>prompt.autocomplete</code></td><td>복원 블록 교체, 보드 인용 칩 표시, <code>/dag</code> 인자 자동 완성</td></tr>
+        <tr><td>턴</td><td><code>turn.start</code>, <code>turn.step</code></td><td>메인 턴 진행 표시, 워커 스트림에서 활동·정체 추적 <span class="src">:4101, :3643</span></td></tr>
+        <tr><td></td><td><code>turn.complete</code></td><td>워커면 <code>onAgentDone</code>, 메인이면 미뤄 둔 <code>/dag run</code> 시작과 학습 <span class="src">:3994</span></td></tr>
+        <tr><td>도구</td><td><code>tool.call</code> ×7</td><td>메인 루프 게이트, planning 게이트, 보드, kill-guard, semgrep, anti-slop, 핸드백 압축</td></tr>
+        <tr><td></td><td><code>tool.check</code>, <code>classic.PermissionRequest</code></td><td>워커 권한 요청을 Jev로 판정, 권한 대기 표시 <span class="src">:3793, :3783</span></td></tr>
+        <tr><td>에이전트·스킬</td><td><code>agent.spawn</code>, <code>skill.prompt</code></td><td>학습 에이전트 생성 제한, planning 로드 감지, 보관된 학습 스킬 차단</td></tr>
+        <tr><td>명령</td><td><code>command.run</code> ×2</td><td><code>/dag</code>, <code>/dag-ping</code> 실행 <span class="src">:4072–4076</span></td></tr>
+        <tr><td>UI</td><td><code>ui.render</code> ×2, <code>ui.message</code>, <code>ui.close</code></td><td>Pane과 AbovePrompt 그리기, Client가 보낸 키·폭 처리, 패널 닫힘 기억</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 16 ─────────────────────────────────────────────── -->
+<section id="s-chain">
+  <header>
+    <span class="num">16 · MIDDLEWARE</span>
+    <h2>훅 미들웨어 체인</h2>
+    <p class="lead">훅은 미들웨어처럼 쌓입니다. 핸들러가 <code>next(e)</code>를 부르면 아래 훅과 엔진 코어가 실행되고, 부르지 않고 값을 돌려주면 그 자리에서 흐름이 끝납니다. 메인 루프 게이트는 이 성질로 도구 실행 전에 거부를 돌려줍니다.</p>
+  </header>
+  <div class="diagram-container"><svg viewBox="0 0 1080 624" style="min-width:1080px" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="chain-title chain-desc">
+<title id="chain-title">훅 미들웨어 체인</title>
+<desc id="chain-desc">Claude Code 엔진이 tool.call 이벤트를 dag-workflow 훅에 넘기면 훅이 거부를 돌려주거나 next(e)로 아래 훅과 도구 실행에 넘기는 순서입니다.</desc>
+<defs>
+<marker id="chain-arrow-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-muted"/></marker>
+<marker id="chain-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-accent"/></marker>
+<marker id="chain-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" class="mk-link"/></marker>
+<marker id="chain-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" class="mk-open"/></marker>
+</defs>
+<rect width="100%" height="100%" class="bg"/>
+<g>
+<line x1="140" y1="88" x2="140" y2="552" class="life"/>
+<line x1="400" y1="88" x2="400" y2="552" class="life"/>
+<line x1="660" y1="88" x2="660" y2="552" class="life"/>
+<line x1="920" y1="88" x2="920" y2="552" class="life"/>
+<rect x="112" y="208" width="836" height="312" rx="4" class="frame"/>
+<rect x="112" y="208" width="40" height="16" rx="2" class="frame-tab"/>
+<text x="132" y="220" text-anchor="middle" class="lg-h">ALT</text>
+<text x="164" y="220" class="guard">[main-loop gate denies]</text>
+<line x1="120" y1="284" x2="940" y2="284" class="divider"/>
+<text x="124" y="300" class="guard">[else]</text>
+<rect x="396" y="120" width="8" height="380" class="act"/>
+<rect x="656" y="324" width="8" height="136" class="act"/>
+<rect x="916" y="364" width="8" height="56" class="act"/>
+<path d="M144 128 L396 128" class="ln ln-muted" marker-end="url(#chain-arrow-muted)"/>
+<path d="M404 160 H444 Q452 160 452 168 V176 Q452 184 444 184 H404" class="ln ln-muted" marker-end="url(#chain-arrow-muted)"/>
+<path d="M396 256 L144 256" class="ln ln-accent dash" marker-end="url(#chain-arrow-accent)"/>
+<path d="M404 336 L656 336" class="ln ln-muted" marker-end="url(#chain-arrow-muted)"/>
+<path d="M664 376 L916 376" class="ln ln-muted" marker-end="url(#chain-arrow-muted)"/>
+<path d="M916 416 L664 416" class="ln ln-muted dash" marker-end="url(#chain-arrow-muted)"/>
+<path d="M656 456 L404 456" class="ln ln-muted dash" marker-end="url(#chain-arrow-muted)"/>
+<path d="M396 496 L144 496" class="ln ln-muted dash" marker-end="url(#chain-arrow-muted)"/>
+<rect x="232" y="110" width="76" height="12" rx="2" class="mask"/>
+<text x="270" y="119" text-anchor="middle" class="al al-soft">TOOL.CALL (E)</text>
+<rect x="460" y="166" width="44" height="12" rx="2" class="mask"/>
+<text x="482" y="175" text-anchor="middle" class="al al-soft">VERDICT</text>
+<rect x="246" y="238" width="48" height="12" rx="2" class="mask"/>
+<text x="270" y="247" text-anchor="middle" class="al al-accent">{ DENY }</text>
+<rect x="506" y="318" width="48" height="12" rx="2" class="mask"/>
+<text x="530" y="327" text-anchor="middle" class="al al-soft">NEXT (E)</text>
+<rect x="766" y="358" width="48" height="12" rx="2" class="mask"/>
+<text x="790" y="367" text-anchor="middle" class="al al-soft">NEXT (E)</text>
+<rect x="770" y="398" width="40" height="12" rx="2" class="mask"/>
+<text x="790" y="407" text-anchor="middle" class="al al-soft">RESULT</text>
+<rect x="510" y="438" width="40" height="12" rx="2" class="mask"/>
+<text x="530" y="447" text-anchor="middle" class="al al-soft">RESULT</text>
+<rect x="250" y="478" width="40" height="12" rx="2" class="mask"/>
+<text x="270" y="487" text-anchor="middle" class="al al-soft">RESULT</text>
+<rect x="40" y="32" width="200" height="56" rx="6" class="mask"/>
+<rect x="40" y="32" width="200" height="56" rx="6" class="nb nb-external"/>
+<text x="140" y="57.5" text-anchor="middle" class="nn">Claude Code 엔진</text>
+<text x="140" y="71.5" text-anchor="middle" class="sl">event bus</text>
+<rect x="300" y="32" width="200" height="56" rx="6" class="mask"/>
+<rect x="300" y="32" width="200" height="56" rx="6" class="nb nb-focal"/>
+<text x="400" y="57.5" text-anchor="middle" class="nn">dag-workflow 훅</text>
+<text x="400" y="71.5" text-anchor="middle" class="sl">on(&#x27;tool.call&#x27;)</text>
+<rect x="560" y="32" width="200" height="56" rx="6" class="mask"/>
+<rect x="560" y="32" width="200" height="56" rx="6" class="nb nb-backend"/>
+<text x="660" y="57.5" text-anchor="middle" class="nn">아래 훅</text>
+<text x="660" y="71.5" text-anchor="middle" class="sl">other plugins · settings</text>
+<rect x="820" y="32" width="200" height="56" rx="6" class="mask"/>
+<rect x="820" y="32" width="200" height="56" rx="6" class="nb nb-store"/>
+<text x="920" y="57.5" text-anchor="middle" class="nn">코어</text>
+<text x="920" y="71.5" text-anchor="middle" class="sl">permission · tool run</text>
+<line x1="40" y1="568" x2="1040" y2="568" class="hair"/>
+<text x="40" y="588" class="lg-h">LEGEND</text>
+<line x1="112" y1="584" x2="132" y2="584" class="ln ln-muted" marker-end="url(#chain-arrow-muted)"/>
+<text x="140" y="588" class="lg">호출</text>
+<line x1="188" y1="584" x2="208" y2="584" class="ln ln-muted dash" marker-end="url(#chain-arrow-muted)"/>
+<text x="216" y="588" class="lg">반환</text>
+<line x1="264" y1="584" x2="284" y2="584" class="ln ln-accent dash" marker-end="url(#chain-arrow-accent)"/>
+<text x="292" y="588" class="lg">거부 응답</text>
+<rect x="371" y="579" width="14" height="10" rx="2" class="nb nb-focal"/>
+<text x="391" y="588" class="lg">이 Mod의 훅</text>
+<rect x="487" y="579" width="14" height="10" rx="2" class="nb nb-external"/>
+<text x="507" y="588" class="lg">호스트</text>
+</g>
+</svg></div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>이벤트별 응답 형태</h3></div>
+      <ul>
+        <li><code>tool.call</code>: <code>{ deny }</code>로 거부, <code>{ result }</code>로 대신 답함</li>
+        <li><code>tool.check</code>: <code>{ decision }</code>으로 권한 판정</li>
+        <li><code>prompt.submit</code>: <code>{ drop }</code>으로 프롬프트 차단, 또는 텍스트 수정</li>
+        <li><code>agent.spawn</code>: <code>{ model }</code> 지정 또는 <code>{ deny }</code></li>
+        <li><code>command.run</code>, <code>skill.prompt</code>: <code>{ text }</code>로 출력·본문 교체</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>필터로 범위 좁히기</h3></div>
+      <ul>
+        <li><code>on('tool.call', { tool: 'Bash' }, …)</code> kill-guard <span class="src">:4178</span></li>
+        <li><code>on('tool.call', { tool: /^(?:Edit|Write)$/ }, …)</code> semgrep·anti-slop <span class="src">:4151, :4188</span></li>
+        <li><code>on('ui.render', { component: 'Pane' }, …)</code>, <code>{ component: 'AbovePrompt' }</code> <span class="src">:4112, :4119</span></li>
+        <li>워커와 메인은 <code>e.agentId</code> 유무로 구분</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>실패하면 닫기</h3></div>
+      <ul>
+        <li>엔진은 예외가 난 훅을 건너뛰고 도구를 실행함</li>
+        <li>그래서 게이트 훅에 <code>.catch</code>를 달아, 실패 시 순수 검사만으로 다시 판정하고 막힘 쪽으로 닫음 <span class="src">:3978–3991</span></li>
+        <li>정착 알림처럼 기다리면 안 되는 일은 <code>serialized</code> 큐 밖으로 뺌</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 17 ─────────────────────────────────────────────── -->
+<section id="s-api">
+  <header>
+    <span class="num">17 · HOST API</span>
+    <h2>호스트 API와 UI 표면</h2>
+    <p class="lead"><code>$</code>에는 네임스페이스 21개가 있고, dag-workflow는 그중 15개를 씁니다. 호출은 <code>register.ts</code>와 <code>hooks/host/</code>에만 있으며, Claude Code v2.1.299부터 <code>$</code>를 다른 파일의 함수에 넘길 수 있게 되어 하위 시스템을 <code>createX(host)</code>로 나눴습니다.</p>
+  </header>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>네임스페이스</th><th>쓰는 함수</th><th>dag-workflow에서의 용도</th></tr></thead>
+      <tbody>
+        <tr><td><code>$.agent</code></td><td>spawn, list</td><td>노드 워커와 백그라운드 학습 에이전트 생성, 살아 있는 에이전트 확인</td></tr>
+        <tr><td><code>$.session</code></td><td>send, messages, usage, id, cwd, root</td><td>리뷰 수정 때 원래 에이전트 재개, 트랜스크립트 폴링, 사용량 한도, 인계 메시지</td></tr>
+        <tr><td><code>$.prompt</code></td><td>submit, fill</td><td>정착 요약을 메인 대화에 제출, 보드 인용 칩</td></tr>
+        <tr><td><code>$.tool</code>, <code>$.command</code></td><td>register, call, check</td><td><code>dag</code>·<code>board</code> 도구와 <code>/dag</code> 명령 등록, 취소 시 <code>TaskStop</code> 호출 <span class="src">:1363</span></td></tr>
+        <tr><td><code>$.fs</code>, <code>$.process</code></td><td>read, write, exists, list, stat · run</td><td><code>.claude/dag</code> 저장, 검사 명령·git·semgrep 실행, <code>mkdir</code> 잠금</td></tr>
+        <tr><td><code>$.store</code>, <code>$.state</code></td><td>get, set, keys, delete</td><td>세션 레지스트리와 패널 선호(프로젝트 범위 키), planning 표시</td></tr>
+        <tr><td><code>$.clock</code></td><td>now, after, every</td><td>시각, 1 s 화면 갱신, 10 s 세션 동기화, Jev 타임아웃. 워커 생성에는 쓰지 않음</td></tr>
+        <tr><td><code>$.http</code>, <code>$.model</code>, <code>$.env</code></td><td>fetch · complete · get</td><td>Jev HTTP 호출, Sonnet 폴백, <code>TYPESAFE_API_KEY</code></td></tr>
+        <tr><td><code>$.ui</code></td><td>log, invalidate, toast, notify, status, open, view, notice, resolve</td><td>디버그 로그, 패널 다시 그리기, 토스트·네이티브 알림·상태줄, 렌더 요소 받기</td></tr>
+        <tr><td><code>$.plugin</code></td><td>root</td><td>semgrep 규칙과 secure-coding 참고 문서 경로 <span class="src">host/scan.ts:67</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="cards w3">
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>Pane: DAG 패널</h3></div>
+      <ul>
+        <li><code>ui.render</code> Pane 훅이 <code>drawPane</code>으로 트리를 돌려줌</li>
+        <li>그래프는 <code>Client</code> 요소로 <code>ui/graph-client.ts</code> 모듈을 표면에서 실행 <span class="src">:3311</span></li>
+        <li>인스펙터·보드는 <code>ui/inspector-client.ts</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>Client 모듈과 ui.message</h3></div>
+      <ul>
+        <li>Client는 표면 쪽에서 돌며 <code>surface.columns</code>로 실제 폭을 잼</li>
+        <li>키·탭 입력을 <code>surface.post</code>로 보내면 이 Mod의 <code>ui.message</code> 훅만 받음</li>
+        <li>훅이 런타임 상태를 바꾸고 <code>$.ui.invalidate</code>로 다시 그림</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot muted"></span><h3>패널 밖 표시</h3></div>
+      <ul>
+        <li><code>AbovePrompt</code>: 프롬프트 위 진행 밴드와 숫자 단축키</li>
+        <li><code>$.ui.status</code>, <code>toast</code>, <code>notify</code>: 권한 대기·실패·정착 알림</li>
+        <li>패널을 못 그리는 표면에는 텍스트 노드 메시지를 제출</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 18 ─────────────────────────────────────────────── -->
+<section id="s-verify">
+  <header>
+    <span class="num">18 · CONTRACTS</span>
+    <h2>Mod 검증과 지켜야 할 규칙</h2>
+    <p class="lead">Mod는 세션 안에서 실행되기 전에 정적으로 검사하고, 엔진과 같은 환경에서 테스트합니다. 아래 규칙들은 실제 실행에서 문제가 확인된 뒤 코드와 문서에 고정된 것입니다.</p>
+  </header>
+  <div class="cards w2">
+    <div class="card">
+      <div class="card-header"><span class="card-dot ink"></span><h3>검증 명령</h3></div>
+      <ul>
+        <li><code>claude plugin validate .</code>: 매니페스트와 훅 모듈 소스를 엔진처럼 읽어, 무엇을 훅하고 부르는지와 거부될 항목을 보고</li>
+        <li><code>claude plugin test</code>: <code>claude-code/testing</code>으로 엔진과 같은 환경(파일·네트워크·프로세스 없음)에서 실행. <code>mock.clock</code>과 <code>clock.settle()</code>로 비동기 진행</li>
+        <li><code>bunx -p typescript@5 tsc -p . --noEmit</code>: 생성된 호스트 타입으로 타입 검사</li>
+        <li><code>claude --plugin-dir .</code>: 실제 세션에 불러오기</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-dot coral"></span><h3>지켜야 할 규칙</h3></div>
+      <ul>
+        <li>워커 생성을 <code>$.clock.after</code>·<code>every</code> 콜백으로 옮기지 않음. 그렇게 띄운 워커의 이벤트를 이 Mod가 받지 못함</li>
+        <li><code>wait</code> 도구는 막지 않고 스냅샷을 돌려줌. 정착은 알림으로 전달</li>
+        <li><code>serialized</code> 안에서 다시 <code>serialized</code>를 부르지 않음. 큐가 교착됨</li>
+        <li>폭은 대화 폭이 아니라 <code>surface.columns</code>, 길이는 문자 수가 아니라 표시 폭으로 잼</li>
+        <li><code>/dag run</code> 워커에는 <code>SubagentHandback</code>이나 <code>session.receive</code>가 오지 않는다고 가정</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<p class="note">이 문서는 커밋 dfff36f의 소스와 Claude Code 2.1.312가 생성한 Mod 타입 선언을 읽어 작성했습니다. 줄 번호는 그 시점 기준이라 이후 변경으로 어긋날 수 있습니다.</p>
+
+<footer class="colophon">
+  <span>dag-workflow · 시스템 구성 · 세부 아키텍처 · Claude Mod</span>
+  <span>claude-workflow-mods@dfff36f · 2026-10-29</span>
+</footer>
+
+</div>
+</body>
+</html>
