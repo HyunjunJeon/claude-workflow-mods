@@ -146,6 +146,11 @@ If one exists:
 4. Watch it pass.
 5. Re-run the Phase 1 loop against the original, un-minimised scenario.
 
+A fix can turn a check green by making the program trivially satisfy it, so state what the fix changes.
+Name the set of inputs whose observable result the fix changes, as narrowly as possible.
+Name the regression test or verify check that pins the boundary of that set: one case just inside, one just outside where feasible.
+A fix whose changed set is wider than the bug's trigger is a red flag. Report it in `## Output`, do not hide it.
+
 ## Phase 6: Cleanup
 
 Required before you report done:
@@ -154,6 +159,7 @@ Required before you report done:
 - [ ] The regression test passes, or `## Output` records the absence of a seam.
 - [ ] Search for the tag and confirm no `[DEBUG-` instrumentation remains.
 - [ ] Delete only your disposable prototypes within the declared write scope. Keep the reproduction script and all files it, the regression tests or any `verify` needs. This includes indirectly loaded fixtures and helpers. They must run after your report and during final audit. Untracked files can still be required.
+- [ ] `## Output` states the Behavior change.
 - [ ] State the correct hypothesis in `## Output` so future debuggers can use the finding.
 
 ## Output template
@@ -166,6 +172,12 @@ Observed failure: <exit code and the symptom line, redacted>
 Hypotheses:
 1. If <X> is the cause, changing <Y> will make the bug disappear or worse. (ranked, falsifiable; 3 to 5 in total)
 Root cause: <file and line, or "not yet determined">
+```
+
+A fix node adds this field next to the diagnosis fields:
+
+```
+Behavior change: <inputs whose result changed, as narrow as possible> - pinned by <test name or verify check>
 ```
 
 A node that ends failed, diagnosis or fix, finishes its `## Output` with these two fields, in this order and last.
