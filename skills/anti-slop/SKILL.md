@@ -1,7 +1,6 @@
 ---
 name: anti-slop
-description: Discipline that keeps meaningless code out of a change in any language - dead weight whose removal changes no behavior, types and casts that throw away what the code knows, module-patching tests, and Clean Code readability calls - loaded through load_skills by nodes that write code and by review-standards, with a scan after every Edit and Write for the shapes a pattern can find.
-when_to_use: A DAG node writes or changes code and lists this skill in load_skills, a review-standards node checks a change against it, or an anti-slop scan note appears after an Edit or Write.
+description: Discipline that keeps meaningless code out of a change in any language - dead weight whose removal changes no behavior, types and casts that throw away what the code knows, module-patching tests, and Clean Code readability calls - loaded through load_skills by nodes that write code and by review-standards, with a scan after every Edit and Write for the shapes a pattern can find. A DAG node writes or changes code and lists this skill in load_skills, a review-standards node checks a change against it, or an anti-slop scan note appears after an Edit or Write.
 ---
 
 # anti-slop

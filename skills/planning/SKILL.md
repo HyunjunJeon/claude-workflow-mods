@@ -1,7 +1,6 @@
 ---
 name: planning
-description: Mandatory planning doctrine for dag-workflow. Load it BEFORE the first mcp__dag-workflow__dag start or amend in a session - the plugin refuses that start until this skill is loaded. Covers turning a task into a dependency-ordered DAG of subagent nodes, how results flow along dependsOn, the node prompt contract, the verification wave, and recovering runs.
-when_to_use: Any task in a session where dag-workflow enforces DAG orchestration - planning a DAG, writing node prompts, reading a run-settled summary, retrying or amending a run, chaining a follow-up run.
+description: Mandatory planning doctrine for dag-workflow. Load it BEFORE the first mcp__dag-workflow__dag start or amend in a session - the plugin refuses that start until this skill is loaded. Covers turning a task into a dependency-ordered DAG of subagent nodes, how results flow along dependsOn, the node prompt contract, the verification wave, and recovering runs. Any task in a session where dag-workflow enforces DAG orchestration - planning a DAG, writing node prompts, reading a run-settled summary, retrying or amending a run, chaining a follow-up run.
 argument-hint: "[task]"
 ---
 

@@ -1,7 +1,6 @@
 ---
 name: debugging
-description: Discipline for DAG nodes that diagnose or fix a failing behavior, loaded through load_skills.
-when_to_use: A node prompt asks the worker to find the cause of a bug, a failing test or a performance regression, or to fix one using a reproduction command produced by an earlier node.
+description: Discipline for DAG nodes that diagnose or fix a failing behavior, loaded through load_skills. A node prompt asks the worker to find the cause of a bug, a failing test or a performance regression, or to fix one using a reproduction command produced by an earlier node.
 ---
 
 # debugging
